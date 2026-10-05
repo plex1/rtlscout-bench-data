@@ -1,0 +1,27 @@
+{
+ "schema": 1,
+ "price_unit": "USD per million tokens",
+ "models": {
+  "openrouter:z-ai/glm-5.2": {
+   "name": "GLM 5.2",
+   "vendor": "Z.ai",
+   "open_weights": true,
+   "price_per_mtok": {"input": 0.81, "output": 2.55},
+   "price_note": "via OpenRouter, no prompt caching"
+  },
+  "openrouter:moonshotai/kimi-k3": {
+   "name": "Kimi K3",
+   "vendor": "Moonshot AI",
+   "open_weights": true,
+   "price_per_mtok": {"input": 3.0, "output": 15.0},
+   "price_note": "via OpenRouter, no prompt caching"
+  },
+  "openrouter:nvidia/nemotron-3-ultra-550b-a55b": {
+   "name": "Nemotron 3 Ultra",
+   "vendor": "NVIDIA",
+   "open_weights": true,
+   "price_per_mtok": {"input": 0.5, "output": 2.2},
+   "price_note": "via OpenRouter, no prompt caching"
+  }
+ }
+}

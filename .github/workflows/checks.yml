@@ -1,0 +1,45 @@
+name: data checks
+
+# Validates every push and pull request with the tooling of rtlscout-bench:
+# record schema, the open-weights policy, artefacts present for every run, no API-key patterns in any
+# stored text, leaderboard files consistent, and the site builds from the selection.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the data (this repository)
+        uses: actions/checkout@v4
+        with:
+          path: data
+
+      - name: Check out the tooling
+        uses: actions/checkout@v4
+        with:
+          repository: plex1/rtlscout-bench
+          path: bench
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the tooling (file tools only; rtlscout itself is not needed)
+        run: |
+          pip install pyyaml
+          pip install --no-deps ./bench
+
+      - name: Data checks (schema, open-weights policy, artefacts, key patterns)
+        working-directory: bench
+        run: python -m rtlscout_bench.record --check --data ../data
+
+      - name: Leaderboard as it would be published
+        working-directory: bench
+        run: python -m rtlscout_bench.tables --data ../data
+
+      - name: The site builds from this data
+        working-directory: bench
+        run: python -m rtlscout_bench.site --quiet --data ../data --out ../_site

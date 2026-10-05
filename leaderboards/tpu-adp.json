@@ -1,0 +1,33 @@
+{
+ "schema": 1,
+ "task": "tpu-adp",
+ "title": "logikbench tpu",
+ "description": "Weight-stationary 8x8 systolic matrix-multiply tile (N=8, 8-bit signed operands, 32-bit accumulators) from zeroasiccorp/logikbench (commit e8c7c43, MIT). The unmodified upstream RTL is the starting point.",
+ "metric_label": "area × delay",
+ "unit": "µm²·ps",
+ "flow": "Yosys synthesis and OpenROAD static timing analysis on ASAP7. The gate-level netlist is re-simulated against the testbench on every evaluation; the testbench compares the design cycle by cycle with a trace recorded from the upstream RTL.",
+ "baselines": {
+  "verilog": {
+   "cost": 4624408.88,
+   "area": 4604.07,
+   "delay": 1004.42,
+   "suite": "pre-v1",
+   "rtlscout": "pre-0.2.0 (unpackaged, 2026-07)",
+   "source": "the shipped starting point, evaluated once with the task's metric and flags by the 2026-07 campaigns that produced the seed runs"
+  }
+ },
+ "runs": {},
+ "exclude": [],
+ "notes": {
+  "glm-5.2": "Provider-default reasoning effort.",
+  "kimi-k3": "Provider-default reasoning effort (seed runs launched 2026-07-25).",
+  "kimi-k3-high": "RTLSCOUT_REASONING_EFFORT=high (seed runs launched 2026-07-26). The old run directories do not record the effort; the split by launch date comes from the campaign notes.",
+  "nemotron-3-ultra": "550B-A55B. One seed run ended above the starting point: it edited the design before measuring the unmodified one."
+ },
+ "footnotes": [
+  "Rows marked \"measured before suite-v1\" are seed data: runs from July 2026, made with an unpackaged rtlscout that predates version 0.2.0. Each is replaced when reruns of that entry under suite-v1 are published.",
+  "The seed runs were checked against the original 830-cycle vector file. suite-v1 ships a 6,782-cycle file whose first 830 cycles are identical.",
+  "The seed runs were launched six at a time (three Verilog and three Spire HDL runs of one model per campaign), so their wall-clock times include that load.",
+  "All entries were called through OpenRouter without prompt caching, so every step pays for its full input."
+ ]
+}
