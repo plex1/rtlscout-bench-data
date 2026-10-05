@@ -1,0 +1,21 @@
+## Summary
+
+**Final result:** `design_v2.v` — PASS (830/830 checks), area_delay_product = **3.148e6** (area 3842, delay 819 ps), 32% better than the reference (4.624e6).
+
+### What worked best
+Two optimizations accounted for essentially the entire win:
+
+1. **19-bit internal partial sums** (biggest lever): 8 signed 8×8 products (each ∈ [−16256, 16384]) sum to at most |131072|, fitting signed 19 bits. Narrowing the accumulator/psum path from 32 → 19 bits, with free sign-extension to 32 bits at the output, shrank the PE adders, psum registers, and de-skew registers, and shortened the critical carry chain. Both area (4604→3842) and delay (1004→819 ps) improved.
+2. **Removing datapath resets**: reset is only asserted before streaming, and stale garbage drains out of the array before the first cycle `c_valid` can be high (15-cycle latency + 8-cycle weight load), so the resets were unobservable. Kept reset only on the `c_valid` pipeline.
+
+### What didn't work
+- **`target_delay` sweeps** (100 ps – 3 ns): no effect; Yosys was already at its best-effort point.
+- **PE expression rewrites** (split `*`/`+`, `$signed` variants, operand-order swaps): mapped identically or slightly worse (v4a/v5 = 3.175e6 vs v2's 3.148e6 — synthesis noise dominates style).
+- **Removing the `en` gate on `a_east`**: broke correctness — activations must stall with partial sums during `w_valid`.
+- **Hand-built Baugh-Wooley CSA fused multiply-add with psum injected as a 9th row**: burned ~20 steps fighting constant-placement/hex-literal bugs and never passed; abandoned. A key trap: a 20-bit CSA row sum hides mod-2^19 vs mod-2^20 differences, which made constant errors nearly invisible from the low-order error pattern.
+
+### Lessons learned
+- Range analysis on accumulators is the cheapest high-value optimization for MAC arrays — check the true bound before accepting the "standard" width.
+- Verify reset-removal reasoning against *when outputs are actually checked*; here it was safe everywhere except the valid pipeline.
+- Don't hand-derive Baugh-Wooley matrices without a standalone unit testbench; debugging through the 830-cycle golden vectors is slow and the error signatures are misleading. A tiny directed PE test (all-zeros, all-ones, extremes) would have caught the constant bugs in one iteration.
+- Multiple near-identical RTL variants are worth evaluating once: the Yosys/ABC flow has ±1% noise, so keep the best-seed manifestation of equivalent logic (`design_v2.v` here; `design_v4b.v` was its identical twin).

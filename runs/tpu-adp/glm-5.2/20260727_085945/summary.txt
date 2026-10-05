@@ -1,0 +1,31 @@
+## Summary
+
+### Final Design: `design.sv` (cost: 2,755,208, down from baseline 4,624,409 — 40% reduction)
+
+### What Worked Best (ranked by impact)
+
+1. **Narrow accumulator (19-bit vs 32-bit)**: Reduced the carry-propagate adder width from 32 to 19 bits (2×DW + clog2(N) = 16+3). This alone cut cost from 4.62M to 3.24M — the single biggest win.
+
+2. **Carry-save accumulator (CSA)**: Replaced the carry-propagate adder in each PE with a 3:2 compressor (XOR for sum, majority for carry), deferring the final carry-propagate add to the column output. This removed the ripple-carry chain from the PE critical path, reducing delay from ~820ps to ~668ps. Cost dropped from 3.24M to 2.90M.
+
+3. **Explicit full-adder CSA structure**: Coding the CSA as a generate loop of explicit full-adders (one per bit) instead of boolean expressions (`<< 1`) gave Yosys a slightly better mapping. Cost improved from 2.90M to 2.85M.
+
+4. **Removing resets from non-critical registers**: Removed synchronous reset from PE registers (w, a_east, psum_sum, psum_carry), skew shift registers, and de-skew registers. Only the valid pipeline keeps reset. This reduced area and improved clk-to-Q delay. Cost dropped from 2.85M to 2.76M.
+
+### What Didn't Work / Caused Regressions
+
+- **Split multiplier (two 4×8 multiplies)**: The extra adder to combine partial products increased delay (760ps vs 668ps). Worse overall.
+- **Unsigned multiply + manual sign correction**: Complex correction logic was error-prone and didn't synthesize better than `$signed() * $signed()`.
+- **18-bit accumulator**: Too narrow — overflowed on test vectors (max result 131072 = 2^17 needs 19-bit signed).
+- **Truncated CSA carry (18-bit carry)**: Lost the top carry bit, causing functional errors.
+- **Combinational activation flow (no a_east register)**: Broke systolic timing — activations reached all PEs simultaneously.
+- **Async reset on valid pipeline**: Slightly worse than sync reset (Yosys mapped to larger cells).
+- **Target_delay sweeps**: Default 500ps was consistently best; higher values increased delay without proportional area savings.
+
+### Lessons Learned
+
+- **Accumulator width optimization is the highest-ROI change** for systolic MAC arrays — the spec says 32-bit output but internal accumulation only needs 2×DW + clog2(N) bits.
+- **Carry-save accumulation is very effective** when the multiply-accumulate chain is the critical path and the carry-propagate adder dominates delay. The area overhead (2× registers) is more than offset by the delay reduction.
+- **Removing unnecessary resets** is a free area/delay win when the protocol guarantees enough flush cycles before valid data arrives.
+- **Yosys is insensitive to multiplier coding style** — `$signed() * $signed()` produces the same netlist as explicit sign-extension approaches. The multiplier structure itself is the lever, not the Verilog description.
+- A next step would be pipelining the multiplier (registering the product) with pipeline compensation, or exploring Booth-encoded partial products fed directly into the CSA tree.

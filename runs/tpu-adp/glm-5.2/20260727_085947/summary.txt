@@ -1,0 +1,30 @@
+## Summary
+
+### Best Design: `design_v21.v` — Cost: 2,780,232 (down from baseline 4,624,409, a 40% reduction)
+
+### What Worked Best (in order of impact)
+
+1. **Carry-save accumulator (CSA) replacing carry-propagate adder** (v4→v8): The biggest single win. Each PE replaced its 32-bit ripple-carry adder with a 3:2 compressor (XOR sum + majority carry), deferring the final carry-propagate add to the array output. This cut delay from ~820ps to ~660ps. Area increased slightly due to dual sum/carry registers but net ADP dropped significantly.
+
+2. **Narrowing accumulator from 32→19 bits** (v3): The theoretical minimum for 8×8 signed matmul (8 × max product 16384 = 131072 = 2^17, needs 19 bits signed). This reduced register and adder width across all 64 PEs, saving ~13% area and delay. 18 bits overflowed (confirmed by test failure at 131072).
+
+3. **Removing reset from datapath registers** (v8): The `w`, `a_east`, `ps_south`, `pc_south` registers don't need reset — weight loading overwrites `w`, and the CSA chain is seeded with zeros from `psum_v[0]`. Only the `vpipe` (valid pipeline) needs reset for gate-level sim. This eliminated reset muxes, reducing both area and delay.
+
+4. **Explicit full-adder generate loop** (v19→v21): Writing the CSA as an explicit `generate for` loop of full-adder cells instead of a single Boolean expression gave Yosys a different (better) synthesis mapping, trimming ~15ps from delay.
+
+### What Didn't Work / Caused Regressions
+
+- **Clearing psums during weight load** (v6): Broke mid-drain weight reloads — the original holds in-flight psums during stall, doesn't zero them.
+- **Combinational `a_east` pass-through** (v12): Broke cycle-accurate timing — activations must register one hop per column.
+- **Unsigned multiply + sign correction** (v17): The abs/negate logic added more delay than the signed multiply saved.
+- **Carry-save in de-skew chain** (v9): Doubled de-skew registers (both sum+carry), area penalty exceeded delay savings.
+- **16-bit CSA width** (v22): Sign extension wasn't handled correctly — carry out of bit 15 needed to propagate into sign bits.
+- **Removing `target_delay` knob**: Lower (200-300ps) and higher (800-1200ps) values both produced worse ADP than default 500ps.
+
+### Lessons Learned
+
+- The CSA approach is clearly superior for systolic MAC chains — the carry-propagate adder depth (log₂(19) ≈ 5 stages) is eliminated from the per-cycle critical path.
+- Minimum accumulator width matters: 19 bits is exact for this problem, confirmed by 18-bit overflow.
+- RTL coding style affects Yosys synthesis results even for functionally identical logic — the explicit generate-loop FA produced a measurably better result than the inline Boolean CSA.
+- Reset removal is a powerful area/delay optimization when the protocol guarantees registers are overwritten before use.
+- Next time: I would explore explicit Wallace/Dadda tree merging of the multiplier partial products with the CSA to reduce the multiply-then-add serial depth, and try Booth recoding to halve the number of partial products.

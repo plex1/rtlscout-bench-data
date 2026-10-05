@@ -16,7 +16,28 @@
    "source": "the shipped starting point, evaluated once with the task's metric and flags by the 2026-07 campaigns that produced the seed runs"
   }
  },
- "runs": {},
+ "runs": {
+  "glm-5.2": [
+   "20260727_085945",
+   "20260727_085947",
+   "20260727_085949"
+  ],
+  "kimi-k3": [
+   "20260725_185648",
+   "20260725_185650",
+   "20260725_185652"
+  ],
+  "kimi-k3-high": [
+   "20260726_063828",
+   "20260726_063830",
+   "20260726_063832"
+  ],
+  "nemotron-3-ultra": [
+   "20260727_104159",
+   "20260727_104201",
+   "20260727_104203"
+  ]
+ },
  "exclude": [],
  "notes": {
   "glm-5.2": "Provider-default reasoning effort.",

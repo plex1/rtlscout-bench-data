@@ -1,0 +1,19 @@
+## Summary
+
+**Final result:** `design_v2.v` — PASS 830/830, area_delay_product = **3.24e6** (delay 819.6ps, area 3948), ~30% better than the 4.62e6 baseline.
+
+### What worked best
+- **19-bit internal accumulators (v2)** — the single highest-impact optimization. The sum of 8 signed 8×8 products is bounded by 2^17, so 19-bit signed psums are exact; sign-extend to 32 bits only after the output de-skew. This shortened the critical-path adder (1004→820ps) and removed 13 FFs from each of 64 PEs plus 13 bits from every de-skew stage. Pure win, no behavioral risk since the math bound is provable.
+
+### What didn't work
+- **Registered-product / hoisted-multiplier PEs (v4, v5):** Broke cycle accuracy. The design has a hard invariant: PE(i,j)'s psum register must be written exactly j cycles after PE(i,0)'s a_east register saw its activation. Column-0 needs an in-cycle multiply, so column j's product must also be in-cycle — you cannot register/retime the multipliers without net-zero register additions.
+- **Carry-save transposed array (v10):** Passed but worse (845ps, area 4213). Extra carry registers added area, and the bottom row still needed a full CPA.
+- **History-buffer de-skew (v6/v6b):** Never converged. Replacing 532 shift-register FFs with an addressed buffer needs diagonal tracking that survives a_valid gaps; off-by-one indexing plus gap-induced diagonal restarts made it too intricate for the step budget. The reads also risked putting the last-row multiply on the output path.
+- **Per-row accumulator widths (v11):** Passed but worse — sign-extension wiring overhead exceeded the FF savings.
+- **target_delay sweep (300–700):** Bit-identical results — the flow uses a fixed constraint and ~820ps is the true floor for a single-cycle MAC in this flow.
+
+### Lessons learned
+1. **Data-value range analysis** (tight accumulator widths) is the safest, highest-value optimization — always check arithmetic bounds first.
+2. **PPA is only extracted on passing sims**, so delay "probes" with intentionally broken designs are wasted steps — don't bother.
+3. **Yosys won't retime registers across multipliers**, so pipeline-restructuring ideas that rely on retiming are dead ends; the 8×8 multiply + carry chain is an immovable ~820ps critical path.
+4. Complex area-saving register tricks (buffered de-skew) with gap-sensitive control logic need careful up-front cycle-level derivation with a concrete timeline table, not iterative patch-and-test — I burned ~10 steps there. Next time I'd write out the full per-cycle pointer/diagonal timeline *before* coding, or skip it given the modest (~10%) expected payoff.

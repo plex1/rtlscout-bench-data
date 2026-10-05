@@ -1,0 +1,39 @@
+## Summary
+
+### Best Result
+- **Best design**: `design_opt17.sv` with **4,584,495 area_delay_product** (0.86% improvement over baseline)
+- **Metrics**: delay=996ps, area=4601, passes all 830 cycle-accurate checks
+
+### Approaches Tried
+
+| Approach | Result | Notes |
+|----------|--------|-------|
+| Original baseline (`design.sv`) | 4,624,409 | Reference |
+| Carry-lookahead / Kogge-Stone / Brent-Kung adders | 4,857,257 | Reduced delay (~995ps) but increased area too much |
+| Carry-skip adder | 4,725,814 | Moderate improvement |
+| Hybrid 8-bit CLA blocks | 4,624,759 | Near baseline |
+| Conditional sum adder | 5,189,324 | Worse - large mux overhead |
+| 16-bit split adder (`design_opt20.sv`) | 4,632,513 | Slight regression |
+| Booth/Wallace multiplier | FAIL | Cycle accuracy broken |
+| Registered multiplier output | FAIL | Cycle accuracy broken (1-cycle latency change) |
+| **Flat shift register arrays for skew/deskew (`design_opt17.sv`)** | **4,584,495** | **Best - reduced area by sharing registers** |
+
+### What Worked Best
+**`design_opt17.sv`**: Replaced per-row/column generate-block shift registers with **flat shared shift register arrays** (28 registers each for input skew and output deskew). This reduced area by ~3.2 units while keeping the original PE (critical path unchanged at ~996ps). The synthesis tool could better optimize the flat array structure.
+
+### What Didn't Work
+- **Any PE internal retiming** (registering multiplier inputs/outputs) broke cycle accuracy - the testbench compares every cycle against the original logikbench behavior
+- **Complex prefix adders** (Kogge-Stone, Brent-Kung, Sklansky) increased area more than they reduced delay
+- **Booth/Wallace multipliers** changed numerical behavior slightly
+- **Carry-save/conditional-sum adders** added mux overhead
+
+### Lessons Learned
+1. **Cycle accuracy is extremely strict** - even 1-cycle latency changes in the PE break the testbench. The PE must remain combinational multiply + add.
+2. **Area optimization > delay optimization** for this metric - the critical path is dominated by the 8×8 multiplier + 32-bit adder which synthesis already maps efficiently.
+3. **Structural changes to control logic** (skew/deskew) are safer than datapath changes.
+4. **Flat register arrays** synthesize better than nested generate-block arrays.
+
+### Next Steps (if continuing)
+- Try `target_delay` sweeps on `design_opt17.sv` (already tried 300-600ps, no change)
+- Explore retiming the **valid pipeline** or **weight load path** (not compute path)
+- Investigate if `design_opt17.sv` can be further area-reduced by merging skew/deskew register files

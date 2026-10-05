@@ -1,0 +1,2440 @@
+================================================================================
+BENCHMARK : tpu_verilog
+MODEL     : moonshotai/kimi-k3
+METRIC    : area_delay_product
+RESULT    : PASS  |  best cost: 3.148e+06 area_delay_product  (eval 2)
+STEPS: 60  |  duration: 3666.72s
+================================================================================
+
+[SYSTEM]
+You are an RTL (Register Transfer Level) design agent. Your task is to create a Verilog/SystemVerilog design that satisfies the given specification, is functionally correct, and has minimal cost (area_delay_product).
+
+**Cost metric `area_delay_product`:** area × achieved critical-path delay — the classic area-delay product. Does NOT include simulation cycle count (contrast with the 'area_runtime_product' metric).
+
+## Specification
+Weight-stationary systolic matrix-multiply tile (a Google-TPU-style MXU),
+module name `tpu`, implementing the EXACT per-cycle behavior of the logikbench
+`tpu` benchmark (zeroasiccorp/logikbench, MIT).
+
+FUNCTION: computes C = A * B tile products on an 8x8 grid of processing
+elements. B (the "weight" matrix, 8-bit signed) is loaded into the array and
+held; A (the "activation" matrix, 8-bit signed) streams through; result rows
+C (32-bit signed) drain out the bottom.
+
+PROTOCOL:
+  1. Weight load: assert w_valid for 8 cycles; w_data carries one weight row
+     per cycle, 8 signed bytes packed { col 7 ... col 0 }, BOTTOM matrix row
+     first (cycle k carries B[7-k][*]; the weights shift south). After 8
+     cycles PE(i,j) holds B[i][j].
+  2. Compute: assert a_valid while streaming A one row per cycle (packed the
+     same way). Row m of the result, C[m][*] packed { col 7 ... col 0 } as 8
+     signed 32-bit words, appears on c_data with c_valid high exactly 15
+     (= 2*8-1) compute cycles after its A row was accepted.
+  - The array advances only while w_valid is low: asserting w_valid stalls
+    any in-flight computation (and reloads weights). Zeros are injected while
+    a_valid is low, so idle/drain cycles add nothing to the accumulators.
+  - Multiple A tiles may stream back-to-back against the same loaded weights.
+
+CYCLE ACCURACY: c_valid is compared against the original design EVERY cycle;
+c_data is compared on every cycle where c_valid is high. The 15-cycle
+compute-latency and the stall semantics are part of the contract.
+
+Ports:
+  clk, rst (async active-high reset, asserted only before the stream begins)
+  w_valid, w_data[63:0]
+  a_valid, a_data[63:0]
+  c_valid, c_data[255:0]
+
+A working starting point is provided: `context/starting_point.v` is the
+original logikbench RTL (tpu_pe / tpu_array / tpu: PE mesh, per-row input
+skew, per-column output de-skew, valid pipeline). It passes all 830 golden
+cycles (328 result rows: directed zero/identity/extreme tiles, random tiles,
+back-to-back streams, a_valid gaps, mid-drain weight reloads, random soak).
+Study it, then optimize while preserving the cycle-accurate behavior. The
+sibling benchmark `tpu_spire` shares the identical testbench and vectors
+with a SpireHDL starting point.
+
+## Tools
+- create_file: Create a new file in your working directory
+- replace_file: Replace the entire contents of an existing file
+- apply_diff: Apply a unified diff to modify a file
+- edit_file: Edit a file by replacing an exact string match with new content. Provide old_string (must match exactly once) and new_string.
+- ls: List files in your working directory
+- read_file: Read the contents of a file
+- run_evaluation(filename[, target_delay]): Run evaluation on the given design file. Returns correctness (Verilator simulation) + cost (Yosys area_delay_product). The filename must be your main design file (e.g. 'design.sv'). Optionally pass target_delay (ps) to override the synthesis timing constraint.
+- done: Signal completion (only use when truly stuck with no more ideas)
+
+## Strategy
+1. Lay out an action plan. Try to cover a diverse set of approaches in your plan to increase the chances of finding a good solution within the step limit. Also once you find a new best solution, explore close solutions. Trade off exploration with exploitation.
+2. First, create a simple, straightforward design that is functionally correct. Focus on getting 100% correctness first.
+3. Run evaluation to confirm correctness and get the initial cost (area_delay_product).
+4. ONLY after achieving 100% correctness, try to optimize the design to reduce the area_delay_product.
+5. After each optimization, run evaluation to verify correctness is maintained and check the new cost.
+6. If an optimization breaks correctness, revert and try a different approach.
+7. Keep iterating until you run out of steps — use every step to try improvements. Only call done if you are truly stuck with no more ideas.
+
+In general, be creative and take risk. At least after you have a correct design, try bold optimizations to reduce area_delay_product, even if they might break correctness. You can always revert if it doesn't work.
+The best results you obtain which is 100% correctness counts.
+Try to beat at least the straightforward implementation.
+
+Running evaluation is crucial after every change to ensure correctness and track cost. Do not skip evaluations.
+
+You may do some 'thinking' alongside with your tool calling responses to explain your reasoning, but always remember to call a tool in every response.
+
+## Important
+- Always call a tool in every response.
+- You have a maximum of **60 steps** (tool calls / LLM turns). Budget them wisely: get a correct design first, then optimise.
+- The best result is the one with lowest cost among designs that pass 100% of testbench checks.
+- Use different filenames for different design variants so you can retrieve them later.
+- If context files (e.g. component source files) are in your workspace, you can modify them directly using edit_file or replace_file to optimize the design. Make targeted, incremental changes rather than rewriting files from scratch — small edits are less likely to introduce bugs.
+- Write clean, synthesizable RTL code.
+- You can pass `target_delay` (ps) to `run_evaluation` to try different synthesis timing constraints; experimenting with this may improve PPA results (lower target delay may reduce delay, higher target delay may reduce area/transistor count). target_delay must be > 0.
+- Do not spend too many steps sweeping `target_delay` — basically if you want to minimize delay choose a low value,if you want to minimize area/transistor count choose a high value. That's it.A few targeted experiments are more productive than an exhaustive sweep.
+
+## Delay Optimization Tips
+- `target_delay` trades area against delay (a lower value pressures toward faster logic, a higher value lets Yosys re-map to smaller cells). Do not overly iterate on different target delays; often the RTL structure is the real lever, target_delay is only a minor secondary knob.
+- After getting a correct design, try different accumulation orderings (sequential vs. tree) and compare results — Yosys synthesis can produce noticeably different delays (~10 ps) from structurally similar descriptions.
+- For designs dominated by a multiply-accumulate chain, the critical path is the multiplier followed by the adder tree. Reducing the adder depth or splitting into parallel partial sums can help.
+
+## Reference Implementations
+The following are reference implementations for inspiration. Study them for patterns and techniques, but do not copy them directly — adapt ideas to your specific design.
+
+### Parallel-prefix adder (ripple-carry / carry-lookahead) (Add.sv)
+```systemverilog
+// Copyright 2024 ETH Zurich and University of Bologna.
+// Solderpad Hardware License, Version 0.51, see LICENSE for details.
+// SPDX-License-Identifier: SHL-0.51
+//
+// Based on the work by Reto Zimmermann 1998 - ETH Zürich
+// Originally written in VHDL, available under: 
+// https://iis-people.ee.ethz.ch/~zimmi/arith_lib.html#library
+//
+// Authors:
+// - Thomas Benz <tbenz@iis.ee.ethz.ch>
+// - Philippe Sauter <phsauter@iis.ee.ethz.ch>
+// - Paul Scheffler <paulsc@iis.ee.ethz.ch>
+//
+// Description :
+// Binary adder using ripple-carry or parallel-prefix carry-lookahead logic.
+// S = A+B
+
+module Add #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] A,  // operands
+	input  logic [width-1:0] B,
+	output logic [width-1:0] S   // sum
+);
+
+	// Function: Binary adder using parallel-prefix carry-lookahead logic.
+
+	logic [width-1:0] GI, PI;  // prefix gen./prop. in
+	logic [width-1:0] GO, PO;  // prefix gen./prop. out
+	logic [width-1:0] PT;  // adder propagate temp
+
+	// Internal signals for unsigned operands
+	logic [width-1:0] Auns, Buns, Suns;
+
+	// default ripple-carry adder as slow implementation
+	if (speed == lau_pkg::SLOW) begin
+		// type conversion: std_logic_vector -> unsigned
+		assign Auns = A;
+		assign Buns = B;
+
+		// addition
+		assign Suns = Auns + Buns;
+
+		// type conversion: unsigned -> std_logic_vector
+		assign S = Suns;
+	end else begin
+		// parallel-prefix adders as medium and fast implementations
+
+		// calculate prefix input generate/propagate signals
+		assign GI = A & B;
+		assign PI = A | B;
+		// calculate adder propagate signals (PT = A xor B)
+		assign PT = ~GI & PI;
+
+		// calculate prefix output generate/propagate signals
+		PrefixAndOr #(
+			.width(width),
+			.speed(speed)
+		) prefix (
+			.GI(GI),
+			.PI(PI),
+			.GO(GO),
+			.PO(PO)
+		);
+
+		// calculate sum bits
+		assign S = PT ^ {GO[width-2:0], 1'b0};
+	end
+endmodule
+
+
+
+module behavioural_Add #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] A,  // operands
+	input  logic [width-1:0] B,
+	output logic [width-1:0] S   // sum
+);
+	assign S = A + B;
+endmodule
+```
+
+### Prefix AND-OR structures (Sklansky, Brent-Kung, serial) (PrefixAndOr.sv)
+```systemverilog
+// Copyright 2024 ETH Zurich and University of Bologna.
+// Solderpad Hardware License, Version 0.51, see LICENSE for details.
+// SPDX-License-Identifier: SHL-0.51
+//
+// Based on the work by Reto Zimmermann 1998 - ETH Zürich
+// Originally written in VHDL, available under: 
+// https://iis-people.ee.ethz.ch/~zimmi/arith_lib.html#library
+//
+// Authors:
+// - Thomas Benz <tbenz@iis.ee.ethz.ch>
+// - Philippe Sauter <phsauter@iis.ee.ethz.ch>
+// - Paul Scheffler <paulsc@iis.ee.ethz.ch>
+//
+// Description :
+// Prefix structures of different depth (i.e. speed) for carry calculation
+// in binary adders. Compute in m levels new generate/propagate signal pairs
+// for always larger groups of bits. Generate signals of the last level correspond
+// to carries in binary addition. Basic logic operations: AND-OR for generate
+// signals, AND for propagate signals.
+
+module PrefixAndOr #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] GI,  // gen./prop. in
+	input  logic [width-1:0] PI,  // gen./prop. in
+	output logic [width-1:0] GO,  // gen./prop. out
+	output logic [width-1:0] PO   // gen./prop. out
+);
+
+	// Constants
+	localparam int n = width;  // prefix structure width
+	localparam int m = $clog2(width);  // prefix structure depth
+
+	// Sklansky parallel-prefix carry-lookahead structure
+	if (speed == lau_pkg::FAST) begin : fastPrefix
+		logic [(m+1)*n-1:0] GT, PT;  // gen./prop. temp
+			assign GT[n-1:0] = GI;
+			assign PT[n-1:0] = PI;
+			for (genvar l = 1; l <= m; l++) begin : levels
+				for (genvar k = 0; k < 2 ** (m - l); k++) begin : groups
+					for (genvar i = 0; i < 2 ** (l - 1); i++) begin : bits
+						// pass prop and gen to following nodes
+						if ((k * 2 ** l + i) < n) begin : white
+							assign GT[l*n+k*2**l+i] = GT[(l-1)*n+k*2**l+i];
+							assign PT[l*n+k*2**l+i] = PT[(l-1)*n+k*2**l+i];
+						end
+						// calculate new propagate and generate
+						if ((k * 2 ** l + 2 ** (l - 1) + i) < n) begin : black
+							assign GT[l*n + k*2**l + 2**(l-1) + i] = 
+												GT[(l-1)*n + k*2**l + 2**(l-1) + i]
+											  | (  PT[(l-1)*n + k*2**l + 2**(l-1) + i]
+												 & GT[(l-1)*n + k*2**l + 2**(l-1) - 1] );
+							assign PT[l*n + k*2**l + 2**(l-1) + i] = 
+													PT[(l-1)*n + k*2**l + 2**(l-1) + i]
+												  & PT[(l-1)*n + k*2**l + 2**(l-1) - 1];
+						end
+					end
+				end
+			end
+			assign GO = GT[(m+1)*n-1 : m*n];
+			assign PO = PT[(m+1)*n-1 : m*n];
+	end
+
+	// Brent-Kung parallel-prefix carry-lookahead structure
+	if (speed == lau_pkg::MEDIUM) begin : mediumPrefix
+		logic [(2*m)*n -1:0] GT, PT;  // gen./prop. temp
+		assign GT[n-1:0] = GI;
+		assign PT[n-1:0] = PI;
+
+		for (genvar l = 1; l <= m; l++) begin : levels1
+			for (genvar k = 0; k < 2**(m-l); k++) begin : groups
+				for (genvar i = 0; i < 2**l -1; i++) begin : bits
+					if ((k* 2**l +i) < n) begin : white
+						assign GT[l*n + k* 2**l +i] = GT[(l-1)*n + k* 2**l +i];
+						assign PT[l*n + k* 2**l +i] = PT[(l-1)*n + k* 2**l +i];
+					end // white
+				end // bits
+				if ((k* 2**l + 2**l -1) < n) begin : black
+					assign GT[l*n + k* 2**l + 2**l -1] =
+								GT[(l-1)*n + k* 2**l + 2**l - 1] |
+							  | (  PT[(l-1)*n + k* 2**l + 2**l     -1] 
+							     & GT[(l-1)*n + k* 2**l + 2**(l-1) -1]);
+					assign PT[l*n + k* 2**l + 2**l -1] =
+								PT[(l-1)*n + k*2**l + 2**l     -1] 
+							  & PT[(l-1)*n + k*2**l + 2**(l-1) -1];
+				end // black
+			end
+		end // level1
+		for (genvar l = m +1; l < 2*m; l++) begin : levels2
+			for (genvar i = 0; i < 2**(2*m -l); i++) begin : bits
+				if (i < n) begin : white
+					assign GT[l*n +i] = GT[(l-1)*n +i];
+					assign PT[l*n +i] = PT[(l-1)*n +i];
+				end // white
+			end // bits
+			for (genvar k = 1; k < 2**(l-m); k++) begin : groups
+				if (l < 2*m -1) begin : empty
+					for (genvar i = 0; i < 2**(2*m -l -1) -1; i++) begin : bits
+						if ((k* 2**(2*m -l) +i) < n) begin : white
+							assign GT[l*n + k* 2**(2*m -l) +i] = GT[(l-1)*n + k* 2**(2*m -l) +i];
+							assign PT[l*n + k* 2**(2*m -l) +i] = PT[(l-1)*n + k* 2**(2*m -l) +i];
+						end // white
+					end
+				end // empty
+				if ((k* 2**(2*m -l) + 2**(2*m -l -1) -1) < n) begin : black
+					assign GT[l*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1] = 
+								GT[(l-1)*n + k* 2**(2*m-l) + 2**(2*m -l-1) -1]
+							  | (  PT[(l-1)*n + k* 2**(2*m-l) + 2**(2*m-l-1) -1] 
+								 & GT[(l-1)*n + k* 2**(2*m-l) -1] );
+					assign PT[l*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1] = 
+								PT[(l-1)*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1]
+							  & PT[(l-1)*n + k* 2**(2*m -l) -1];
+				end // black
+				for (genvar i = 2**(2*m -l-1); i < 2**(2*m -l); i++) begin : bits
+					if ((k* 2**(2*m -l) +i) < n) begin : white
+						assign GT[l*n + k* 2**(2*m -l) +i] = GT[(l-1)*n + k* 2**(2*m -l) +i];
+						assign PT[l*n + k* 2**(2*m -l) +i] = PT[(l-1)*n + k* 2**(2*m -l) +i];
+					end // white
+				end
+			end
+		end // level2
+		assign GO = GT[2*m*n -1 : (2*m -1) * n];
+		assign PO = PT[2*m*n -1 : (2*m -1) * n];
+	end  // Serial-prefix carry-lookahead structure
+	else if (speed == lau_pkg::SLOW) begin : slowPrefix
+		logic [n-1:0] GT, PT;  // gen./prop. temp
+		assign GT[0] = GI[0];
+		assign PT[0] = PI[0];
+		
+		for (genvar i = 1; i < n; i++) begin : bits
+			assign GT[i] = GI[i] | (PI[i] & GT[i-1]);
+			assign PT[i] = PI[i] & PT[i-1];
+		end
+		assign GO = GT;
+		assign PO = PT;
+	end
+
+endmodule
+
+```
+
+
+[USER]
+Please create the design according to the specification. Start with a simple correct implementation, evaluate it, then optimize.
+
+[ASSISTANT]
+I'll start by examining the provided starting point to understand the reference implementation.
+  -> ls()
+  -> read_file(filename='context/starting_point.v')
+
+[TOOL RESULT]
+[Step 1/60]
+Files:
+starting_point.v
+tb.sv
+vectors.dat
+
+[TOOL RESULT]
+[Step 1/60]
+Error: File not found: context/starting_point.v
+
+[ASSISTANT]
+  -> read_file(filename='starting_point.v')
+
+[TOOL RESULT]
+[Step 2/60]
+//#############################################################################
+// Copyright: Zero ASIC. All rights Reserved.
+// Author: Andreas Olofsson
+// License:  MIT (see LICENSE file in LogikBench repository)
+//#############################################################################
+//
+// Processing element (PE) for the weight-stationary systolic array (TPU MXU).
+//
+// Each PE holds one stationary signed weight 'w'. Two independent datapaths
+// share the cell:
+//
+//   Weight load (ld): the weights form a per-column shift register that loads
+//   from the top. On each ld cycle the PE captures the weight from the PE above
+//   (w_north) and presents its stored weight downward (w_south). After N load
+//   cycles every PE in a column holds its final stationary weight.
+//
+//   Compute (en): the activation flows west to east (registered, one hop per
+//   cycle) and the partial sum flows north to south, accumulating the local
+//   product a_west * w. This is the only arithmetic cell in the array: one
+//   signed DW x DW multiply plus an ACCW-bit add.
+//
+//#############################################################################
+
+module tpu_pe
+  #(parameter DW = 8,	 // operand width (signed)
+    parameter ACCW = 32) // accumulator / partial-sum width (signed)
+   (
+    input		  clk,
+    input		  rst,	      // synchronous, active high
+    input		  ld,	      // weight-load shift enable
+    input		  en,	      // compute enable
+    input [DW-1:0]	  w_north,    // weight in from PE above
+    input [DW-1:0]	  a_west,     // activation in from west
+    input [ACCW-1:0]	  psum_north, // partial sum in from above
+    output [DW-1:0]	  w_south,    // stored weight out to PE below
+    output reg [DW-1:0]	  a_east,     // activation out to east
+    output reg [ACCW-1:0] psum_south  // partial sum out to below
+    );
+
+   // stationary weight register; presented downward for the load shift chain
+   reg [DW-1:0] w;
+   assign w_south = w;
+
+   // local product: the ONLY signed operation. Operands are interpreted as
+   // signed here via $signed; the 2*DW-bit result holds the two's-complement
+   // product, which is then sign-extended to the accumulator width below.
+   wire [2*DW-1:0] prod = $signed(a_west) * $signed(w);
+
+   always @(posedge clk) begin
+      if (rst) begin
+         w          <= {DW{1'b0}};
+         a_east     <= {DW{1'b0}};
+         psum_south <= {ACCW{1'b0}};
+      end
+      else begin
+         if (ld)
+           w <= w_north;
+         if (en) begin
+            a_east     <= a_west;
+            psum_south <= psum_north +
+                          {{(ACCW-2*DW){prod[2*DW-1]}}, prod};
+         end
+      end
+   end
+
+endmodule
+//#############################################################################
+// Copyright: Zero ASIC. All rights Reserved.
+// Author: Andreas Olofsson
+// License:  MIT (see LICENSE file in LogikBench repository)
+//#############################################################################
+//
+// N x N weight-stationary systolic array (the TPU MXU core).
+//
+// One tpu_pe per grid element, wired as a 2D mesh (per CLAUDE.md: replicated
+// hardware via generate, never a procedural unroll):
+//
+//   - weights load from the top: w_top[j] feeds column j; each column is a
+//     vertical shift register (w_south of PE(i,j) -> w_north of PE(i+1,j)).
+//   - activations flow west to east: a_left[i] enters row i; a_east of PE(i,j)
+//     feeds a_west of PE(i,j+1).
+//   - partial sums flow north to south and accumulate; the top row's psum_north
+//     is tied to zero (fresh accumulation), and c_bot[j] is the column-j result
+//     leaving the bottom row.
+//
+// With weight B[i][j] held at PE(i,j) and activation A[m][i] entering row i,
+// column j computes C[m][j] = sum_i A[m][i] * B[i][j]. Input/output skew (which
+// time-aligns rows and columns) lives in the tpu top, not here.
+//
+//#############################################################################
+
+module tpu_array
+  #(parameter N = 8,	 // array dimension (N x N PEs)
+    parameter DW = 8,	 // operand width (signed)
+    parameter ACCW = 32) // accumulator width (signed)
+   (
+    input		clk,
+    input		rst,	// synchronous, active high
+    input		ld,	// weight-load shift enable
+    input		en,	// compute enable
+    input [N*DW-1:0]	w_top,	// weight inputs, one per column (load)
+    input [N*DW-1:0]	a_left,	// activation inputs, one per row
+    output [N*ACCW-1:0]	c_bot	// column results, one per column
+    );
+
+   // mesh nets: a_h carries activations east, psum_v carries sums south,
+   // w_v carries weights south during load.
+   wire [DW-1:0]   a_h    [0:N-1][0:N];
+   wire [ACCW-1:0] psum_v [0:N][0:N-1];
+   wire [DW-1:0]   w_v    [0:N][0:N-1];
+
+   genvar	   i, j;
+   generate
+      // west edge: activation inputs into column 0 of each row
+      for (i = 0; i < N; i = i + 1) begin : g_west
+         assign a_h[i][0] = a_left[i*DW +: DW];
+      end
+      // top edge: zero partial sums, weight inputs; bottom edge: results out
+
+... (showing lines 1-118 of 282; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='starting_point.v', offset=118)
+
+[TOOL RESULT]
+[Step 3/60]
+      // top edge: zero partial sums, weight inputs; bottom edge: results out
+      for (j = 0; j < N; j = j + 1) begin : g_edge
+         assign psum_v[0][j] = {ACCW{1'b0}};
+         assign w_v[0][j]    = w_top[j*DW +: DW];
+         assign c_bot[j*ACCW +: ACCW] = psum_v[N][j];
+      end
+      // the PE mesh
+      for (i = 0; i < N; i = i + 1) begin : g_pe_row
+         for (j = 0; j < N; j = j + 1) begin : g_pe_col
+            tpu_pe #(.DW(DW), .ACCW(ACCW)) u_pe
+              (.clk        (clk),
+               .rst        (rst),
+               .ld         (ld),
+               .en         (en),
+               .w_north    (w_v[i][j]),
+               .a_west     (a_h[i][j]),
+               .psum_north (psum_v[i][j]),
+               .w_south    (w_v[i+1][j]),
+               .a_east     (a_h[i][j+1]),
+               .psum_south (psum_v[i+1][j]));
+         end
+      end
+   endgenerate
+
+endmodule
+//#############################################################################
+// Copyright: Zero ASIC. All rights Reserved.
+// Author: Andreas Olofsson
+// License:  MIT (see LICENSE file in LogikBench repository)
+//#############################################################################
+//
+// Weight-stationary systolic matrix-multiply tile (a Google-TPU-style MXU).
+//
+// Computes one tile product C = A * B, where A and B are N x N signed operands
+// (DW bits) and C is N x N signed (ACCW bits). B is the "weight" matrix, loaded
+// into and held by the array; A is the "activation" matrix, streamed through; C
+// drains out the bottom. Built from a tpu_array of N x N tpu_pe cells.
+//
+// Operation has two phases the host drives via valids:
+//
+//   1. Weight load: assert w_valid for N cycles. w_data carries one weight row
+//      per cycle, N signed weights packed { col N-1 ... col 0 }. Because the
+//      array loads top-down (shift south), push the BOTTOM matrix row first:
+//      cycle k carries B[N-1-k][*]. After N cycles PE(i,j) holds B[i][j].
+//
+//   2. Compute: assert a_valid while streaming A one row per cycle, a_data
+//      packed { col N-1 ... col 0 } = A[m][N-1..0]. Row m of the result, C[m][*]
+//      (packed the same way), appears on c_data with c_valid high, 2*N-1 cycles
+//      after its A row was accepted.
+//
+// Time alignment: row i of A is delayed i cycles entering the array (input
+// skew) so partial sums chain correctly down each column; column j of the
+// result is delayed N-1-j cycles (output de-skew) so a full result row leaves
+// together. Both skew networks and the valid pipeline advance only with the
+// array (compute enable), so the 2*N-1 latency is exact. Per CLAUDE.md the skew
+// chains are generated per-row/column shift registers, not a procedural unroll.
+//
+//#############################################################################
+
+module tpu
+  #(parameter N = 8,	 // array dimension (N x N)
+    parameter DW = 8,	 // operand width (signed)
+    parameter ACCW = 32) // result / accumulator width (signed)
+   (
+    input		clk,
+    input		rst,	 // synchronous, active high
+    input		w_valid, // weight-row valid (load phase)
+    input [N*DW-1:0]	w_data,	 // weight row, packed { col N-1 ... col 0 }
+    input		a_valid, // activation-row valid (compute phase)
+    input [N*DW-1:0]	a_data,	 // activation row, packed { col N-1 ... col 0 }
+    output		c_valid, // result-row valid
+    output [N*ACCW-1:0]	c_data	 // result row, packed { col N-1 ... col 0 }
+    );
+
+   // total injection-to-output latency, in compute cycles
+   localparam LAT = 2*N - 1;
+
+   // load weights while w_valid; otherwise the array computes (and drains)
+   wire	      ld = w_valid;
+   wire	      en = ~w_valid;
+
+   //##########################################################################
+   // Input skew: row i of the activation is delayed i cycles. Zero is injected
+   // when a_valid is low so idle/drain cycles add nothing to the accumulators.
+   //##########################################################################
+   wire [N*DW-1:0] a_left;
+   genvar	   i;
+   generate
+      for (i = 0; i < N; i = i + 1) begin : g_skew
+         wire [DW-1:0] din =
+		       a_valid ? a_data[i*DW +: DW] : {DW{1'b0}};
+         if (i == 0) begin : g_skew0
+            assign a_left[i*DW +: DW] = din;
+         end
+         else begin : g_skewn
+            reg [DW-1:0] sr [0:i-1];
+            integer k;
+            always @(posedge clk) begin
+               if (rst) begin
+                  for (k = 0; k < i; k = k + 1)
+                    sr[k] <= {DW{1'b0}};
+               end
+               else if (en) begin
+                  sr[0] <= din;
+                  for (k = 1; k < i; k = k + 1)
+                    sr[k] <= sr[k-1];
+               end
+            end
+            assign a_left[i*DW +: DW] = sr[i-1];
+         end
+      end
+   endgenerate
+
+   //##########################################################################
+   // The systolic array.
+   //##########################################################################
+   wire [N*ACCW-1:0] c_bot;
+   tpu_array #(.N(N), .DW(DW), .ACCW(ACCW)) u_array
+     (.clk(clk), .rst(rst), .ld(ld), .en(en),
+      .w_top(w_data), .a_left(a_left), .c_bot(c_bot));
+
+   //##########################################################################
+   // Output de-skew: column j is delayed N-1-j cycles so all columns of a
+   // result row line up. Column N-1 (longest path) needs no delay.
+   //##########################################################################
+   genvar j;
+   generate
+      for (j = 0; j < N; j = j + 1) begin : g_deskew
+         localparam D = N - 1 - j;
+         wire [ACCW-1:0] cin = c_bot[j*ACCW +: ACCW];
+         if (D == 0) begin : g_deskew0
+            assign c_data[j*ACCW +: ACCW] = cin;
+         end
+         else begin : g_deskewn
+            reg [ACCW-1:0] dr [0:D-1];
+            integer k;
+            always @(posedge clk) begin
+               if (rst) begin
+                  for (k = 0; k < D; k = k + 1)
+                    dr[k] <= {ACCW{1'b0}};
+               end
+               else if (en) begin
+                  dr[0] <= cin;
+                  for (k = 1; k < D; k = k + 1)
+                    dr[k] <= dr[k-1];
+               end
+            end
+            assign c_data[j*ACCW +: ACCW] = dr[D-1];
+         end
+      end
+   endgenerate
+
+   //##########################################################################
+   // Valid pipeline: c_valid is a_valid delayed LAT compute cycles.
+   //##########################################################################
+   reg [LAT-1:0] vpipe;
+   always @(posedge clk) begin
+      if (rst)
+        vpipe <= {LAT{1'b0}};
+      else if (en)
+        vpipe <= {vpipe[LAT-2:0], a_valid};
+   end
+   assign c_valid = vpipe[LAT-1];
+
+endmodule
+
+... (showing lines 118-282 of 282; use offset/limit for more)
+
+[ASSISTANT]
+  -> create_file(content="//#############################################################################\n// Weight-stationary systolic matrix-multiply tile (TPU MXU) - baseline copy\n// of logikbench reference implementation.\n//#############################################################################\n\nmodule tpu_pe\n  #(parameter DW = 8,\n    parameter ACCW = 32)\n   (\n    input\t\t  clk,\n    input\t\t  rst,\n    input\t\t  ld,\n    input\t\t  en,\n    input [DW-1:0]\t  w_north,\n    input [DW-1:0]\t  a_west,\n    input [ACCW-1:0]\t  psum_north,\n    output [DW-1:0]\t  w_south,\n    output reg [DW-1:0]\t  a_east,\n    output reg [ACCW-1:0] psum_south\n    );\n\n   reg [DW-1:0] w;\n   assign w_south = w;\n\n   wire [2*DW-1:0] prod = $signed(a_west) * $signed(w);\n\n   always @(posedge clk) begin\n      if (rst) begin\n         w          <= {DW{1'b0}};\n         a_east     <= {DW{1'b0}};\n         psum_south <= {ACCW{1'b0}};\n      end\n      else begin\n         if (ld)\n           w <= w_north;\n         if (en) begin\n            a_east     <= a_west;\n            psum_south <= psum_north +\n                          {{(ACCW-2*DW){prod[2*DW-1]}}, prod};\n         end\n      end\n   end\n\nendmodule\n\nmodule tpu_array\n  #(parameter N = 8,\n    parameter DW = 8,\n    parameter ACCW = 32)\n   (\n    input\t\tclk,\n    input\t\trst,\n    input\t\tld,\n    input\t\ten,\n    input [N*DW-1:0]\tw_top,\n    input [N*DW-1:0]\ta_left,\n    output [N*ACCW-1:0]\tc_bot\n    );\n\n   wire [DW-1:0]   a_h    [0:N-1][0:N];\n   wire [ACCW-1:0] psum_v [0:N][0:N-1];\n   wire [DW-1:0]   w_v    [0:N][0:N-1];\n\n   genvar\t   i, j;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_west\n         assign a_h[i][0] = a_left[i*DW +: DW];\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_edge\n         assign psum_v[0][j] = {ACCW{1'b0}};\n         assign w_v[0][j]    = w_top[j*DW +: DW];\n         assign c_bot[j*ACCW +: ACCW] = psum_v[N][j];\n      end\n      for (i = 0; i < N; i = i + 1) begin : g_pe_row\n         for (j = 0; j < N; j = j + 1) begin : g_pe_col\n            tpu_pe #(.DW(DW), .ACCW(ACCW)) u_pe\n              (.clk        (clk),\n               .rst        (rst),\n               .ld         (ld),\n               .en         (en),\n               .w_north    (w_v[i][j]),\n               .a_west     (a_h[i][j]),\n               .psum_north (psum_v[i][j]),\n               .w_south    (w_v[i+1][j]),\n               .a_east     (a_h[i][j+1]),\n               .psum_south (psum_v[i+1][j]));\n         end\n      end\n   endgenerate\n\nendmodule\n\nmodule tpu\n  #(parameter N = 8,\n    parameter DW = 8,\n    parameter ACCW = 32)\n   (\n    input\t\tclk,\n    input\t\trst,\n    input\t\tw_valid,\n    input [N*DW-1:0]\tw_data,\n    input\t\ta_valid,\n    input [N*DW-1:0]\ta_data,\n    output\t\tc_valid,\n    output [N*ACCW-1:0]\tc_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   wire\t      ld = w_valid;\n   wire\t      en = ~w_valid;\n\n   wire [N*DW-1:0] a_left;\n   genvar\t   i;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_skew\n         wire [DW-1:0] din =\n\t\t       a_valid ? a_data[i*DW +: DW] : {DW{1'b0}};\n         if (i == 0) begin : g_skew0\n            assign a_left[i*DW +: DW] = din;\n         end\n         else begin : g_skewn\n            reg [DW-1:0] sr [0:i-1];\n            integer k;\n            always @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < i; k = k + 1)\n                    sr[k] <= {DW{1'b0}};\n               end\n               else if (en) begin\n                  sr[0] <= din;\n                  for (k = 1; k < i; k = k + 1)\n                    sr[k] <= sr[k-1];\n               end\n            end\n            assign a_left[i*DW +: DW] = sr[i-1];\n         end\n      end\n   endgenerate\n\n   wire [N*ACCW-1:0] c_bot;\n   tpu_array #(.N(N), .DW(DW), .ACCW(ACCW)) u_array\n     (.clk(clk), .rst(rst), .ld(ld), .en(en),\n      .w_top(w_data), .a_left(a_left), .c_bot(c_bot));\n\n   genvar j;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_deskew\n         localparam D = N - 1 - j;\n         wire [ACCW-1:0] cin = c_bot[j*ACCW +: ACCW];\n         if (D == 0) begin : g_deskew0\n            assign c_data[j*ACCW +: ACCW] = cin;\n         end\n         else begin : g_deskewn\n            reg [ACCW-1:0] dr [0:D-1];\n            integer k;\n            always @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < D; k = k + 1)\n                    dr[k] <= {ACCW{1'b0}};\n               end\n               else if (en) begin\n                  dr[0] <= cin;\n                  for (k = 1; k < D; k = k + 1)\n                    dr[k] <= dr[k-1];\n               end\n            end\n            assign c_data[j*ACCW +: ACCW] = dr[D-1];\n         end\n      end\n   endgenerate\n\n   reg [LAT-1:0] vpipe;\n   always @(posedge clk) begin\n      if (rst)\n        vpipe <= {LAT{1'b0}};\n      else if (en)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\n\nendmodule\n", filename='design_v1.v')
+
+[TOOL RESULT]
+[Step 4/60]
+Created file: design_v1.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v1.v')
+
+[TOOL RESULT]
+[Step 5/60]
+[Eval saved to eval_1/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 4624408.882038144
+  Metrics:
+    area_delay_product: 4624408.882038144
+    delay: 1004.4171
+    area: 4604.072234570822
+    power: 1.72
+    target_delay: 500.0
+    worst_slack: -1013.57
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[5].g_pe_col[4].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[5].g_pe_col[4].u_pe.psum_south_$_NOT__Y_30_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[5].g_pe_col[4].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      91.59   91.59 ^ u_array.g_pe_row[5].g_pe_col[4].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      40.59  132.18 v _60203_/Y (NOR3x1_ASAP7_75t_R)
+      31.89  164.08 ^ _60205_/Y (NOR2xp33_ASAP7_75t_R)
+      31.50  195.57 v _60242_/Y (AOI21xp5_ASAP7_75t_R)
+      20.25  215.82 ^ _60282_/Y (NAND2xp5_ASAP7_75t_R)
+      50.84  266.66 v _60284_/Y (OAI311xp33_ASAP7_75t_R)
+      43.16  309.82 v _60285_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.56  341.39 v _60286_/Y (XNOR2xp5_ASAP7_75t_R)
+      33.12  374.51 v _60287_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.68  399.19 ^ _60288_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.34  433.53 ^ _60289_/Y (XOR2xp5_ASAP7_75t_R)
+      41.45  474.98 ^ _60290_/Y (XOR2xp5_ASAP7_75t_R)
+      31.53  506.52 v _60332_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      35.37  541.89 ^ _60381_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      35.46  577.35 ^ _60427_/Y (OA211x2_ASAP7_75t_R)
+      20.59  597.94 v _60428_/Y (NOR2xp33_ASAP7_75t_R)
+      36.82  634.75 v _60429_/Y (XNOR2xp5_ASAP7_75t_R)
+      39.04  673.80 ^ _60451_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      32.04  705.84 v _60459_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      33.95  739.78 ^ _60469_/Y (MAJIxp5_ASAP7_75t_R)
+      35.59  775.38 v _60484_/Y (AOI211xp5_ASAP7_75t_R)
+      55.59  830.97 v _60513_/Y (OR5x1_ASAP7_75t_R)
+      20.60  851.57 ^ _60530_/Y (AOI211x1_ASAP7_75t_R)
+      31.00  882.57 v _60554_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      37.67  920.24 ^ _60561_/Y (MAJIxp5_ASAP7_75t_R)
+      27.89  948.13 ^ _60562_/Y (XOR2xp5_ASAP7_75t_R)
+      20.22  968.36 v _60563_/Y (NOR2xp33_ASAP7_75t_R)
+      16.77  985.13 ^ _60564_/Y (AOI211x1_ASAP7_75t_R)
+      19.29 1004.42 ^ _60565_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1004.42 ^ u_array.g_pe_row[5].g_pe_col[4].u_pe.psum_south_$_NOT__Y_30_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            1004.42   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[5].g_pe_col[4].u_pe.psum_south_$_NOT__Y_30_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     -14.16   -9.16   library setup time
+              -9.16   data required time
+    ---------------------------------------------------------
+              -9.16   data required time
+            -1004.42   data arrival time
+    ---------------------------------------------------------
+            -1013.57   slack (VIOLATED)
+
+Best so far: 4624408.882038144 area_delay_product (eval 1)
+
+[ASSISTANT]
+Baseline passes at cost 4,624,409 (delay 1004ps, area 4604). The critical path is the PE's 8×8 signed multiply + 32-bit add.
+
+Key optimization insights:
+1. **Narrow the accumulator**: 8 products of max |16384| sum to at most 131072, which fits in 19-bit signed. Internal psums can be 19 bits instead of 32, with free sign-extension at the output. This shrinks adders, psum registers, and deskew registers — and shortens the carry chain.
+2. **Remove datapath resets**: Reset is only asserted before streaming. Any garbage in the datapath drains out the bottom within ~15 en-cycles (top row injects constant 0, and real activations trail the garbage wavefront), while `c_valid` (which keeps its reset) can't fire until ≥15 en-cycles after `a_valid`, which itself follows an 8-cycle weight load. So datapath resets are unobservable — removing them eliminates reset muxes.
+
+Let me implement both:
+  -> create_file(content="//#############################################################################\n// Weight-stationary systolic matrix-multiply tile (TPU MXU) - optimized.\n//\n// Optimizations vs reference:\n//  - Internal partial-sum width reduced to 19 bits: 8 signed 8x8 products\n//    (each in [-16256, 16384]) sum to [-130048, 131072], which fits in\n//    signed 19 bits with margin. Results are sign-extended to 32 bits at\n//    the output (free). Shrinks adders, psum regs, and deskew regs and\n//    shortens the critical carry chain.\n//  - Datapath resets removed (only the c_valid pipeline keeps one). Reset\n//    is asserted only before streaming; any stale register state drains out\n//    of the array before the first cycle c_valid can possibly be high, so\n//    the resets are functionally unobservable.\n//#############################################################################\n\nmodule tpu_pe\n  #(parameter DW = 8,\t // operand width (signed)\n    parameter PSW = 19)\t // internal partial-sum width (signed)\n   (\n    input\t\t  clk,\n    input\t\t  ld,\t      // weight-load shift enable\n    input\t\t  en,\t      // compute enable\n    input [DW-1:0]\t  w_north,\n    input [DW-1:0]\t  a_west,\n    input [PSW-1:0]\t  psum_north,\n    output [DW-1:0]\t  w_south,\n    output reg [DW-1:0]\t  a_east,\n    output reg [PSW-1:0]  psum_south\n    );\n\n   reg [DW-1:0] w;\n   assign w_south = w;\n\n   // signed 8x8 product, sign-extended to partial-sum width\n   wire signed [PSW-1:0] prod = $signed(a_west) * $signed(w);\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= psum_north + prod;\n      end\n   end\n\nendmodule\n\nmodule tpu_array\n  #(parameter N = 8,\n    parameter DW = 8,\n    parameter PSW = 19)\n   (\n    input\t\tclk,\n    input\t\tld,\n    input\t\ten,\n    input [N*DW-1:0]\tw_top,\n    input [N*DW-1:0]\ta_left,\n    output [N*PSW-1:0]\tc_bot\n    );\n\n   wire [DW-1:0]   a_h    [0:N-1][0:N];\n   wire [PSW-1:0]  psum_v [0:N][0:N-1];\n   wire [DW-1:0]   w_v    [0:N][0:N-1];\n\n   genvar\t   i, j;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_west\n         assign a_h[i][0] = a_left[i*DW +: DW];\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_edge\n         assign psum_v[0][j] = {PSW{1'b0}};\n         assign w_v[0][j]    = w_top[j*DW +: DW];\n         assign c_bot[j*PSW +: PSW] = psum_v[N][j];\n      end\n      for (i = 0; i < N; i = i + 1) begin : g_pe_row\n         for (j = 0; j < N; j = j + 1) begin : g_pe_col\n            tpu_pe #(.DW(DW), .PSW(PSW)) u_pe\n              (.clk        (clk),\n               .ld         (ld),\n               .en         (en),\n               .w_north    (w_v[i][j]),\n               .a_west     (a_h[i][j]),\n               .psum_north (psum_v[i][j]),\n               .w_south    (w_v[i+1][j]),\n               .a_east     (a_h[i][j+1]),\n               .psum_south (psum_v[i+1][j]));\n         end\n      end\n   endgenerate\n\nendmodule\n\nmodule tpu\n  #(parameter N = 8,\n    parameter DW = 8,\n    parameter ACCW = 32,\n    parameter PSW = 19)\t// internal accumulator width (sign-extended to ACCW)\n   (\n    input\t\tclk,\n    input\t\trst,\n    input\t\tw_valid,\n    input [N*DW-1:0]\tw_data,\n    input\t\ta_valid,\n    input [N*DW-1:0]\ta_data,\n    output\t\tc_valid,\n    output [N*ACCW-1:0]\tc_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   wire\t      ld = w_valid;\n   wire\t      en = ~w_valid;\n\n   //##########################################################################\n   // Input skew: row i delayed i cycles. Zeros injected when a_valid is low.\n   //##########################################################################\n   wire [N*DW-1:0] a_left;\n   genvar\t   i;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_skew\n         wire [DW-1:0] din =\n\t\t       a_valid ? a_data[i*DW +: DW] : {DW{1'b0}};\n         if (i == 0) begin : g_skew0\n            assign a_left[i*DW +: DW] = din;\n         end\n         else begin : g_skewn\n            reg [DW-1:0] sr [0:i-1];\n            integer k;\n            always @(posedge clk) begin\n               if (en) begin\n                  sr[0] <= din;\n                  for (k = 1; k < i; k = k + 1)\n                    sr[k] <= sr[k-1];\n               end\n            end\n            assign a_left[i*DW +: DW] = sr[i-1];\n         end\n      end\n   endgenerate\n\n   //##########################################################################\n   // The systolic array (19-bit internal partial sums).\n   //##########################################################################\n   wire [N*PSW-1:0] c_bot;\n   tpu_array #(.N(N), .DW(DW), .PSW(PSW)) u_array\n     (.clk(clk), .ld(ld), .en(en),\n      .w_top(w_data), .a_left(a_left), .c_bot(c_bot));\n\n   //##########################################################################\n   // Output de-skew on 19-bit values, sign-extended to ACCW afterwards.\n   //##########################################################################\n   genvar j;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_deskew\n         localparam D = N - 1 - j;\n         wire [PSW-1:0] cin = c_bot[j*PSW +: PSW];\n         if (D == 0) begin : g_deskew0\n            assign c_data[j*ACCW +: ACCW] =\n\t\t   {{(ACCW-PSW){cin[PSW-1]}}, cin};\n         end\n         else begin : g_deskewn\n            reg [PSW-1:0] dr [0:D-1];\n            integer k;\n            always @(posedge clk) begin\n               if (en) begin\n                  dr[0] <= cin;\n                  for (k = 1; k < D; k = k + 1)\n                    dr[k] <= dr[k-1];\n               end\n            end\n            assign c_data[j*ACCW +: ACCW] =\n\t\t   {{(ACCW-PSW){dr[D-1][PSW-1]}}, dr[D-1]};\n         end\n      end\n   endgenerate\n\n   //##########################################################################\n   // Valid pipeline: c_valid is a_valid delayed LAT compute cycles.\n   // (The only reset in the design: c_valid must be deterministic from\n   // cycle zero since it is checked every cycle.)\n   //##########################################################################\n   reg [LAT-1:0] vpipe;\n   always @(posedge clk) begin\n      if (rst)\n        vpipe <= {LAT{1'b0}};\n      else if (en)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\n\nendmodule\n", filename='design_v2.v')
+
+[TOOL RESULT]
+[Step 6/60]
+Created file: design_v2.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v2.v')
+
+[TOOL RESULT]
+[Step 7/60]
+[Eval saved to eval_2/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3147515.916355958
+  Metrics:
+    area_delay_product: 3147515.916355958
+    delay: 819.2783
+    area: 3841.815310323682
+    power: 1.57
+    target_delay: 500.0
+    worst_slack: -819.14
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      90.03   90.03 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      42.37  132.41 v _41220_/Y (NOR3x1_ASAP7_75t_R)
+      32.50  164.91 v _41261_/Y (OR2x2_ASAP7_75t_R)
+      28.81  193.72 v _41263_/Y (XNOR2xp5_ASAP7_75t_R)
+      14.90  208.62 ^ _41307_/Y (NAND2xp5_ASAP7_75t_R)
+      51.51  260.12 v _41309_/Y (OAI311xp33_ASAP7_75t_R)
+      48.55  308.67 v _41347_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.16  338.83 v _41348_/Y (XOR2xp5_ASAP7_75t_R)
+      31.66  370.49 v _41349_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.44  404.93 v _41350_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.99  436.92 v _41351_/Y (XNOR2xp5_ASAP7_75t_R)
+      32.18  469.09 v _41352_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.72  499.81 ^ _41361_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      26.79  526.60 v _41362_/Y (NOR2xp33_ASAP7_75t_R)
+      33.29  559.89 v _41387_/Y (XNOR2xp5_ASAP7_75t_R)
+      37.35  597.24 v _41388_/Y (XNOR2xp5_ASAP7_75t_R)
+      44.56  641.80 ^ _41427_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      38.47  680.28 v _41453_/Y (MAJIxp5_ASAP7_75t_R)
+      44.14  724.41 ^ _41474_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      24.54  748.95 v _41480_/Y (MAJIxp5_ASAP7_75t_R)
+      28.40  777.36 v _41482_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.91  802.27 v _41484_/Y (AO21x1_ASAP7_75t_R)
+      17.01  819.28 v _41485_/Y (BUFx6f_ASAP7_75t_R)
+       0.00  819.28 v u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             819.28   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -4.86    0.14   library setup time
+               0.14   data required time
+    ---------------------------------------------------------
+               0.14   data required time
+            -819.28   data arrival time
+    ---------------------------------------------------------
+            -819.14   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+Excellent progress: 4.62M → 3.15M (32% better). The critical path is still the PE's multiply-add. Let me sweep `target_delay` to see the area/delay tradeoff, since the current slack is hugely negative (tool may rebalance with a more realistic target):
+  -> run_evaluation(filename='design_v2.v', target_delay=1000)
+
+[TOOL RESULT]
+[Step 8/60]
+[Eval saved to eval_3/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3267610.915905639
+  Metrics:
+    area_delay_product: 3267610.915905639
+    delay: 856.8926
+    area: 3813.3260993333806
+    power: 1.55
+    target_delay: 1000
+    worst_slack: -872.23
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[7].g_pe_col[6].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[7].g_pe_col[6].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[7].g_pe_col[6].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      81.15   81.15 v u_array.g_pe_row[7].g_pe_col[6].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      43.11  124.27 ^ _40701_/Y (NOR3xp33_ASAP7_75t_R)
+      37.53  161.80 v _40703_/Y (NOR2xp33_ASAP7_75t_R)
+      52.26  214.06 ^ _40740_/Y (AOI21xp33_ASAP7_75t_R)
+      39.22  253.28 ^ _40786_/Y (AO221x1_ASAP7_75t_R)
+      42.78  296.07 ^ _40787_/Y (HB1xp67_ASAP7_75t_R)
+      30.18  326.25 ^ _40788_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.20  360.45 ^ _40789_/Y (XOR2xp5_ASAP7_75t_R)
+      37.57  398.02 ^ _40790_/Y (XOR2xp5_ASAP7_75t_R)
+      26.57  424.59 ^ _40791_/Y (XNOR2xp5_ASAP7_75t_R)
+      20.37  444.96 v _40792_/Y (XOR2xp5_ASAP7_75t_R)
+      28.20  473.17 v _40794_/Y (AO21x1_ASAP7_75t_R)
+      32.37  505.53 ^ _40795_/Y (NAND2xp33_ASAP7_75t_R)
+      27.41  532.94 v _40831_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      36.68  569.62 ^ _40877_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      29.14  598.76 v _40905_/Y (MAJIxp5_ASAP7_75t_R)
+      26.83  625.59 v _40939_/Y (AO21x1_ASAP7_75t_R)
+      46.00  671.59 v _40940_/Y (HB1xp67_ASAP7_75t_R)
+      35.44  707.02 v _40941_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.94  738.96 ^ _40942_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      30.80  769.76 v _40958_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      26.08  795.84 ^ _40965_/Y (MAJIxp5_ASAP7_75t_R)
+      22.52  818.36 ^ _40967_/Y (XNOR2xp5_ASAP7_75t_R)
+      20.09  838.46 ^ _40970_/Y (AO21x1_ASAP7_75t_R)
+      18.44  856.89 ^ _40971_/Y (HB1xp67_ASAP7_75t_R)
+       0.00  856.89 ^ u_array.g_pe_row[7].g_pe_col[6].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             856.89   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[7].g_pe_col[6].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     -20.34  -15.34   library setup time
+             -15.34   data required time
+    ---------------------------------------------------------
+             -15.34   data required time
+            -856.89   data arrival time
+    ---------------------------------------------------------
+            -872.23   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v2.v', target_delay=700)
+
+[TOOL RESULT]
+[Step 9/60]
+[Eval saved to eval_4/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3147515.916355958
+  Metrics:
+    area_delay_product: 3147515.916355958
+    delay: 819.2783
+    area: 3841.815310323682
+    power: 1.57
+    target_delay: 700
+    worst_slack: -819.14
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      90.03   90.03 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      42.37  132.41 v _41220_/Y (NOR3x1_ASAP7_75t_R)
+      32.50  164.91 v _41261_/Y (OR2x2_ASAP7_75t_R)
+      28.81  193.72 v _41263_/Y (XNOR2xp5_ASAP7_75t_R)
+      14.90  208.62 ^ _41307_/Y (NAND2xp5_ASAP7_75t_R)
+      51.51  260.12 v _41309_/Y (OAI311xp33_ASAP7_75t_R)
+      48.55  308.67 v _41347_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.16  338.83 v _41348_/Y (XOR2xp5_ASAP7_75t_R)
+      31.66  370.49 v _41349_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.44  404.93 v _41350_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.99  436.92 v _41351_/Y (XNOR2xp5_ASAP7_75t_R)
+      32.18  469.09 v _41352_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.72  499.81 ^ _41361_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      26.79  526.60 v _41362_/Y (NOR2xp33_ASAP7_75t_R)
+      33.29  559.89 v _41387_/Y (XNOR2xp5_ASAP7_75t_R)
+      37.35  597.24 v _41388_/Y (XNOR2xp5_ASAP7_75t_R)
+      44.56  641.80 ^ _41427_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      38.47  680.28 v _41453_/Y (MAJIxp5_ASAP7_75t_R)
+      44.14  724.41 ^ _41474_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      24.54  748.95 v _41480_/Y (MAJIxp5_ASAP7_75t_R)
+      28.40  777.36 v _41482_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.91  802.27 v _41484_/Y (AO21x1_ASAP7_75t_R)
+      17.01  819.28 v _41485_/Y (BUFx6f_ASAP7_75t_R)
+       0.00  819.28 v u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             819.28   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -4.86    0.14   library setup time
+               0.14   data required time
+    ---------------------------------------------------------
+               0.14   data required time
+            -819.28   data arrival time
+    ---------------------------------------------------------
+            -819.14   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v2.v', target_delay=100)
+
+[TOOL RESULT]
+[Step 10/60]
+[Eval saved to eval_5/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3147515.916355958
+  Metrics:
+    area_delay_product: 3147515.916355958
+    delay: 819.2783
+    area: 3841.815310323682
+    power: 1.57
+    target_delay: 100
+    worst_slack: -819.14
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      90.03   90.03 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      42.37  132.41 v _41220_/Y (NOR3x1_ASAP7_75t_R)
+      32.50  164.91 v _41261_/Y (OR2x2_ASAP7_75t_R)
+      28.81  193.72 v _41263_/Y (XNOR2xp5_ASAP7_75t_R)
+      14.90  208.62 ^ _41307_/Y (NAND2xp5_ASAP7_75t_R)
+      51.51  260.12 v _41309_/Y (OAI311xp33_ASAP7_75t_R)
+      48.55  308.67 v _41347_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.16  338.83 v _41348_/Y (XOR2xp5_ASAP7_75t_R)
+      31.66  370.49 v _41349_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.44  404.93 v _41350_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.99  436.92 v _41351_/Y (XNOR2xp5_ASAP7_75t_R)
+      32.18  469.09 v _41352_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.72  499.81 ^ _41361_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      26.79  526.60 v _41362_/Y (NOR2xp33_ASAP7_75t_R)
+      33.29  559.89 v _41387_/Y (XNOR2xp5_ASAP7_75t_R)
+      37.35  597.24 v _41388_/Y (XNOR2xp5_ASAP7_75t_R)
+      44.56  641.80 ^ _41427_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      38.47  680.28 v _41453_/Y (MAJIxp5_ASAP7_75t_R)
+      44.14  724.41 ^ _41474_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      24.54  748.95 v _41480_/Y (MAJIxp5_ASAP7_75t_R)
+      28.40  777.36 v _41482_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.91  802.27 v _41484_/Y (AO21x1_ASAP7_75t_R)
+      17.01  819.28 v _41485_/Y (BUFx6f_ASAP7_75t_R)
+       0.00  819.28 v u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             819.28   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -4.86    0.14   library setup time
+               0.14   data required time
+    ---------------------------------------------------------
+               0.14   data required time
+            -819.28   data arrival time
+    ---------------------------------------------------------
+            -819.14   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+`target_delay` has no effect — the synthesis is already at its best-effort point. The critical path is the combined 8×8 multiply + 19-bit add in the bottom-row PEs. Let me split the MAC structurally into separate `*` and `+` so ABC can balance the adder tree against the multiply output, and drop the clock-gating latch on `a_east` (unobservable):
+  -> create_file(content="//#############################################################################\n// Weight-stationary systolic matrix-multiply tile (TPU MXU) - optimized v3.\n//\n//  - 19-bit internal partial sums (max |sum| = 131072 fits signed 19),\n//    sign-extended to 32 bits at the output.\n//  - No datapath resets (unobservable: garbage drains before first c_valid).\n//  - MAC written as separate multiply and add so the mapper can balance the\n//    19-bit adder tree directly against the multiplier outputs.\n//  - a_east activation pipe register updated unconditionally (its value when\n//    en is low never reaches the outputs).\n//#############################################################################\n\nmodule tpu_pe\n  #(parameter DW = 8,\n    parameter PSW = 19)\n   (\n    input\t\t  clk,\n    input\t\t  ld,\n    input\t\t  en,\n    input [DW-1:0]\t  w_north,\n    input [DW-1:0]\t  a_west,\n    input [PSW-1:0]\t  psum_north,\n    output [DW-1:0]\t  w_south,\n    output reg [DW-1:0]\t  a_east,\n    output reg [PSW-1:0]  psum_south\n    );\n\n   reg [DW-1:0] w;\n   assign w_south = w;\n\n   wire signed [2*DW-1:0]  prod = $signed(a_west) * $signed(w);\n   wire signed [PSW-1:0]   prod_sx =\n\t   {{(PSW-2*DW){prod[2*DW-1]}}, prod};\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      a_east <= a_west;\n      if (en)\n        psum_south <= psum_north + prod_sx;\n   end\n\nendmodule\n\nmodule tpu_array\n  #(parameter N = 8,\n    parameter DW = 8,\n    parameter PSW = 19)\n   (\n    input\t\tclk,\n    input\t\tld,\n    input\t\ten,\n    input [N*DW-1:0]\tw_top,\n    input [N*DW-1:0]\ta_left,\n    output [N*PSW-1:0]\tc_bot\n    );\n\n   wire [DW-1:0]   a_h    [0:N-1][0:N];\n   wire [PSW-1:0]  psum_v [0:N][0:N-1];\n   wire [DW-1:0]   w_v    [0:N][0:N-1];\n\n   genvar\t   i, j;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_west\n         assign a_h[i][0] = a_left[i*DW +: DW];\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_edge\n         assign psum_v[0][j] = {PSW{1'b0}};\n         assign w_v[0][j]    = w_top[j*DW +: DW];\n         assign c_bot[j*PSW +: PSW] = psum_v[N][j];\n      end\n      for (i = 0; i < N; i = i + 1) begin : g_pe_row\n         for (j = 0; j < N; j = j + 1) begin : g_pe_col\n            tpu_pe #(.DW(DW), .PSW(PSW)) u_pe\n              (.clk        (clk),\n               .ld         (ld),\n               .en         (en),\n               .w_north    (w_v[i][j]),\n               .a_west     (a_h[i][j]),\n               .psum_north (psum_v[i][j]),\n               .w_south    (w_v[i+1][j]),\n               .a_east     (a_h[i][j+1]),\n               .psum_south (psum_v[i+1][j]));\n         end\n      end\n   endgenerate\n\nendmodule\n\nmodule tpu\n  #(parameter N = 8,\n    parameter DW = 8,\n    parameter ACCW = 32,\n    parameter PSW = 19)\n   (\n    input\t\tclk,\n    input\t\trst,\n    input\t\tw_valid,\n    input [N*DW-1:0]\tw_data,\n    input\t\ta_valid,\n    input [N*DW-1:0]\ta_data,\n    output\t\tc_valid,\n    output [N*ACCW-1:0]\tc_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   wire\t      ld = w_valid;\n   wire\t      en = ~w_valid;\n\n   //##########################################################################\n   // Input skew: row i delayed i cycles. Zeros injected when a_valid is low.\n   //##########################################################################\n   wire [N*DW-1:0] a_left;\n   genvar\t   i;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_skew\n         wire [DW-1:0] din =\n\t\t       a_valid ? a_data[i*DW +: DW] : {DW{1'b0}};\n         if (i == 0) begin : g_skew0\n            assign a_left[i*DW +: DW] = din;\n         end\n         else begin : g_skewn\n            reg [DW-1:0] sr [0:i-1];\n            integer k;\n            always @(posedge clk) begin\n               if (en) begin\n                  sr[0] <= din;\n                  for (k = 1; k < i; k = k + 1)\n                    sr[k] <= sr[k-1];\n               end\n            end\n            assign a_left[i*DW +: DW] = sr[i-1];\n         end\n      end\n   endgenerate\n\n   //##########################################################################\n   // The systolic array (19-bit internal partial sums).\n   //##########################################################################\n   wire [N*PSW-1:0] c_bot;\n   tpu_array #(.N(N), .DW(DW), .PSW(PSW)) u_array\n     (.clk(clk), .ld(ld), .en(en),\n      .w_top(w_data), .a_left(a_left), .c_bot(c_bot));\n\n   //##########################################################################\n   // Output de-skew on 19-bit values, sign-extended to ACCW afterwards.\n   //##########################################################################\n   genvar j;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_deskew\n         localparam D = N - 1 - j;\n         wire [PSW-1:0] cin = c_bot[j*PSW +: PSW];\n         if (D == 0) begin : g_deskew0\n            assign c_data[j*ACCW +: ACCW] =\n\t\t   {{(ACCW-PSW){cin[PSW-1]}}, cin};\n         end\n         else begin : g_deskewn\n            reg [PSW-1:0] dr [0:D-1];\n            integer k;\n            always @(posedge clk) begin\n               if (en) begin\n                  dr[0] <= cin;\n                  for (k = 1; k < D; k = k + 1)\n                    dr[k] <= dr[k-1];\n               end\n            end\n            assign c_data[j*ACCW +: ACCW] =\n\t\t   {{(ACCW-PSW){dr[D-1][PSW-1]}}, dr[D-1]};\n         end\n      end\n   endgenerate\n\n   //##########################################################################\n   // Valid pipeline (only reset in the design).\n   //##########################################################################\n   reg [LAT-1:0] vpipe;\n   always @(posedge clk) begin\n      if (rst)\n        vpipe <= {LAT{1'b0}};\n      else if (en)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\n\nendmodule\n", filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 11/60]
+Created file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 12/60]
+[Eval saved to eval_6/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 495/516
+  Sim output: TB_ERROR line=271 exp(cv=1 cd=00004376ffffcd1d00004432ffffcff1000074e700001e12000082bd00001f97) got(cv=1 cd=00000f93ffffbfd500001feaffffbd4f000074e700001e12000082bd00001f97)
+TB_ERROR line=272 exp(cv .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_p8sh27ul/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+v3 fails — removing the `en` gate on `a_east` was wrong: when `w_valid` stalls the array, the activations keep shifting horizontally while partial sums stay put, corrupting results. Reverting that change but keeping the split `*`/`+` structure:
+  -> edit_file(filename='design_v3.v', new_string='   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= psum_north + prod_sx;\n      end\n   end', old_string='   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      a_east <= a_west;\n      if (en)\n        psum_south <= psum_north + prod_sx;\n   end')
+
+[TOOL RESULT]
+[Step 13/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 14/60]
+[Eval saved to eval_7/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3175413.1213331595
+  Metrics:
+    area_delay_product: 3175413.1213331595
+    delay: 820.7617
+    area: 3868.8612313819704
+    power: 1.58
+    target_delay: 500.0
+    worst_slack: -820.62
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      92.81   92.81 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      44.72  137.52 v _53898_/Y (NOR3x1_ASAP7_75t_R)
+      34.31  171.83 v _53935_/Y (OR2x2_ASAP7_75t_R)
+      23.87  195.70 v _53937_/Y (XNOR2x1_ASAP7_75t_R)
+      13.42  209.13 ^ _53981_/Y (NAND2xp5_ASAP7_75t_R)
+      50.83  259.95 v _53983_/Y (OAI311xp33_ASAP7_75t_R)
+      42.26  302.21 v _53984_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.07  333.28 v _53985_/Y (XNOR2xp5_ASAP7_75t_R)
+      33.12  366.40 v _53986_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.68  391.07 ^ _53987_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.33  425.41 ^ _53988_/Y (XOR2xp5_ASAP7_75t_R)
+      41.90  467.31 ^ _53989_/Y (XOR2xp5_ASAP7_75t_R)
+      45.02  512.32 v _53990_/Y (XNOR2x2_ASAP7_75t_R)
+      26.98  539.30 v _53991_/Y (XOR2x1_ASAP7_75t_R)
+      19.88  559.19 ^ _53997_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      35.78  594.97 v _54039_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      48.96  643.92 ^ _54103_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      38.49  682.41 v _54126_/Y (MAJIxp5_ASAP7_75t_R)
+      45.11  727.53 ^ _54149_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      24.76  752.29 v _54155_/Y (MAJIxp5_ASAP7_75t_R)
+      26.86  779.15 v _54157_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.61  803.76 v _54159_/Y (AO21x1_ASAP7_75t_R)
+      17.01  820.76 v _54160_/Y (BUFx6f_ASAP7_75t_R)
+       0.00  820.76 v u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             820.76   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -4.86    0.14   library setup time
+               0.14   data required time
+    ---------------------------------------------------------
+               0.14   data required time
+            -820.76   data arrival time
+    ---------------------------------------------------------
+            -820.62   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+The split `*`/`+` is neutral — ABC normalizes anyway. The critical path is dominated by `mul(a_west, w) + psum`. Let me try the CSA-injection structure (map the psum as the multiplier's third partial-product row, like a fused multiply-add):
+  -> edit_file(filename='design_v3.v', new_string="   reg [DW-1:0] w;\n   assign w_south = w;\n\n   // Fused multiply-add expressed as carry-save injection: psum_north is\n   // added as an extra partial-product row of the 8x8 signed multiplier.\n   // (b^s)^(cin^s) = ~b^cin, and cin^s is just cin with its LSB inverted.\n   wire [DW-1:0]     a = a_west;\n   wire [2*DW-1:0]   pp0 = {{DW{a[0]}}, {DW{1'b0}}} & {{DW{1'b0}}, a} << 0;\n   // use plain partial products: pp_k = (w[k] ? (a<<k) : 0)\n   wire [15:0] p0 = w[0] ? {{8{a[7]}}, a}       : 16'b0;\n   wire [15:0] p1 = w[1] ? ({{8{a[7]}}, a} << 1) : 16'b0;\n   wire [15:0] p2 = w[2] ? ({{8{a[7]}}, a} << 2) : 16'b0;\n   wire [15:0] p3 = w[3] ? ({{8{a[7]}}, a} << 3) : 16'b0;\n   wire [15:0] p4 = w[4] ? ({{8{a[7]}}, a} << 4) : 16'b0;\n   wire [15:0] p5 = w[5] ? ({{8{a[7]}}, a} << 5) : 16'b0;\n   wire [15:0] p6 = w[6] ? ({{8{a[7]}}, a} << 6) : 16'b0;\n   wire [15:0] p7 = w[7] ? ({{8{~a[7]}}, ~a} << 7) : 16'b0;\n   // inject psum_north as the 9th CSA row, splitting the (b^s)^(cin^s)\n   // correction into its constant part and the inverted sign bits\n   wire [18:0] psx = {psum_north[18:0] ^ 19'h30001};\n   wire [18:0] s1, c1, s2, c2, s3, c3;\n   assign {c1, s1} = {1'b0, psx} + {p0[16], p0, 2'b10}\n                   + {p1[15:0], 3'b000};\n   assign {c2, s2} = c1 + s1 + {p2[15:0], 4'b0000};\n   assign {c3, s3} = c2 + s2 + {p3[15:0], 5'b00000};\n   wire [19:0] u1, v1, u2, v2;\n   assign {u1, v1} = c3 + s3 + {p4[15:0], 6'b000000};\n   assign {u2, v2} = u1 + v1 + {p5[15:0], 7'b0000000};\n   wire [20:0] x1, y1, x2, y2;\n   assign {x1, y1} = u2 + v2 + {p6[15:0], 8'b00000000};\n   assign {x2, y2} = x1 + y1 + {p7[15:0], 9'b000000000};\n   wire [18:0] mac = (x2 + y2);\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= mac;\n      end\n   end", old_string='   reg [DW-1:0] w;\n   assign w_south = w;\n\n   wire signed [2*DW-1:0]  prod = $signed(a_west) * $signed(w);\n   wire signed [PSW-1:0]   prod_sx =\n\t   {{(PSW-2*DW){prod[2*DW-1]}}, prod};\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= psum_north + prod_sx;\n      end\n   end')
+
+[TOOL RESULT]
+[Step 15/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> edit_file(filename='design_v3.v', new_string='   wire [DW-1:0]     a = a_west;\n   // plain partial products: pp_k = (w[k] ? (a<<k) : 0), with the last row\n   // negated (a and w both signed -> Baugh-Wooley correction)', old_string="   wire [DW-1:0]     a = a_west;\n   wire [2*DW-1:0]   pp0 = {{DW{a[0]}}, {DW{1'b0}}} & {{DW{1'b0}}, a} << 0;\n   // use plain partial products: pp_k = (w[k] ? (a<<k) : 0)")
+
+[TOOL RESULT]
+[Step 16/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 17/60]
+[Eval saved to eval_8/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=0000001000000010000000100000001000000010000000100000001000000010)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_04hph4hj/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+My Baugh-Wooley constants/alignment were wrong (constant 16 error visible). Let me rewrite the PE arithmetic cleanly with the properly-derived Baugh-Wooley matrix: rows k=0..6 hold `a[6:0]&w[k]` plus the negated sign term `~(w[k]&a[7])` at bit 7+k, row 0 also carries the 2^8 constant; row 7 holds the negated row terms plus a7w7 and the 2^15 constant; psum injected with the `(b^s)^(cin^s)` correction folded in as flipped bits 16,17,0:
+  -> edit_file(filename='design_v3.v', new_string="   reg [DW-1:0] w;\n   assign w_south = w;\n\n   // Fused multiply-add: signed 8x8 product + psum_north, built as a\n   // Baugh-Wooley partial-product matrix with psum injected as a 9th CSA\n   // row.  Row construction (mod 2^19, result fits signed 19 bits):\n   //   rows k=0..6: bits[6+k:k]   = {7{w[k]}} & a[6:0]\n   //                bit [7+k]     = ~(w[k] & a[7])\n   //   row 0:       bit [8]       = 1   (B-W constant 2^8)\n   //   row 7:       bits[13:7]    = {7{w[7]}} & ~a[6:0]\n   //                bit [14]      = w[7] & a[7]\n   //                bit [15]      = 1   (B-W constant 2^15)\n   //   psum row:    psum ^ 19'h30001  ((b^s)^(cin^s) correction for the\n   //                sign-extension-free 19-bit accumulation: bits 16,17\n   //                and the LSB carry-in are folded in here)\n   wire [DW-1:0]     a = a_west;\n   wire [18:0] r [0:8];\n   genvar k;\n   generate\n      for (k = 0; k < 7; k = k + 1) begin : g_bwrow\n         assign r[k] = { {(10-k){1'b0}},\n                         ~(w[k] & a[7]),\n                         ({7{w[k]}} & a[6:0]),\n                         {k{1'b0}} };\n      end\n   endgenerate\n   assign r[7] = { 3'b001,\n                   w[7] & a[7],\n                   ({7{w[7]}} & ~a[6:0]),\n                   7'b0000000 };\n   // psum injection row with correction bits 16, 17, 0 flipped\n   assign r[8] = psum_north ^ 19'h30001;\n\n   // 9-row carry-save reduction tree + final carry-propagate add\n   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;\n   assign {c1, s1} = {1'b0, r[8]} + {1'b0, r[0] | 19'h00100} + {1'b0, r[1]};\n   assign {c2, s2} = {1'b0, r[2]} + {1'b0, r[3]} + {1'b0, r[4]};\n   assign {c3, s3} = {1'b0, r[5]} + {1'b0, r[6]} + {1'b0, r[7]};\n   assign {c4, s4} = c1 + s1 + c2;\n   assign {c5, s5} = s2 + c3 + s3;\n   assign {c6, s6} = c4 + s4 + c5;\n   assign {c7, s7} = s5 + c6 + s6;\n   wire [18:0] mac = (c7 + s7);\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= mac;\n      end\n   end", old_string="   reg [DW-1:0] w;\n   assign w_south = w;\n\n   // Fused multiply-add expressed as carry-save injection: psum_north is\n   // added as an extra partial-product row of the 8x8 signed multiplier.\n   // (b^s)^(cin^s) = ~b^cin, and cin^s is just cin with its LSB inverted.\n   wire [DW-1:0]     a = a_west;\n   // plain partial products: pp_k = (w[k] ? (a<<k) : 0), with the last row\n   // negated (a and w both signed -> Baugh-Wooley correction)\n   wire [15:0] p0 = w[0] ? {{8{a[7]}}, a}       : 16'b0;\n   wire [15:0] p1 = w[1] ? ({{8{a[7]}}, a} << 1) : 16'b0;\n   wire [15:0] p2 = w[2] ? ({{8{a[7]}}, a} << 2) : 16'b0;\n   wire [15:0] p3 = w[3] ? ({{8{a[7]}}, a} << 3) : 16'b0;\n   wire [15:0] p4 = w[4] ? ({{8{a[7]}}, a} << 4) : 16'b0;\n   wire [15:0] p5 = w[5] ? ({{8{a[7]}}, a} << 5) : 16'b0;\n   wire [15:0] p6 = w[6] ? ({{8{a[7]}}, a} << 6) : 16'b0;\n   wire [15:0] p7 = w[7] ? ({{8{~a[7]}}, ~a} << 7) : 16'b0;\n   // inject psum_north as the 9th CSA row, splitting the (b^s)^(cin^s)\n   // correction into its constant part and the inverted sign bits\n   wire [18:0] psx = {psum_north[18:0] ^ 19'h30001};\n   wire [18:0] s1, c1, s2, c2, s3, c3;\n   assign {c1, s1} = {1'b0, psx} + {p0[16], p0, 2'b10}\n                   + {p1[15:0], 3'b000};\n   assign {c2, s2} = c1 + s1 + {p2[15:0], 4'b0000};\n   assign {c3, s3} = c2 + s2 + {p3[15:0], 5'b00000};\n   wire [19:0] u1, v1, u2, v2;\n   assign {u1, v1} = c3 + s3 + {p4[15:0], 6'b000000};\n   assign {u2, v2} = u1 + v1 + {p5[15:0], 7'b0000000};\n   wire [20:0] x1, y1, x2, y2;\n   assign {x1, y1} = u2 + v2 + {p6[15:0], 8'b00000000};\n   assign {x2, y2} = x1 + y1 + {p7[15:0], 9'b000000000};\n   wire [18:0] mac = (x2 + y2);\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= mac;\n      end\n   end")
+
+[TOOL RESULT]
+[Step 18/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 19/60]
+[Eval saved to eval_9/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=0002040000020400000204000002040000020400000204000002040000020400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_zds2egha/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+Width bug: my row concatenations were 18 bits instead of 19, misplacing the sign-correction bits. Fixing the zero-padding counts:
+  -> edit_file(filename='design_v3.v', new_string="         assign r[k] = { {(11-k){1'b0}},\n                         ~(w[k] & a[7]),\n                         ({7{w[k]}} & a[6:0]),\n                         {k{1'b0}} };\n      end\n   endgenerate\n   assign r[7] = { 4'b0001,", old_string="         assign r[k] = { {(10-k){1'b0}},\n                         ~(w[k] & a[7]),\n                         ({7{w[k]}} & a[6:0]),\n                         {k{1'b0}} };\n      end\n   endgenerate\n   assign r[7] = { 3'b001,")
+
+[TOOL RESULT]
+[Step 20/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 21/60]
+[Eval saved to eval_10/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=0002040000020400000204000002040000020400000204000002040000020400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_0eavy_5r/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+Same failure — let me re-read the actual PE file to check the width arithmetic carefully:
+  -> read_file(filename='design_v3.v', limit=80)
+
+[TOOL RESULT]
+[Step 22/60]
+//#############################################################################
+// Weight-stationary systolic matrix-multiply tile (TPU MXU) - optimized v3.
+//
+//  - 19-bit internal partial sums (max |sum| = 131072 fits signed 19),
+//    sign-extended to 32 bits at the output.
+//  - No datapath resets (unobservable: garbage drains before first c_valid).
+//  - MAC written as separate multiply and add so the mapper can balance the
+//    19-bit adder tree directly against the multiplier outputs.
+//  - a_east activation pipe register updated unconditionally (its value when
+//    en is low never reaches the outputs).
+//#############################################################################
+
+module tpu_pe
+  #(parameter DW = 8,
+    parameter PSW = 19)
+   (
+    input		  clk,
+    input		  ld,
+    input		  en,
+    input [DW-1:0]	  w_north,
+    input [DW-1:0]	  a_west,
+    input [PSW-1:0]	  psum_north,
+    output [DW-1:0]	  w_south,
+    output reg [DW-1:0]	  a_east,
+    output reg [PSW-1:0]  psum_south
+    );
+
+   reg [DW-1:0] w;
+   assign w_south = w;
+
+   // Fused multiply-add: signed 8x8 product + psum_north, built as a
+   // Baugh-Wooley partial-product matrix with psum injected as a 9th CSA
+   // row.  Row construction (mod 2^19, result fits signed 19 bits):
+   //   rows k=0..6: bits[6+k:k]   = {7{w[k]}} & a[6:0]
+   //                bit [7+k]     = ~(w[k] & a[7])
+   //   row 0:       bit [8]       = 1   (B-W constant 2^8)
+   //   row 7:       bits[13:7]    = {7{w[7]}} & ~a[6:0]
+   //                bit [14]      = w[7] & a[7]
+   //                bit [15]      = 1   (B-W constant 2^15)
+   //   psum row:    psum ^ 19'h30001  ((b^s)^(cin^s) correction for the
+   //                sign-extension-free 19-bit accumulation: bits 16,17
+   //                and the LSB carry-in are folded in here)
+   wire [DW-1:0]     a = a_west;
+   wire [18:0] r [0:8];
+   genvar k;
+   generate
+      for (k = 0; k < 7; k = k + 1) begin : g_bwrow
+         assign r[k] = { {(11-k){1'b0}},
+                         ~(w[k] & a[7]),
+                         ({7{w[k]}} & a[6:0]),
+                         {k{1'b0}} };
+      end
+   endgenerate
+   assign r[7] = { 4'b0001,
+                   w[7] & a[7],
+                   ({7{w[7]}} & ~a[6:0]),
+                   7'b0000000 };
+   // psum injection row with correction bits 16, 17, 0 flipped
+   assign r[8] = psum_north ^ 19'h30001;
+
+   // 9-row carry-save reduction tree + final carry-propagate add
+   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;
+   assign {c1, s1} = {1'b0, r[8]} + {1'b0, r[0] | 19'h00100} + {1'b0, r[1]};
+   assign {c2, s2} = {1'b0, r[2]} + {1'b0, r[3]} + {1'b0, r[4]};
+   assign {c3, s3} = {1'b0, r[5]} + {1'b0, r[6]} + {1'b0, r[7]};
+   assign {c4, s4} = c1 + s1 + c2;
+   assign {c5, s5} = s2 + c3 + s3;
+   assign {c6, s6} = c4 + s4 + c5;
+   assign {c7, s7} = s5 + c6 + s6;
+   wire [18:0] mac = (c7 + s7);
+
+   always @(posedge clk) begin
+      if (ld)
+        w <= w_north;
+      if (en) begin
+         a_east     <= a_west;
+         psum_south <= mac;
+      end
+   end
+
+
+... (showing lines 1-80 of 224; use offset/limit for more)
+
+[ASSISTANT]
+Width arithmetic checks out, so something subtle is off. Rather than keep burning steps on the hand-built BW matrix, let me quickly A/B test three simple structural variants of the PE add: explicit sign-extension concat (matches v2 baseline), `$signed` operands, and input-swapped operand order:
+  -> create_file(content='// v4a: explicit sign-extension concat, original operand order\nmodule tpu_pe\n  #(parameter DW = 8,\n    parameter PSW = 19)\n   (\n    input\t\t  clk,\n    input\t\t  ld,\n    input\t\t  en,\n    input [DW-1:0]\t  w_north,\n    input [DW-1:0]\t  a_west,\n    input [PSW-1:0]\t  psum_north,\n    output [DW-1:0]\t  w_south,\n    output reg [DW-1:0]\t  a_east,\n    output reg [PSW-1:0]  psum_south\n    );\n\n   reg [DW-1:0] w;\n   assign w_south = w;\n\n   wire [2*DW-1:0]  prod = $signed(a_west) * $signed(w);\n   wire [PSW-1:0]   prod_sx = {{(PSW-2*DW){prod[2*DW-1]}}, prod};\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= psum_north + prod_sx;\n      end\n   end\n\nendmodule\n\n`include "common.vh"\n', filename='design_v4a.v')
+  -> create_file(content='// v4b: $signed operands, swapped operand order (product first)\nmodule tpu_pe\n  #(parameter DW = 8,\n    parameter PSW = 19)\n   (\n    input\t\t  clk,\n    input\t\t  ld,\n    input\t\t  en,\n    input [DW-1:0]\t  w_north,\n    input [DW-1:0]\t  a_west,\n    input [PSW-1:0]\t  psum_north,\n    output [DW-1:0]\t  w_south,\n    output reg [DW-1:0]\t  a_east,\n    output reg [PSW-1:0]  psum_south\n    );\n\n   reg [DW-1:0] w;\n   assign w_south = w;\n\n   wire signed [PSW-1:0] prod = $signed(a_west) * $signed(w);\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= prod + $signed(psum_north);\n      end\n   end\n\nendmodule\n\n`include "common.vh"\n', filename='design_v4b.v')
+  -> create_file(content='// v4c: psum sign-extended first, then added to 16-bit product\nmodule tpu_pe\n  #(parameter DW = 8,\n    parameter PSW = 19)\n   (\n    input\t\t  clk,\n    input\t\t  ld,\n    input\t\t  en,\n    input [DW-1:0]\t  w_north,\n    input [DW-1:0]\t  a_west,\n    input [PSW-1:0]\t  psum_north,\n    output [DW-1:0]\t  w_south,\n    output reg [DW-1:0]\t  a_east,\n    output reg [PSW-1:0]  psum_south\n    );\n\n   reg [DW-1:0] w;\n   assign w_south = w;\n\n   wire [2*DW-1:0]  prod = $signed(a_west) * $signed(w);\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= prod + {{(PSW-2*DW){psum_north[PSW-1]}}, psum_north};\n      end\n   end\n\nendmodule\n\n`include "common.vh"\n', filename='design_v4c.v')
+
+[TOOL RESULT]
+[Step 23/60]
+Created file: design_v4a.v
+
+[TOOL RESULT]
+[Step 23/60]
+Created file: design_v4b.v
+
+[TOOL RESULT]
+[Step 23/60]
+Created file: design_v4c.v
+
+[ASSISTANT]
+I need the shared array/top code as an includable file. Let me create it:
+  -> create_file(content="// Shared array + top-level for tpu design variants (expects tpu_pe defined).\n\nmodule tpu_array\n  #(parameter N = 8,\n    parameter DW = 8,\n    parameter PSW = 19)\n   (\n    input\t\tclk,\n    input\t\tld,\n    input\t\ten,\n    input [N*DW-1:0]\tw_top,\n    input [N*DW-1:0]\ta_left,\n    output [N*PSW-1:0]\tc_bot\n    );\n\n   wire [DW-1:0]   a_h    [0:N-1][0:N];\n   wire [PSW-1:0]  psum_v [0:N][0:N-1];\n   wire [DW-1:0]   w_v    [0:N][0:N-1];\n\n   genvar\t   i, j;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_west\n         assign a_h[i][0] = a_left[i*DW +: DW];\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_edge\n         assign psum_v[0][j] = {PSW{1'b0}};\n         assign w_v[0][j]    = w_top[j*DW +: DW];\n         assign c_bot[j*PSW +: PSW] = psum_v[N][j];\n      end\n      for (i = 0; i < N; i = i + 1) begin : g_pe_row\n         for (j = 0; j < N; j = j + 1) begin : g_pe_col\n            tpu_pe #(.DW(DW), .PSW(PSW)) u_pe\n              (.clk        (clk),\n               .ld         (ld),\n               .en         (en),\n               .w_north    (w_v[i][j]),\n               .a_west     (a_h[i][j]),\n               .psum_north (psum_v[i][j]),\n               .w_south    (w_v[i+1][j]),\n               .a_east     (a_h[i][j+1]),\n               .psum_south (psum_v[i+1][j]));\n         end\n      end\n   endgenerate\n\nendmodule\n\nmodule tpu\n  #(parameter N = 8,\n    parameter DW = 8,\n    parameter ACCW = 32,\n    parameter PSW = 19)\n   (\n    input\t\tclk,\n    input\t\trst,\n    input\t\tw_valid,\n    input [N*DW-1:0]\tw_data,\n    input\t\ta_valid,\n    input [N*DW-1:0]\ta_data,\n    output\t\tc_valid,\n    output [N*ACCW-1:0]\tc_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   wire\t      ld = w_valid;\n   wire\t      en = ~w_valid;\n\n   // Input skew: row i delayed i cycles; zeros injected when a_valid is low.\n   wire [N*DW-1:0] a_left;\n   genvar\t   i;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_skew\n         wire [DW-1:0] din =\n\t\t       a_valid ? a_data[i*DW +: DW] : {DW{1'b0}};\n         if (i == 0) begin : g_skew0\n            assign a_left[i*DW +: DW] = din;\n         end\n         else begin : g_skewn\n            reg [DW-1:0] sr [0:i-1];\n            integer k;\n            always @(posedge clk) begin\n               if (en) begin\n                  sr[0] <= din;\n                  for (k = 1; k < i; k = k + 1)\n                    sr[k] <= sr[k-1];\n               end\n            end\n            assign a_left[i*DW +: DW] = sr[i-1];\n         end\n      end\n   endgenerate\n\n   wire [N*PSW-1:0] c_bot;\n   tpu_array #(.N(N), .DW(DW), .PSW(PSW)) u_array\n     (.clk(clk), .ld(ld), .en(en),\n      .w_top(w_data), .a_left(a_left), .c_bot(c_bot));\n\n   // Output de-skew on PSW-bit values, sign-extended to ACCW afterwards.\n   genvar j;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_deskew\n         localparam D = N - 1 - j;\n         wire [PSW-1:0] cin = c_bot[j*PSW +: PSW];\n         if (D == 0) begin : g_deskew0\n            assign c_data[j*ACCW +: ACCW] =\n\t\t   {{(ACCW-PSW){cin[PSW-1]}}, cin};\n         end\n         else begin : g_deskewn\n            reg [PSW-1:0] dr [0:D-1];\n            integer k;\n            always @(posedge clk) begin\n               if (en) begin\n                  dr[0] <= cin;\n                  for (k = 1; k < D; k = k + 1)\n                    dr[k] <= dr[k-1];\n               end\n            end\n            assign c_data[j*ACCW +: ACCW] =\n\t\t   {{(ACCW-PSW){dr[D-1][PSW-1]}}, dr[D-1]};\n         end\n      end\n   endgenerate\n\n   // Valid pipeline (only reset in the design).\n   reg [LAT-1:0] vpipe;\n   always @(posedge clk) begin\n      if (rst)\n        vpipe <= {LAT{1'b0}};\n      else if (en)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\n\nendmodule\n", filename='common.vh')
+
+[TOOL RESULT]
+[Step 24/60]
+Created file: common.vh
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v4a.v')
+
+[TOOL RESULT]
+[Step 25/60]
+[Eval saved to eval_11/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3175413.1213331595
+  Metrics:
+    area_delay_product: 3175413.1213331595
+    delay: 820.7617
+    area: 3868.8612313819704
+    power: 1.58
+    target_delay: 500.0
+    worst_slack: -820.62
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      92.81   92.81 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      44.72  137.52 v _53898_/Y (NOR3x1_ASAP7_75t_R)
+      34.31  171.83 v _53935_/Y (OR2x2_ASAP7_75t_R)
+      23.87  195.70 v _53937_/Y (XNOR2x1_ASAP7_75t_R)
+      13.42  209.13 ^ _53981_/Y (NAND2xp5_ASAP7_75t_R)
+      50.83  259.95 v _53983_/Y (OAI311xp33_ASAP7_75t_R)
+      42.26  302.21 v _53984_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.07  333.28 v _53985_/Y (XNOR2xp5_ASAP7_75t_R)
+      33.12  366.40 v _53986_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.68  391.07 ^ _53987_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.33  425.41 ^ _53988_/Y (XOR2xp5_ASAP7_75t_R)
+      41.90  467.31 ^ _53989_/Y (XOR2xp5_ASAP7_75t_R)
+      45.02  512.32 v _53990_/Y (XNOR2x2_ASAP7_75t_R)
+      26.98  539.30 v _53991_/Y (XOR2x1_ASAP7_75t_R)
+      19.88  559.19 ^ _53997_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      35.78  594.97 v _54039_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      48.96  643.92 ^ _54103_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      38.49  682.41 v _54126_/Y (MAJIxp5_ASAP7_75t_R)
+      45.11  727.53 ^ _54149_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      24.76  752.29 v _54155_/Y (MAJIxp5_ASAP7_75t_R)
+      26.86  779.15 v _54157_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.61  803.76 v _54159_/Y (AO21x1_ASAP7_75t_R)
+      17.01  820.76 v _54160_/Y (BUFx6f_ASAP7_75t_R)
+       0.00  820.76 v u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             820.76   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -4.86    0.14   library setup time
+               0.14   data required time
+    ---------------------------------------------------------
+               0.14   data required time
+            -820.76   data arrival time
+    ---------------------------------------------------------
+            -820.62   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+v4a reproduces v2's area with v3's delay — synthesis noise matters more than style here. Let me evaluate the other variants:
+  -> run_evaluation(filename='design_v4b.v')
+  -> run_evaluation(filename='design_v4c.v')
+
+[TOOL RESULT]
+[Step 26/60]
+[Eval saved to eval_12/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3147515.916355958
+  Metrics:
+    area_delay_product: 3147515.916355958
+    delay: 819.2783
+    area: 3841.815310323682
+    power: 1.57
+    target_delay: 500.0
+    worst_slack: -819.14
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      90.03   90.03 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      42.37  132.41 v _41220_/Y (NOR3x1_ASAP7_75t_R)
+      32.50  164.91 v _41261_/Y (OR2x2_ASAP7_75t_R)
+      28.81  193.72 v _41263_/Y (XNOR2xp5_ASAP7_75t_R)
+      14.90  208.62 ^ _41307_/Y (NAND2xp5_ASAP7_75t_R)
+      51.51  260.12 v _41309_/Y (OAI311xp33_ASAP7_75t_R)
+      48.55  308.67 v _41347_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.16  338.83 v _41348_/Y (XOR2xp5_ASAP7_75t_R)
+      31.66  370.49 v _41349_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.44  404.93 v _41350_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.99  436.92 v _41351_/Y (XNOR2xp5_ASAP7_75t_R)
+      32.18  469.09 v _41352_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.72  499.81 ^ _41361_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      26.79  526.60 v _41362_/Y (NOR2xp33_ASAP7_75t_R)
+      33.29  559.89 v _41387_/Y (XNOR2xp5_ASAP7_75t_R)
+      37.35  597.24 v _41388_/Y (XNOR2xp5_ASAP7_75t_R)
+      44.56  641.80 ^ _41427_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      38.47  680.28 v _41453_/Y (MAJIxp5_ASAP7_75t_R)
+      44.14  724.41 ^ _41474_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      24.54  748.95 v _41480_/Y (MAJIxp5_ASAP7_75t_R)
+      28.40  777.36 v _41482_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.91  802.27 v _41484_/Y (AO21x1_ASAP7_75t_R)
+      17.01  819.28 v _41485_/Y (BUFx6f_ASAP7_75t_R)
+       0.00  819.28 v u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             819.28   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -4.86    0.14   library setup time
+               0.14   data required time
+    ---------------------------------------------------------
+               0.14   data required time
+            -819.28   data arrival time
+    ---------------------------------------------------------
+            -819.14   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[TOOL RESULT]
+[Step 26/60]
+[Eval saved to eval_13/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 163/184
+  Sim output: TB_ERROR line=61 exp(cv=1 cd=00002c27ffffd752fffffd85ffffd1dd00002aaa00002ea2ffffd654ffffc9ed) got(cv=1 cd=00002c270000d7520000fd850000d1dd00002aaa00002ea20000d6540000c9ed)
+TB_ERROR line=62 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_tet7d6ey/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+v4b exactly reproduces v2 (Yosys normalizes both identically); v4c failed on sign-extension. The PE add is stuck at ~819ps. Let me try a different accumulation topology — an **output-stationary variant** where each column accumulates vertically with a registered feedback (add chain feedback instead of feedforward), which may map differently. Actually, first let me try a simpler experiment: change the critical path by splitting the PE's 19-bit add into a 16-bit product-add section. 
+
+Actually, the most promising untried lever: the **deskew registers are 19-bit but could share work**, and more importantly the critical path is fixed. Let me try re-running v2's PE with a `target_delay` far from default to see if the mapper has another operating point, and also test an output-stationary column accumulator:
+  -> create_file(content='// v5: output-stationary-ish column accumulator with vertical psum shift.\n// Each column is a chain of MACs where psum moves south each cycle; the\n// bottom row feeds a 19-bit accumulator that holds the running column sum.\n// Same cycle behavior is preserved by keeping the systolic skew.\nmodule tpu_pe\n  #(parameter DW = 8,\n    parameter PSW = 19)\n   (\n    input\t\t  clk,\n    input\t\t  ld,\n    input\t\t  en,\n    input [DW-1:0]\t  w_north,\n    input [DW-1:0]\t  a_west,\n    input [PSW-1:0]\t  psum_north,\n    output [DW-1:0]\t  w_south,\n    output reg [DW-1:0]\t  a_east,\n    output reg [PSW-1:0]  psum_south\n    );\n\n   reg [DW-1:0] w;\n   assign w_south = w;\n\n   wire [2*DW-1:0]  prod = $signed(a_west) * $signed(w);\n   wire [PSW-1:0]   prod_sx = {{(PSW-2*DW){prod[2*DW-1]}}, prod};\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= prod_sx + psum_north;\n      end\n   end\n\nendmodule\n\n`include "common.vh"\n', filename='design_v5.v')
+
+[TOOL RESULT]
+[Step 27/60]
+Created file: design_v5.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v5.v')
+
+[TOOL RESULT]
+[Step 28/60]
+[Eval saved to eval_14/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3175413.1213331595
+  Metrics:
+    area_delay_product: 3175413.1213331595
+    delay: 820.7617
+    area: 3868.8612313819704
+    power: 1.58
+    target_delay: 500.0
+    worst_slack: -820.62
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      92.81   92.81 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      44.72  137.52 v _53898_/Y (NOR3x1_ASAP7_75t_R)
+      34.31  171.83 v _53935_/Y (OR2x2_ASAP7_75t_R)
+      23.87  195.70 v _53937_/Y (XNOR2x1_ASAP7_75t_R)
+      13.42  209.13 ^ _53981_/Y (NAND2xp5_ASAP7_75t_R)
+      50.83  259.95 v _53983_/Y (OAI311xp33_ASAP7_75t_R)
+      42.26  302.21 v _53984_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.07  333.28 v _53985_/Y (XNOR2xp5_ASAP7_75t_R)
+      33.12  366.40 v _53986_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.68  391.07 ^ _53987_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.33  425.41 ^ _53988_/Y (XOR2xp5_ASAP7_75t_R)
+      41.90  467.31 ^ _53989_/Y (XOR2xp5_ASAP7_75t_R)
+      45.02  512.32 v _53990_/Y (XNOR2x2_ASAP7_75t_R)
+      26.98  539.30 v _53991_/Y (XOR2x1_ASAP7_75t_R)
+      19.88  559.19 ^ _53997_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      35.78  594.97 v _54039_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      48.96  643.92 ^ _54103_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      38.49  682.41 v _54126_/Y (MAJIxp5_ASAP7_75t_R)
+      45.11  727.53 ^ _54149_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      24.76  752.29 v _54155_/Y (MAJIxp5_ASAP7_75t_R)
+      26.86  779.15 v _54157_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.61  803.76 v _54159_/Y (AO21x1_ASAP7_75t_R)
+      17.01  820.76 v _54160_/Y (BUFx6f_ASAP7_75t_R)
+       0.00  820.76 v u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             820.76   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -4.86    0.14   library setup time
+               0.14   data required time
+    ---------------------------------------------------------
+               0.14   data required time
+            -820.76   data arrival time
+    ---------------------------------------------------------
+            -820.62   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+  -> edit_file(filename='design_v3.v', new_string="   // psum injection row with correction bits 16, 17, 0 flipped\n   assign r[8] = psum_north ^ 19'h30000;\n\n   // 9-row carry-save reduction tree + final carry-propagate add.\n   // (The +2^16 = 0x10000 Baugh-Wooley constant is folded into r[8]'s\n   // 19'h30000 XOR; row 0 carries the 2^8 constant.)\n   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;", old_string="   // psum injection row with correction bits 16, 17, 0 flipped\n   assign r[8] = psum_north ^ 19'h30001;\n\n   // 9-row carry-save reduction tree + final carry-propagate add\n   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;")
+
+[TOOL RESULT]
+[Step 29/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 30/60]
+[Eval saved to eval_15/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=0002040000020400000204000002040000020400000204000002040000020400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_gan3iwle/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+  -> edit_file(filename='design_v3.v', new_string="   // psum injection row (raw); B-W constants: 2^8 into row 0, 2^15 into\n   // row 7, and the 2^16/2^17 sign-extension corrections applied to the\n   // CSA output carry.\n   assign r[8] = psum_north;\n\n   // 9-row carry-save reduction tree + final carry-propagate add.\n   // Constant 0x10100 = 2^16 + 2^8: the 2^16 term doubles as the (b^s)^\n   // (cin^s) sign-extension correction (its cin^s bit is 0).\n   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;\n   assign {c1, s1} = {1'b0, r[8]} + {1'b0, r[0]} + {1'b0, r[1]};\n   assign {c2, s2} = {1'b0, r[2]} + {1'b0, r[3]} + {1'b0, r[4]};\n   assign {c3, s3} = {1'b0, r[5]} + {1'b0, r[6]} + {1'b0, r[7]};\n   assign {c4, s4} = c1 + s1 + c2;\n   assign {c5, s5} = s2 + c3 + s3;\n   assign {c6, s6} = c4 + s4 + c5;\n   assign {c7, s7} = s5 + c6 + s6 + 20'h10100;\n   wire [18:0] mac = (c7 + s7);", old_string="   // psum injection row with correction bits 16, 17, 0 flipped\n   assign r[8] = psum_north ^ 19'h30000;\n\n   // 9-row carry-save reduction tree + final carry-propagate add.\n   // (The +2^16 = 0x10000 Baugh-Wooley constant is folded into r[8]'s\n   // 19'h30000 XOR; row 0 carries the 2^8 constant.)\n   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;\n   assign {c1, s1} = {1'b0, r[8]} + {1'b0, r[0] | 19'h00100} + {1'b0, r[1]};\n   assign {c2, s2} = {1'b0, r[2]} + {1'b0, r[3]} + {1'b0, r[4]};\n   assign {c3, s3} = {1'b0, r[5]} + {1'b0, r[6]} + {1'b0, r[7]};\n   assign {c4, s4} = c1 + s1 + c2;\n   assign {c5, s5} = s2 + c3 + s3;\n   assign {c6, s6} = c4 + s4 + c5;\n   assign {c7, s7} = s5 + c6 + s6;\n   wire [18:0] mac = (c7 + s7);")
+
+[TOOL RESULT]
+[Step 31/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 32/60]
+[Eval saved to eval_16/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_tci15xsb/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+  -> edit_file(filename='design_v3.v', new_string="   // Constant 0x10000 = 2^16: doubles as the (b^s)^(cin^s) sign-extension\n   // correction (cin^s = 0). The 2^8 and 2^15 B-W constants live in the\n   // row generator below.\n   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;\n   assign {c1, s1} = {1'b0, r[8]} + {1'b0, r[0]} + {1'b0, r[1]};\n   assign {c2, s2} = {1'b0, r[2]} + {1'b0, r[3]} + {1'b0, r[4]};\n   assign {c3, s3} = {1'b0, r[5]} + {1'b0, r[6]} + {1'b0, r[7]};\n   assign {c4, s4} = c1 + s1 + c2;\n   assign {c5, s5} = s2 + c3 + s3;\n   assign {c6, s6} = c4 + s4 + c5;\n   assign {c7, s7} = s5 + c6 + s6 + 20'h10000;\n   wire [18:0] mac = (c7 + s7);", old_string="   // Constant 0x10100 = 2^16 + 2^8: the 2^16 term doubles as the (b^s)^\n   // (cin^s) sign-extension correction (its cin^s bit is 0).\n   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;\n   assign {c1, s1} = {1'b0, r[8]} + {1'b0, r[0]} + {1'b0, r[1]};\n   assign {c2, s2} = {1'b0, r[2]} + {1'b0, r[3]} + {1'b0, r[4]};\n   assign {c3, s3} = {1'b0, r[5]} + {1'b0, r[6]} + {1'b0, r[7]};\n   assign {c4, s4} = c1 + s1 + c2;\n   assign {c5, s5} = s2 + c3 + s3;\n   assign {c6, s6} = c4 + s4 + c5;\n   assign {c7, s7} = s5 + c6 + s6 + 20'h10100;\n   wire [18:0] mac = (c7 + s7);")
+
+[TOOL RESULT]
+[Step 33/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+Now make the row generator add the 2^8 constant to row 0:
+  -> edit_file(filename='design_v3.v', new_string="   generate\n      for (k = 0; k < 7; k = k + 1) begin : g_bwrow\n         wire [18:0] row = { {(11-k){1'b0}},\n                             ~(w[k] & a[7]),\n                             ({7{w[k]}} & a[6:0]),\n                             {k{1'b0}} };\n         if (k == 0)\n           assign r[k] = row | 19'h00100;\t// B-W constant 2^8\n         else\n           assign r[k] = row;\n      end\n   endgenerate", old_string="   generate\n      for (k = 0; k < 7; k = k + 1) begin : g_bwrow\n         assign r[k] = { {(11-k){1'b0}},\n                         ~(w[k] & a[7]),\n                         ({7{w[k]}} & a[6:0]),\n                         {k{1'b0}} };\n      end\n   endgenerate")
+
+[TOOL RESULT]
+[Step 34/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 35/60]
+[Eval saved to eval_17/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_hbwfg5n6/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+  -> edit_file(filename='design_v3.v', new_string="   assign r[7] = { 3'b000,\n                   w[7] & a[7],\n                   1'b1,\t\t\t// B-W constant 2^15\n                   ({7{w[7]}} & ~a[6:0]),\n                   7'b0000000 };", old_string="   assign r[7] = { 4'b0001,\n                   w[7] & a[7],\n                   ({7{w[7]}} & ~a[6:0]),\n                   7'b0000000 };")
+
+[TOOL RESULT]
+[Step 36/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 37/60]
+[Eval saved to eval_18/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=fffc0400fffc0400fffc0400fffc0400fffc0400fffc0400fffc0400fffc0400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_ic9aj1yj/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+Wait — a 19-bit constant `19'h00100` is 20 bits in hex (0x00100 vs 0x100); the `0` I read was actually correct. The remaining error is exactly 2^17. In Baugh-Wooley the 2^15 constant sits at column 15 of the *product* matrix (where the truncated 19-bit matrix must also mirror sign-column effects). The error means I'm missing the 2^17 carry that 2^15+2^16 terms should produce. Simplest fix: add the constant 0x18000 (2^15+2^16) via the psum row XOR trick instead of scattering:
+  -> edit_file(filename='design_v3.v', new_string="   assign r[7] = { 4'b0000,\n                   w[7] & a[7],\n                   ({7{w[7]}} & ~a[6:0]),\n                   7'b0000000 };\n   // psum injection row; B-W constants 2^15 and 2^16 applied via XOR\n   // (top row PEs receive constant-zero psums so this degenerates to a\n   // constant row there; 2^16 doubles as the sign-extension correction).\n   assign r[8] = psum_north ^ 19'h18000;\n\n   // 9-row carry-save reduction tree + final carry-propagate add.\n   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;\n   assign {c1, s1} = {1'b0, r[8]} + {1'b0, r[0]} + {1'b0, r[1]};\n   assign {c2, s2} = {1'b0, r[2]} + {1'b0, r[3]} + {1'b0, r[4]};\n   assign {c3, s3} = {1'b0, r[5]} + {1'b0, r[6]} + {1'b0, r[7]};\n   assign {c4, s4} = c1 + s1 + c2;\n   assign {c5, s5} = s2 + c3 + s3;\n   assign {c6, s6} = c4 + s4 + c5;\n   assign {c7, s7} = s5 + c6 + s6;\n   wire [18:0] mac = (c7 + s7);", old_string="   assign r[7] = { 3'b000,\n                   w[7] & a[7],\n                   1'b1,\t\t\t// B-W constant 2^15\n                   ({7{w[7]}} & ~a[6:0]),\n                   7'b0000000 };\n   // psum injection row (raw); B-W constants: 2^8 into row 0, 2^15 into\n   // row 7, and the 2^16/2^17 sign-extension corrections applied to the\n   // CSA output carry.\n   assign r[8] = psum_north;\n\n   // 9-row carry-save reduction tree + final carry-propagate add.\n   // Constant 0x10000 = 2^16: doubles as the (b^s)^(cin^s) sign-extension\n   // correction (cin^s = 0). The 2^8 and 2^15 B-W constants live in the\n   // row generator below.\n   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;\n   assign {c1, s1} = {1'b0, r[8]} + {1'b0, r[0]} + {1'b0, r[1]};\n   assign {c2, s2} = {1'b0, r[2]} + {1'b0, r[3]} + {1'b0, r[4]};\n   assign {c3, s3} = {1'b0, r[5]} + {1'b0, r[6]} + {1'b0, r[7]};\n   assign {c4, s4} = c1 + s1 + c2;\n   assign {c5, s5} = s2 + c3 + s3;\n   assign {c6, s6} = c4 + s4 + c5;\n   assign {c7, s7} = s5 + c6 + s6 + 20'h10000;\n   wire [18:0] mac = (c7 + s7);")
+
+[TOOL RESULT]
+[Step 38/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 39/60]
+[Eval saved to eval_19/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=0002040000020400000204000002040000020400000204000002040000020400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_a51b4cf1/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+The error 0x20400 = 2^17 + 2^10 is consistent across every variant, suggesting my r[0] constant isn't landing where I think. Let me look at the testbench to see exactly what data line 27 drives:
+  -> read_file(filename='tb.sv')
+
+[TOOL RESULT]
+[Step 40/60]
+// Self-checking testbench for the tpu benchmark (8x8 weight-stationary
+// systolic matmul tile). Reads vectors.dat, one line per clock cycle:
+//   w_valid w_data(64b) a_valid a_data(64b)   c_valid c_data(256b)   (hex)
+// The expected outputs are the ORIGINAL logikbench tpu's per-cycle behavior;
+// c_valid and c_data are compared CYCLE-ACCURATELY every cycle (c_data only
+// while c_valid is high — the original holds stale data between results).
+module tb;
+  localparam N = 8, DW = 8, ACCW = 32;
+  int total_checks;
+  int total_errors;
+
+  logic clk, rst;
+  logic w_valid, a_valid, c_valid;
+  logic [N*DW-1:0] w_data, a_data;
+  logic [N*ACCW-1:0] c_data;
+
+  tpu dut
+    (.clk(clk), .rst(rst), .w_valid(w_valid), .w_data(w_data),
+     .a_valid(a_valid), .a_data(a_data), .c_valid(c_valid), .c_data(c_data));
+
+  initial clk = 0;
+  always #5 clk = ~clk;
+
+  integer fd, rc, line_num;
+  string line_buf;
+  logic s_wv, s_av, e_cv;
+  logic [63:0] s_wd, s_ad;
+  logic [255:0] e_cd;
+
+  initial begin
+    total_checks = 0;
+    total_errors = 0;
+    w_valid = 0; a_valid = 0; w_data = 0; a_data = 0;
+    rst = 1;
+    repeat (4) @(negedge clk);
+    rst = 0;
+
+    fd = $fopen("vectors.dat", "r");
+    if (fd == 0) begin
+      $display("ERROR: cannot open vectors.dat");
+      $fatal(1);
+    end
+    line_num = 0;
+    while (!$feof(fd)) begin
+      line_num = line_num + 1;
+      void'($fgets(line_buf, fd));
+      if (line_buf.len() == 0) continue;
+      if (line_buf.substr(0, 0) == "#") continue;
+      rc = $sscanf(line_buf, "%h %h %h %h %h %h", s_wv, s_wd, s_av, s_ad, e_cv, e_cd);
+      if (rc != 6) continue;
+      w_valid = s_wv; w_data = s_wd; a_valid = s_av; a_data = s_ad;
+      @(negedge clk);
+      total_checks = total_checks + 1;
+      if (c_valid !== e_cv || (e_cv && c_data !== e_cd)) begin
+        $display("TB_ERROR line=%0d exp(cv=%b cd=%h) got(cv=%b cd=%h)",
+                 line_num, e_cv, e_cd, c_valid, c_data);
+        total_errors = total_errors + 1;
+        if (total_errors > 20) begin
+          $display("TB_SUMMARY total=%0d errors=%0d", total_checks, total_errors);
+          $fatal(1, "FAIL (too many errors, aborting)");
+        end
+      end
+    end
+    $fclose(fd);
+
+    $display("TB_SUMMARY total=%0d errors=%0d", total_checks, total_errors);
+    if (total_errors != 0) $fatal(1, "FAIL");
+    $display("PASS");
+    $finish;
+  end
+endmodule
+
+
+[ASSISTANT]
+  -> edit_file(filename='design_v3.v', new_string="   // psum injection row; B-W constant 2^16 applied via XOR (top row PEs\n   // receive constant-zero psums so this degenerates to a constant row\n   // there; 2^16 doubles as the sign-extension correction).\n   assign r[8] = psum_north ^ 19'h10000;", old_string="   // psum injection row; B-W constants 2^15 and 2^16 applied via XOR\n   // (top row PEs receive constant-zero psums so this degenerates to a\n   // constant row there; 2^16 doubles as the sign-extension correction).\n   assign r[8] = psum_north ^ 19'h18000;")
+
+[TOOL RESULT]
+[Step 41/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 42/60]
+[Eval saved to eval_20/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=0002040000020400000204000002040000020400000204000002040000020400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_7qb6ww6a/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+Let me check the actual vector file around line 27 — 78/99 checks passing but failing at 27 suggests earlier lines were also checked; my hypothesis about the first error may be wrong:
+  -> read_file(filename='vectors.dat', limit=30)
+
+[TOOL RESULT]
+[Step 43/60]
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+
+... (showing lines 1-30 of 830; use offset/limit for more)
+
+[ASSISTANT]
+The first tile is all zeros (zero A × zero B = zero C), and my CSA produces 0x20400 per column — a pure constant error. Removing the r[0] OR term would subtract exactly 0x20400... let me verify by removing it:
+  -> edit_file(filename='design_v3.v', new_string='         if (k == 0)\n           assign r[k] = row;\n         else\n           assign r[k] = row;\n      end\n   endgenerate', old_string="         if (k == 0)\n           assign r[k] = row | 19'h00100;\t// B-W constant 2^8\n         else\n           assign r[k] = row;\n      end\n   endgenerate")
+
+[TOOL RESULT]
+[Step 44/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 45/60]
+[Eval saved to eval_21/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=0003fc000003fc000003fc000003fc000003fc000003fc000003fc000003fc00)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_772xu2vk/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+The error is now exactly −2^10 = 0x3FC00: the r[0] term **was** contributing 2^10, not 2^8 — my `19'h00100` = 1024! I needed `19'h100` = 256. The earlier +2^17 error came from my 3'b000/1'b1 row-7 placement (put a bit at 17 instead of 15). Let me fix all constants with correct decimal-checked values:
+  -> edit_file(filename='design_v3.v', new_string="         if (k == 0)\n           assign r[k] = row | 19'h000100;\t// B-W constant 2^8\n         else\n           assign r[k] = row;\n      end\n   endgenerate", old_string='         if (k == 0)\n           assign r[k] = row;\n         else\n           assign r[k] = row;\n      end\n   endgenerate')
+
+[TOOL RESULT]
+[Step 46/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 47/60]
+[Eval saved to eval_22/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=0002040000020400000204000002040000020400000204000002040000020400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_cafkd0p_/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+Error stayed 0x20400 = 132608 = 2^17 + 2^10. Let me read the exact current PE code to check every constant:
+  -> read_file(filename='design_v3.v', limit=55, offset=31)
+
+[TOOL RESULT]
+[Step 48/60]
+   // Fused multiply-add: signed 8x8 product + psum_north, built as a
+   // Baugh-Wooley partial-product matrix with psum injected as a 9th CSA
+   // row.  Row construction (mod 2^19, result fits signed 19 bits):
+   //   rows k=0..6: bits[6+k:k]   = {7{w[k]}} & a[6:0]
+   //                bit [7+k]     = ~(w[k] & a[7])
+   //   row 0:       bit [8]       = 1   (B-W constant 2^8)
+   //   row 7:       bits[13:7]    = {7{w[7]}} & ~a[6:0]
+   //                bit [14]      = w[7] & a[7]
+   //                bit [15]      = 1   (B-W constant 2^15)
+   //   psum row:    psum ^ 19'h30001  ((b^s)^(cin^s) correction for the
+   //                sign-extension-free 19-bit accumulation: bits 16,17
+   //                and the LSB carry-in are folded in here)
+   wire [DW-1:0]     a = a_west;
+   wire [18:0] r [0:8];
+   genvar k;
+   generate
+      for (k = 0; k < 7; k = k + 1) begin : g_bwrow
+         wire [18:0] row = { {(11-k){1'b0}},
+                             ~(w[k] & a[7]),
+                             ({7{w[k]}} & a[6:0]),
+                             {k{1'b0}} };
+         if (k == 0)
+           assign r[k] = row | 19'h000100;	// B-W constant 2^8
+         else
+           assign r[k] = row;
+      end
+   endgenerate
+   assign r[7] = { 4'b0000,
+                   w[7] & a[7],
+                   ({7{w[7]}} & ~a[6:0]),
+                   7'b0000000 };
+   // psum injection row; B-W constant 2^16 applied via XOR (top row PEs
+   // receive constant-zero psums so this degenerates to a constant row
+   // there; 2^16 doubles as the sign-extension correction).
+   assign r[8] = psum_north ^ 19'h10000;
+
+   // 9-row carry-save reduction tree + final carry-propagate add.
+   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;
+   assign {c1, s1} = {1'b0, r[8]} + {1'b0, r[0]} + {1'b0, r[1]};
+   assign {c2, s2} = {1'b0, r[2]} + {1'b0, r[3]} + {1'b0, r[4]};
+   assign {c3, s3} = {1'b0, r[5]} + {1'b0, r[6]} + {1'b0, r[7]};
+   assign {c4, s4} = c1 + s1 + c2;
+   assign {c5, s5} = s2 + c3 + s3;
+   assign {c6, s6} = c4 + s4 + c5;
+   assign {c7, s7} = s5 + c6 + s6;
+   wire [18:0] mac = (c7 + s7);
+
+   always @(posedge clk) begin
+      if (ld)
+        w <= w_north;
+      if (en) begin
+         a_east     <= a_west;
+         psum_south <= mac;
+      end
+   end
+
+... (showing lines 31-85 of 230; use offset/limit for more)
+
+[ASSISTANT]
+Found it — comment drift: `19'h00100` = 256 was right all along, but the **2^15 B-W constant is missing** from r[7] (I removed it when fixing the bit-17 mistake). Total error = 2^15 + 2^8 = 33024 = 0x8100... but observed is 0x20400. Actually 0x20400 - 0x100(r[0] term) = 0x20300... Let me just add the 2^15 constant to r[7] at the correct position (bit 15) and test:
+  -> edit_file(filename='design_v3.v', new_string="   assign r[7] = { 3'b000,\n                   1'b1,\t\t\t// B-W constant 2^15\n                   w[7] & a[7],\n                   ({7{w[7]}} & ~a[6:0]),\n                   7'b0000000 };", old_string="   assign r[7] = { 4'b0000,\n                   w[7] & a[7],\n                   ({7{w[7]}} & ~a[6:0]),\n                   7'b0000000 };")
+
+[TOOL RESULT]
+[Step 49/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 50/60]
+[Eval saved to eval_23/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_jlmtwq0p/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+The missing constant is exactly 2^17 (0x20000); my matrix has a surplus 2^10. The Baugh-Wooley truncation constant for a mod-2^19 matrix is 2^17 (from the 2^15·2^k sign-column geometric series), not 2^15 — and the r[0] OR is landing at bit 10 (perhaps concatenation padding). Let me set r[8]'s constant to 2^17|2^16 = 0x30000 and use the explicit-bit form for row 0:
+  -> edit_file(filename='design_v3.v', new_string="   assign r[8] = psum_north ^ 19'h30000;", old_string="   assign r[8] = psum_north ^ 19'h10000;")
+
+[TOOL RESULT]
+[Step 51/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 52/60]
+[Eval saved to eval_24/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=0002040000020400000204000002040000020400000204000002040000020400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_1ze6an5k/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+The error is robustly 0x20400 regardless of my constant changes — but it did change to 0x3FC00 when I removed r[0]'s OR, so r[0]'s term IS live. 0x20400 = 0x20000 + 0x400: I have a surplus 2^10 and missing 2^17. Note r[8]'s bit 17 = psum17^1 was dropping out in the {1'b0,...} concat... no. Let me stop debugging blind — remove r[0]'s OR entirely and put all constants in r[8]: need 2^17 + 2^16 − 2^10... XOR can't subtract. Instead make r[0] explicit with a single 1 at bit 8:
+  -> edit_file(filename='design_v3.v', new_string="         if (k == 0)\n           assign r[k] = row + 19'd256;\t// B-W constant 2^8\n         else\n           assign r[k] = row;\n      end\n   endgenerate", old_string="         if (k == 0)\n           assign r[k] = row | 19'h000100;\t// B-W constant 2^8\n         else\n           assign r[k] = row;\n      end\n   endgenerate")
+
+[TOOL RESULT]
+[Step 53/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 54/60]
+[Eval saved to eval_25/]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (ok/tot): 78/99
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=1 cd=0002040000020400000204000002040000020400000204000002040000020400)
+TB_ERROR line=28 exp(cv=1 .. l: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /workspaces/rtl_scout/runs/tpu_verilog/moonshotai_kimi-k3/20260726_063832/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed; see /tmp/ppa_worker_kgqns6mp/verilator_netlist_out.log
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+I've spent too long on the hand-built multiplier — it's clearly not converging to a win anyway. Reverting to the known-good v2 PE (plain `$signed` mul + 19-bit add) and discarding the BW experiment:
+  -> edit_file(filename='design_v3.v', new_string='   reg [DW-1:0] w;\n   assign w_south = w;\n\n   wire [2*DW-1:0]  prod = $signed(a_west) * $signed(w);\n   wire [PSW-1:0]   prod_sx = {{(PSW-2*DW){prod[2*DW-1]}}, prod};\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= psum_north + prod_sx;\n      end\n   end', old_string="   reg [DW-1:0] w;\n   assign w_south = w;\n\n   // Fused multiply-add: signed 8x8 product + psum_north, built as a\n   // Baugh-Wooley partial-product matrix with psum injected as a 9th CSA\n   // row.  Row construction (mod 2^19, result fits signed 19 bits):\n   //   rows k=0..6: bits[6+k:k]   = {7{w[k]}} & a[6:0]\n   //                bit [7+k]     = ~(w[k] & a[7])\n   //   row 0:       bit [8]       = 1   (B-W constant 2^8)\n   //   row 7:       bits[13:7]    = {7{w[7]}} & ~a[6:0]\n   //                bit [14]      = w[7] & a[7]\n   //                bit [15]      = 1   (B-W constant 2^15)\n   //   psum row:    psum ^ 19'h30001  ((b^s)^(cin^s) correction for the\n   //                sign-extension-free 19-bit accumulation: bits 16,17\n   //                and the LSB carry-in are folded in here)\n   wire [DW-1:0]     a = a_west;\n   wire [18:0] r [0:8];\n   genvar k;\n   generate\n      for (k = 0; k < 7; k = k + 1) begin : g_bwrow\n         wire [18:0] row = { {(11-k){1'b0}},\n                             ~(w[k] & a[7]),\n                             ({7{w[k]}} & a[6:0]),\n                             {k{1'b0}} };\n         if (k == 0)\n           assign r[k] = row + 19'd256;\t// B-W constant 2^8\n         else\n           assign r[k] = row;\n      end\n   endgenerate\n   assign r[7] = { 3'b000,\n                   1'b1,\t\t\t// B-W constant 2^15\n                   w[7] & a[7],\n                   ({7{w[7]}} & ~a[6:0]),\n                   7'b0000000 };\n   // psum injection row; B-W constant 2^16 applied via XOR (top row PEs\n   // receive constant-zero psums so this degenerates to a constant row\n   // there; 2^16 doubles as the sign-extension correction).\n   assign r[8] = psum_north ^ 19'h30000;\n\n   // 9-row carry-save reduction tree + final carry-propagate add.\n   wire [19:0] c1, s1, c2, s2, c3, s3, c4, s4, c5, s5, c6, s6, c7, s7;\n   assign {c1, s1} = {1'b0, r[8]} + {1'b0, r[0]} + {1'b0, r[1]};\n   assign {c2, s2} = {1'b0, r[2]} + {1'b0, r[3]} + {1'b0, r[4]};\n   assign {c3, s3} = {1'b0, r[5]} + {1'b0, r[6]} + {1'b0, r[7]};\n   assign {c4, s4} = c1 + s1 + c2;\n   assign {c5, s5} = s2 + c3 + s3;\n   assign {c6, s6} = c4 + s4 + c5;\n   assign {c7, s7} = s5 + c6 + s6;\n   wire [18:0] mac = (c7 + s7);\n\n   always @(posedge clk) begin\n      if (ld)\n        w <= w_north;\n      if (en) begin\n         a_east     <= a_west;\n         psum_south <= mac;\n      end\n   end")
+
+[TOOL RESULT]
+[Step 55/60]
+Edited file: design_v3.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.v')
+
+[TOOL RESULT]
+[Step 56/60]
+[Eval saved to eval_26/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3175413.1213331595
+  Metrics:
+    area_delay_product: 3175413.1213331595
+    delay: 820.7617
+    area: 3868.8612313819704
+    power: 1.58
+    target_delay: 500.0
+    worst_slack: -820.62
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      92.81   92.81 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      44.72  137.52 v _53898_/Y (NOR3x1_ASAP7_75t_R)
+      34.31  171.83 v _53935_/Y (OR2x2_ASAP7_75t_R)
+      23.87  195.70 v _53937_/Y (XNOR2x1_ASAP7_75t_R)
+      13.42  209.13 ^ _53981_/Y (NAND2xp5_ASAP7_75t_R)
+      50.83  259.95 v _53983_/Y (OAI311xp33_ASAP7_75t_R)
+      42.26  302.21 v _53984_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.07  333.28 v _53985_/Y (XNOR2xp5_ASAP7_75t_R)
+      33.12  366.40 v _53986_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.68  391.07 ^ _53987_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.33  425.41 ^ _53988_/Y (XOR2xp5_ASAP7_75t_R)
+      41.90  467.31 ^ _53989_/Y (XOR2xp5_ASAP7_75t_R)
+      45.02  512.32 v _53990_/Y (XNOR2x2_ASAP7_75t_R)
+      26.98  539.30 v _53991_/Y (XOR2x1_ASAP7_75t_R)
+      19.88  559.19 ^ _53997_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      35.78  594.97 v _54039_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      48.96  643.92 ^ _54103_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      38.49  682.41 v _54126_/Y (MAJIxp5_ASAP7_75t_R)
+      45.11  727.53 ^ _54149_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      24.76  752.29 v _54155_/Y (MAJIxp5_ASAP7_75t_R)
+      26.86  779.15 v _54157_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.61  803.76 v _54159_/Y (AO21x1_ASAP7_75t_R)
+      17.01  820.76 v _54160_/Y (BUFx6f_ASAP7_75t_R)
+       0.00  820.76 v u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             820.76   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[4].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -4.86    0.14   library setup time
+               0.14   data required time
+    ---------------------------------------------------------
+               0.14   data required time
+            -820.76   data arrival time
+    ---------------------------------------------------------
+            -820.62   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+v3 restored to passing (3.175M). Best remains v2 (3.147M). The critical path (~819ps) is a hard floor from the 8×8 mul + 19-bit add; area is the remaining lever. The a_east pipeline registers (36 PEs × 8 bits) hold values only needed in columns j+1..7 — those further-east columns can share skew registers instead. But simplest big win first: since delay is stuck at ~820ps regardless, let me retry v2 (the best) with a much higher target_delay to let area shrink:
+  -> run_evaluation(filename='design_v2.v', target_delay=3000)
+
+[TOOL RESULT]
+[Step 57/60]
+[Eval saved to eval_27/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3267610.915905639
+  Metrics:
+    area_delay_product: 3267610.915905639
+    delay: 856.8926
+    area: 3813.3260993333806
+    power: 1.55
+    target_delay: 3000
+    worst_slack: -872.23
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[7].g_pe_col[6].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[7].g_pe_col[6].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[7].g_pe_col[6].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      81.15   81.15 v u_array.g_pe_row[7].g_pe_col[6].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      43.11  124.27 ^ _40701_/Y (NOR3xp33_ASAP7_75t_R)
+      37.53  161.80 v _40703_/Y (NOR2xp33_ASAP7_75t_R)
+      52.26  214.06 ^ _40740_/Y (AOI21xp33_ASAP7_75t_R)
+      39.22  253.28 ^ _40786_/Y (AO221x1_ASAP7_75t_R)
+      42.78  296.07 ^ _40787_/Y (HB1xp67_ASAP7_75t_R)
+      30.18  326.25 ^ _40788_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.20  360.45 ^ _40789_/Y (XOR2xp5_ASAP7_75t_R)
+      37.57  398.02 ^ _40790_/Y (XOR2xp5_ASAP7_75t_R)
+      26.57  424.59 ^ _40791_/Y (XNOR2xp5_ASAP7_75t_R)
+      20.37  444.96 v _40792_/Y (XOR2xp5_ASAP7_75t_R)
+      28.20  473.17 v _40794_/Y (AO21x1_ASAP7_75t_R)
+      32.37  505.53 ^ _40795_/Y (NAND2xp33_ASAP7_75t_R)
+      27.41  532.94 v _40831_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      36.68  569.62 ^ _40877_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      29.14  598.76 v _40905_/Y (MAJIxp5_ASAP7_75t_R)
+      26.83  625.59 v _40939_/Y (AO21x1_ASAP7_75t_R)
+      46.00  671.59 v _40940_/Y (HB1xp67_ASAP7_75t_R)
+      35.44  707.02 v _40941_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.94  738.96 ^ _40942_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      30.80  769.76 v _40958_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      26.08  795.84 ^ _40965_/Y (MAJIxp5_ASAP7_75t_R)
+      22.52  818.36 ^ _40967_/Y (XNOR2xp5_ASAP7_75t_R)
+      20.09  838.46 ^ _40970_/Y (AO21x1_ASAP7_75t_R)
+      18.44  856.89 ^ _40971_/Y (HB1xp67_ASAP7_75t_R)
+       0.00  856.89 ^ u_array.g_pe_row[7].g_pe_col[6].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             856.89   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[7].g_pe_col[6].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     -20.34  -15.34   library setup time
+             -15.34   data required time
+    ---------------------------------------------------------
+             -15.34   data required time
+            -856.89   data arrival time
+    ---------------------------------------------------------
+            -872.23   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+target_delay doesn't help. v2 (3.147M) is the best. Let me try one last idea with a different synthesis seed effect — the identical-logic v4b file gave exactly v2's numbers, confirming v2 is the best manifestation. Let me try removing the `en`-gate on the deskew registers only (their values when en=0 never reach c_data during a checked cycle), which could drop mux area from 28×19 bits of deskew regs:
+  -> read_file(filename='design_v2.v', limit=30, offset=170)
+
+[TOOL RESULT]
+[Step 58/60]
+            end
+            assign c_data[j*ACCW +: ACCW] =
+		   {{(ACCW-PSW){dr[D-1][PSW-1]}}, dr[D-1]};
+         end
+      end
+   endgenerate
+
+   //##########################################################################
+   // Valid pipeline: c_valid is a_valid delayed LAT compute cycles.
+   // (The only reset in the design: c_valid must be deterministic from
+   // cycle zero since it is checked every cycle.)
+   //##########################################################################
+   reg [LAT-1:0] vpipe;
+   always @(posedge clk) begin
+      if (rst)
+        vpipe <= {LAT{1'b0}};
+      else if (en)
+        vpipe <= {vpipe[LAT-2:0], a_valid};
+   end
+   assign c_valid = vpipe[LAT-1];
+
+endmodule
+
+... (showing lines 170-191 of 191; use offset/limit for more)
+
+[ASSISTANT]
+Removing deskew `en` gates would corrupt results (deskew must stall with the array during w_valid). I've thoroughly explored the space: the 19-bit accumulator + removed datapath resets gave the big win (4.62M → 3.15M, 32% better than the reference), and the critical path (~819ps mul+add) is a hard structural floor that all mapping variants converge to. 
+
+Let me do a final confirmation run on the best design (v2) to make sure it's solid:
+  -> run_evaluation(filename='design_v2.v')
+
+[TOOL RESULT]
+[Step 59/60]
+[Eval saved to eval_28/]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (ok/tot): 830/830
+Cost: OK
+  area_delay_product: 3147515.916355958
+  Metrics:
+    area_delay_product: 3147515.916355958
+    delay: 819.2783
+    area: 3841.815310323682
+    power: 1.57
+    target_delay: 500.0
+    worst_slack: -819.14
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      90.03   90.03 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      42.37  132.41 v _41220_/Y (NOR3x1_ASAP7_75t_R)
+      32.50  164.91 v _41261_/Y (OR2x2_ASAP7_75t_R)
+      28.81  193.72 v _41263_/Y (XNOR2xp5_ASAP7_75t_R)
+      14.90  208.62 ^ _41307_/Y (NAND2xp5_ASAP7_75t_R)
+      51.51  260.12 v _41309_/Y (OAI311xp33_ASAP7_75t_R)
+      48.55  308.67 v _41347_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.16  338.83 v _41348_/Y (XOR2xp5_ASAP7_75t_R)
+      31.66  370.49 v _41349_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.44  404.93 v _41350_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.99  436.92 v _41351_/Y (XNOR2xp5_ASAP7_75t_R)
+      32.18  469.09 v _41352_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.72  499.81 ^ _41361_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      26.79  526.60 v _41362_/Y (NOR2xp33_ASAP7_75t_R)
+      33.29  559.89 v _41387_/Y (XNOR2xp5_ASAP7_75t_R)
+      37.35  597.24 v _41388_/Y (XNOR2xp5_ASAP7_75t_R)
+      44.56  641.80 ^ _41427_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      38.47  680.28 v _41453_/Y (MAJIxp5_ASAP7_75t_R)
+      44.14  724.41 ^ _41474_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      24.54  748.95 v _41480_/Y (MAJIxp5_ASAP7_75t_R)
+      28.40  777.36 v _41482_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.91  802.27 v _41484_/Y (AO21x1_ASAP7_75t_R)
+      17.01  819.28 v _41485_/Y (BUFx6f_ASAP7_75t_R)
+       0.00  819.28 v u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+             819.28   data arrival time
+    
+       5.00    5.00   clock clk (rise edge)
+       0.00    5.00   clock network delay (ideal)
+       0.00    5.00   clock reconvergence pessimism
+               5.00 ^ u_array.g_pe_row[7].g_pe_col[5].u_pe.psum_south_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -4.86    0.14   library setup time
+               0.14   data required time
+    ---------------------------------------------------------
+               0.14   data required time
+            -819.28   data arrival time
+    ---------------------------------------------------------
+            -819.14   slack (VIOLATED)
+
+Best so far: 3147515.916355958 area_delay_product (eval 2)
+
+[ASSISTANT]
+Confirmed: `design_v2.v` is the best, passing all 830/830 checks with **area_delay_product = 3,147,516** (area 3842, delay 819.3ps) — a **32% improvement** over the reference implementation's 4,624,409.
+
+## Summary
+
+**Best design: `design_v2.v`** — a cycle-accurate weight-stationary 8×8 systolic TPU tile with two key optimizations over the logikbench reference:
+
+1. **19-bit internal partial sums** (the main lever): 8 signed 8×8 products (each ∈ [−16256, 16384]) sum to at most |131072|, which fits in signed 19 bits with margin. I narrowed the accumulator/partial-sum width from 32 → 19 bits and sign-extended to 32 bits for free at the output. This shrank the PE adders, psum registers, and output de-skew registers, and shortened the critical carry chain — improving both area (4604→3842) and delay (1004→819ps).
+
+2. **Removed datapath resets**: reset is only asserted before streaming begins, and any stale register garbage drains out the bottom of the array before the first cycle `c_valid` can possibly be high (which itself trails `a_valid` by the 15-cycle latency, after an 8-cycle weight load). So the datapath resets were functionally unobservable — removing them eliminated reset muxes. Only the `c_valid` pipeline keeps its reset (it must be deterministic from cycle 0).
+
+Explored but rejected: split `*`/`+` expressions, `$signed` variants, operand-order swaps (all map identically or slightly worse), `target_delay` sweeps (no effect — synthesis already at best-effort), and a hand-built Baugh-Wooley CSA fused-multiply-add (failed correctness and abandoned). The critical path is a hard structural floor: one 8×8 signed multiply + 19-bit add per PE stage.
+  -> done(message='Completed. Best design: design_v2.v passes all 830/830 golden-cycle checks with area_delay_product = 3,147,516 (area 3841.8, delay 819.3ps), a 32% improvement over the reference starting point (4,624,409). Key optimizations: (1) narrowed internal partial sums from 32 to 19 bits (provably sufficient range) with free sign-extension at the output, shrinking adders/registers and the critical carry chain; (2) removed functionally-unobservable datapath resets (garbage drains before the first checked c_valid cycle), keeping reset only on the c_valid pipeline. Cycle-accurate behavior (15-cycle latency, stall/zero-injection semantics) fully preserved.')
+
+[TOOL RESULT]
+[Step 60/60]
+=== Done: Task Complete ===
+Agent message: Completed. Best design: design_v2.v passes all 830/830 golden-cycle checks with area_delay_product = 3,147,516 (area 3841.8, delay 819.3ps), a 32% improvement over the reference starting point (4,624,409). Key optimizations: (1) narrowed internal partial sums from 32 to 19 bits (provably sufficient range) with free sign-extension at the output, shrinking adders/registers and the critical carry chain; (2) removed functionally-unobservable datapath resets (garbage drains before the first checked c_valid cycle), keeping reset only on the c_valid pipeline. Cycle-accurate behavior (15-cycle latency, stall/zero-injection semantics) fully preserved.
+
+
+Best result: 3147515.916355958 area_delay_product (eval 2)
+
+[USER]
+The design session is now over. Final result: PASS, best cost: 3.148e+06 area_delay_product.
+
+Please write a brief summary covering:
+1. What approaches did you try and what worked best?
+2. What optimizations had the most impact?
+3. What didn't work or caused regressions?
+4. Lessons learned and what you would do differently next time.
+
+Your design files are carried over to the next agent, so refer to them by filename where useful.
+Be concise and specific.
+
+[ASSISTANT]
+## Summary
+
+**Final result:** `design_v2.v` — PASS (830/830 checks), area_delay_product = **3.148e6** (area 3842, delay 819 ps), 32% better than the reference (4.624e6).
+
+### What worked best
+Two optimizations accounted for essentially the entire win:
+
+1. **19-bit internal partial sums** (biggest lever): 8 signed 8×8 products (each ∈ [−16256, 16384]) sum to at most |131072|, fitting signed 19 bits. Narrowing the accumulator/psum path from 32 → 19 bits, with free sign-extension to 32 bits at the output, shrank the PE adders, psum registers, and de-skew registers, and shortened the critical carry chain. Both area (4604→3842) and delay (1004→819 ps) improved.
+2. **Removing datapath resets**: reset is only asserted before streaming, and stale garbage drains out of the array before the first cycle `c_valid` can be high (15-cycle latency + 8-cycle weight load), so the resets were unobservable. Kept reset only on the `c_valid` pipeline.
+
+### What didn't work
+- **`target_delay` sweeps** (100 ps – 3 ns): no effect; Yosys was already at its best-effort point.
+- **PE expression rewrites** (split `*`/`+`, `$signed` variants, operand-order swaps): mapped identically or slightly worse (v4a/v5 = 3.175e6 vs v2's 3.148e6 — synthesis noise dominates style).
+- **Removing the `en` gate on `a_east`**: broke correctness — activations must stall with partial sums during `w_valid`.
+- **Hand-built Baugh-Wooley CSA fused multiply-add with psum injected as a 9th row**: burned ~20 steps fighting constant-placement/hex-literal bugs and never passed; abandoned. A key trap: a 20-bit CSA row sum hides mod-2^19 vs mod-2^20 differences, which made constant errors nearly invisible from the low-order error pattern.
+
+### Lessons learned
+- Range analysis on accumulators is the cheapest high-value optimization for MAC arrays — check the true bound before accepting the "standard" width.
+- Verify reset-removal reasoning against *when outputs are actually checked*; here it was safe everywhere except the valid pipeline.
+- Don't hand-derive Baugh-Wooley matrices without a standalone unit testbench; debugging through the 830-cycle golden vectors is slow and the error signatures are misleading. A tiny directed PE test (all-zeros, all-ones, extremes) would have caught the constant bugs in one iteration.
+- Multiple near-identical RTL variants are worth evaluating once: the Yosys/ABC flow has ±1% noise, so keep the best-seed manifestation of equivalent logic (`design_v2.v` here; `design_v4b.v` was its identical twin).
+
+================================================================================

@@ -1,0 +1,29 @@
+## Summary
+
+### 1. Approaches Tried & Best Result
+- **Best design**: `design_opt11.sv` (same as `design_opt6.sv`) with **4.78M area_delay_product** (1028ps delay × 4650 area)
+- Evaluated 20+ variants including explicit adders (CLA, Brent-Kung, carry-skip, ripple), pipelined multipliers, split adders, and skew/deskew optimizations
+
+### 2. Most Impactful Optimizations
+- **Flattened shift registers** for input skew/output deskew (single 28-deep array vs per-row/col arrays) - reduced area
+- **Separate always blocks** for weight register vs compute path in PE - reduced mux complexity on critical path
+- **Simple `+` operator** for 32-bit accumulation - synthesis optimizes better than explicit adder structures
+- **Target delay 200-300ps** - best area/delay tradeoff for this library
+
+### 3. Regressions / Failures
+| Approach | Result |
+|----------|--------|
+| Explicit CLA/Brent-Kung/carry-skip adders | +15-20% area, no delay improvement |
+| Explicit ripple-carry generate | +4% area, +3% delay |
+| 2-stage pipelined multiplier | **Broke cycle accuracy** (latency mismatch) |
+| Conditional assignment `(en) ? a+b : a` | Slightly worse |
+| 16+16 split adder | Worse delay (1087ps) |
+
+### 4. Lessons Learned
+- **Trust synthesis** for adder optimization - explicit structures hurt more than help in ASAP7
+- **Critical path** is the 32-bit accumulation chain through multiplier→sign-extend→adder→register
+- **Skew/deskew** is off the critical path; flattening saves area without timing cost
+- **Cycle accuracy is fragile** - any pipeline depth change breaks the 15-cycle latency contract
+- **Target delay 200-300ps** consistently gave best ADP; higher targets increased delay without proportional area savings
+
+The final best file is `design_opt11.sv` (or `design_opt6.sv`).

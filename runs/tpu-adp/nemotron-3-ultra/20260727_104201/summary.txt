@@ -1,0 +1,42 @@
+## Summary
+
+### Best Result
+- **Design**: `design_opt10.sv` (2-stage pipelined adder: 16+16 bit split)
+- **Area-Delay Product**: 4,574,150 (best achieved)
+- **Delay**: 990 ps, **Area**: 4,619 μm²
+
+### Approaches Tried
+
+| Approach | Area-Delay | Status |
+|----------|------------|--------|
+| Original ripple-carry (design.sv) | 4,646,042 | PASS |
+| 2-stage pipelined adder 16+16 (design_opt10.sv) | **4,574,150** | **PASS - BEST** |
+| 4-bit group CLA (design_opt3.sv) | 4,700,800 | PASS |
+| 8-bit group CLA (design_opt6.sv) | 4,713,180 | PASS |
+| 16-bit group CLA (design_opt8.sv) | FAIL | Simulation bug |
+| Carry-select adder (design_opt9.sv) | 4,859,020 | PASS |
+| 4-stage pipelined 8+8+8+8 (design_opt12.sv) | 4,922,314 | PASS |
+| 3-stage pipelined 11+11+10 (design_opt14.sv) | 4,971,150 | PASS |
+| 3-stage pipelined 10+11+11 (design_opt18.sv) | 4,856,496 | PASS |
+| 8-bit CLA with tree carry (design_opt15.sv) | 4,706,925 | PASS |
+| Sklansky/Brent-Kung prefix (design_opt1/2/4/5.sv) | FAIL | Simulation bugs |
+
+### What Worked Best
+**2-stage pipelined adder (16+16 split)** - Splitting the 32-bit accumulation into two 16-bit adds with the carry propagating between stages reduced the critical path through the adder chain while keeping area low. The synthesis tool mapped this efficiently.
+
+### What Didn't Work
+- **Complex prefix adders (Sklansky, Brent-Kung)**: Multiple simulation failures due to subtle carry logic bugs
+- **16-bit group CLA**: Verilator syntax issues with nested generate blocks
+- **Registered intermediate signals (design_opt19.sv)**: Added pipeline latency that broke cycle-accurate behavior
+- **Optimized skew/deskew with shared arrays (design_opt16.sv)**: Broke functional correctness
+
+### Lessons Learned
+1. **Simple structural changes beat complex arithmetic optimizations** - The 2-stage split adder was trivial to verify and gave the best AD product
+2. **Cycle-accurate behavior is fragile** - Any pipelining inside the PE that changes latency breaks the testbench
+3. **Target delay has minimal effect** - The synthesis tool converged to similar results across 200-1200ps targets
+4. **Verification first** - Complex adder structures (prefix, CLA trees) introduced bugs that were hard to debug
+
+### Next Time
+- Focus on **retiming/register placement** rather than adder algorithm changes
+- Explore **multiplier optimization** (Booth encoding, partial product reduction) since multiply dominates the critical path
+- Try **physical-aware optimizations** (floorplanning hints, don't-touch attributes)

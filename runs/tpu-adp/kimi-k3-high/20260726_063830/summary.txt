@@ -1,0 +1,21 @@
+## Summary
+
+**Final result:** `design.sv` → `design_v2.sv`, PASS 830/830, cost **2.721e6** (delay 622ps, area 4371) vs baseline 4.624e6 — a 1.70× improvement.
+
+### What worked best
+The single dominant optimization was **splitting the per-PE multiply and accumulate into two pipeline stages** (v1→v2). Each PE registers `pr <= a_west * w` and accumulates the *registered* product into the partial sum on the next compute cycle. The added cycle of latency was recovered by making the **bottom row's accumulate combinational**, keeping `c_bot` bit-identical to the reference on every cycle. This preserved the exact 15-cycle latency and mid-drain stall semantics for free, because `pr` is `en`-gated (it keeps the *old* weight across a weight reload, exactly matching the reference's commit-at-en-cycle behavior). Critical path dropped from 1004ps (mul+32b-add fused) to ~622ps (mul-only / add-only stages).
+
+Secondary wins:
+- **19-bit signed partial sums** (exact since |C| ≤ 8·2¹⁴ = 2¹⁷) and 19-bit de-skew registers with sign-extension only at the output pins.
+- **Removing resets** on state flushed before any checked output (weights, activation-east, de-skew, product regs). The `pr` reset removal alone gave the final 2.775M→2.721M step.
+
+### What didn't work
+- **Hand-rolled carry-save multiplier splits** (v3/v4/v6): returning `(plo, sh, sc)` with `P = plo + (sh+sc)<<8` to avoid the multiplier's final CPA. All variants failed with small constant offsets (e.g. −0xC00). Root causes: sign-extension of the unsigned high bytes above bit 16 interacts with the mod-2¹⁹ accumulator in ways I couldn't make exact (dropping `cl8` breaks negative products; static pre-biases can't replace the dynamic carry).
+- **Dropping product bit 15** with a pre-bias — same class of carry bug.
+- **Removing `ps`/input-skew resets** — slight regression (2.730M), reverted.
+- **target_delay sweep** (450/550/620/700) — no effect or worse; the multiplier is at its structural floor, so RTL structure is the real lever.
+
+### Lessons learned
+1. Retiming the mul/add boundary across the *column* dimension (defer product, fold the last row's add combinationally) is a clean, verifiable transform — validate the timing-invariant argument before writing RTL.
+2. Baugh-Wooley/carry-save rewrites in Yosys-evaluated functions are error-prone; without a quick way to exhaustively unit-test the multiplier alone, the risk/reward was poor. Next time I'd build a tiny standalone testbench for the multiplier function first (all 2¹⁶ operand pairs) before integrating.
+3. Area-delay product here is delay-dominated after the split; the remaining delay is the 8×8 multiplier's final carry-propagate stage, which likely needs retiming support in the synthesis flow (not exposed) rather than more RTL restructuring.

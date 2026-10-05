@@ -1,0 +1,24 @@
+## Summary
+
+**Final result: PASS, best cost = 4.403e6 area_delay_product** (vs. baseline 4.624e6, a ~5% improvement), from the Booth-multiplier variant in eval 20.
+
+### What worked best
+- **Replacing the behavioral `$signed(a)*$signed(w)` with a hand-built radix-4 Booth multiplier** (`mul8s` module, verified correct in eval 15) in the otherwise-exact original logikbench RTL. This was the only change that improved cost: area 4604→4309, delay 1004→1022, product 4.624e6→4.403e6. It cut area because Booth uses 4 partial products instead of a generic 8×8 array.
+
+### What had the most impact
+- The Booth multiplier swap (eval 20) — the single real win.
+- The design is dominated by the PE critical path `w/a → multiply → 32-bit accumulate add`, which is a hard floor (~1000-1022 ps) regardless of synthesis effort.
+
+### What didn't work / regressions
+- **Baugh-Wooley multiplier** (final edit, eval 22): FAILED correctness (per-column offset `fffffc00`) — my bit-matrix had a bug. **The current `design.v` contains this broken BW version; the next agent should revert `mul8s` to the Booth implementation from eval 20** (the version with the `ppext` function computing sign-extended partial products and summing `pp0..pp3`).
+- **target_delay tuning**: 250/300 gave identical results to 500; 1000 was worse (4.84e6). It's a dead knob here — the PE path is structural, not mapping-limited.
+- **wcnt-based sparse weight-enable** (eval 16): logically worked but the surrounding rewrite introduced a one-cycle data-staging bug at line 61; abandoned.
+- **Flat skew/deskew register-file rewrite**: Verilator internal faults (crashes) on generate-scope references to unpacked `reg` arrays; restructured to wires-only, but the rework never achieved correctness and burned many steps.
+
+### Lessons learned
+- Verify small combinational blocks (multipliers) in isolation first with a difference-vs-behavioral harness before integrating — this caught the Booth bug cleanly (eval 15).
+- Verilator 5.040 crashes on generate-scope unpacked-array variable reads; keep cross-generate connections as wires (arrays of wires), as the original does.
+- Baugh-Wooley's sign-correction constant is error-prone; don't hand-derive it under time pressure.
+- Keep changes incremental from a passing baseline; large structural rewrites (skew/deskew/wcnt together) made failures hard to bisect and cost most of my step budget.
+
+**Recommended next step:** revert `mul8s` in `design.v` to the Booth version (eval 20), confirm 4.403e6, then explore a carry-save accumulator in the PE (add as a CSA tree) to shorten the mul→add critical path.

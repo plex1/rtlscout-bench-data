@@ -1,0 +1,27 @@
+## Summary
+
+**Final result: PASS (830/830), best cost 2.609e+06 area_delay_product** (vs. baseline 4.624e+06 — a 44% reduction).
+
+### What I tried and what worked best
+- **`tpu_baseline.v`** — verbatim copy of the original logikbench RTL: 4.62M.
+- **`tpu_v2.v`** — structural rewrite with key wins: 19-bit partial sums (PSW = 2·DW + clog2 N, the exact range of an 8-product sum) instead of 32-bit, sign-extension only at the output; resets removed from all datapath/shift registers (garbage flushes before `c_valid` can rise at 15 cycles, so only the valid pipe keeps a reset); dropped the unused last-column `a_east` registers: 3.13M.
+- **`tpu_bw.v`** — **the winner (2.609M)**: each PE computes `a*B` as a **Baugh-Wooley array multiplier** whose 8 partial-product rows (AND/NAND arrays) plus the north partial sum are reduced by an explicit **carry-save tree** into one 19-bit register, with the two `+1` corrections folded into row 0. Final carry-propagate done as a 2-block **carry-select adder** (split at bit 9). Cycle-accurate behavior preserved throughout.
+
+### Optimizations with the most impact
+1. **PSW=19 datapath** (from 32-bit): big area cut on 64 psum regs, 28 deskew regs, and all adders.
+2. **Explicit carry-save reduction tree** (vs. behavioral `+` chains): shorter critical path (800→717ps).
+3. **Folding BW corrections into a PP row** (10→9 operands): 2.83M → 2.63M.
+4. **Removing resets** from all but the valid pipeline.
+
+### What didn't work
+- **Radix-4 Booth** (`tpu_booth*.v`, 5 attempts): every variant failed at bit ≥16 with the *identical* wrong signature, across different encodings (function-based, per-bit wire, sign-complement, `+neg` kbias). My 19-bit math is provably exact, so this points to a Verilator constant-folding quirk with the `neg`-conditional-invert pattern in the generate loop — not worth more debugging given BW's strength.
+- **Sign-magnitude array** (`tpu_sm.v`): two magnitude negations + final sign-add negated the AND-array savings → 3.60M.
+- **Big `+` adder trees** (`tpu_arrmul.v`): Yosys builds slow serial chains → 3.79M.
+- **`target_delay` sweep**: 500 was optimal; higher values just relax the adder into larger ripple form (worse), lower values don't help.
+- **PSW=18**: fails — the soak includes 8-bit data (sums reach 2^17·2), so 19 bits is required.
+
+### Lessons learned
+- The structural multiplier description matters far more than `target_delay`; **explicit carry-save + a small final CPA** beat behavioral arithmetic in Yosys.
+- Exploit the **exact value range** (19-bit) and **pipeline flush depth** (drop resets) — free area.
+- Validate a risky optimization on the *structure that already passes* before layering changes; my Booth debugging was confounded by an apparent simulator quirk I should have isolated earlier (the reference-multiply sanity check, which I only ran late).
+- Next time I'd isolate the Booth/Verilator issue first with a tiny standalone testbench before committing to it, and explore a Dadda-column (rather than row-CSA) reduction to trim the final adder further.

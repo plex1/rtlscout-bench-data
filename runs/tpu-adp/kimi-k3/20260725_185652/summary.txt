@@ -1,0 +1,23 @@
+## Summary
+
+**Final result:** `design_booth.v` — PASS 830/830, **area_delay_product = 2.879e6** (area 4305, delay 669ps), a **38% improvement** over the baseline starting point (4.62e6).
+
+### What I tried and what worked best
+1. **Baseline copy** (`design.v`) — confirmed correctness and established the 4.62e6 reference. Critical path = single-cycle systolic MAC (8×8 multiply + 32-bit carry-propagate accumulate) per PE.
+2. **Carry-save accumulation** (`design_csa.v`) — the single biggest win. Passing a 32-bit carry-save *pair* (sum, carry) south down each column, so each PE is just a 3:2 full-adder level + the product instead of a full 32-bit ripple add. Resolved the pair once at the column bottom. Dropped delay 1004→694ps, cost → 3.16e6.
+3. **Radix-4 modified Booth multiplier** (`design_booth.v`) — replaced Yosys's default `$signed*$signed` with an explicit 4-partial-product Booth recode. Combined with carry-save, reached 2.88e6.
+
+### Most impactful optimizations
+- **Carry-save partial-sum columns** (~-32%): removed the 32-bit accumulate adder from the per-PE critical path.
+- **Booth recode** (~-9% more): shallower/smaller multiplier than the default `$mul`. **Recoding the activation `a` (668ps) beat recoding the weight `w` (684ps)** — operand choice matters even though the weight is stationary.
+
+### What didn't work
+- **Column-parallel / balanced-adder-tree dot products** (`design_tree.v`, `design_cp.v`): I could not reproduce the systolic interleaving of streaming A rows with stationary weights — a single-cycle column dot mixes different A rows, and my per-column re-alignment delays never matched all columns simultaneously. Multiple failed iterations; abandoned (would also have added many 32-bit alignment registers).
+- **4:2 compressor keeping the product in carry-save form** (`design_42.v`, 3.59e6): deeper CSA logic + more registers — worse on both area and delay.
+- **Fused 32-bit MAC** (`design_mac.v`, 4.79e6) and balanced product-adder tree: slightly worse than baseline/Booth.
+- **`target_delay` sweeps**: zero effect — Yosys builds its natural netlist regardless of the (always violated) constraint.
+
+### Lessons learned
+- The critical path here is *one* systolic MAC, not a chain — so the lever is shortening the **per-PE** logic (carry-save + Booth), not pipelining or tree restructuring (which the fixed 15-cycle latency contract forbids anyway).
+- Carry-save is the right tool when many operands accumulate serially: defer the expensive carry-propagate to a single point (column bottom).
+- I spent too many steps (~10) chasing the column-parallel tree idea; I should have recognized earlier that the systolic time-skew makes a combinational dot product fundamentally unable to match the streaming schedule, and pivoted to carry-save sooner.

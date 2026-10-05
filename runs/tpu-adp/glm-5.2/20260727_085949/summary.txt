@@ -1,0 +1,31 @@
+## Summary
+
+### 1. Approaches Tried & Best Results
+
+| Design | Cost (area×delay) | Key Change |
+|--------|------------------|------------|
+| `design.sv` (baseline) | 4,624,409 | Original starting point, 32-bit acc, async reset |
+| `design_narrow20.sv` | 3,351,919 | Accumulator narrowed 32→20 bits |
+| `design_acc19.sv` | 3,159,837 | Accumulator narrowed to optimal 19 bits |
+| `design_csa.sv` (**best**) | **2,744,445** | Carry-save accumulator + 19-bit + no PE reset |
+
+**Best file: `design_csa.sv`** — 40.6% cost reduction from baseline.
+
+### 2. Most Impactful Optimizations
+1. **Carry-save accumulator (CSA)**: Replaced the 19-bit carry-propagate adder in each PE with a 3:2 CSA (full adders, no carry chain). Final CPA only at column bottom. Cut delay from ~810ps to ~631ps — the single biggest win.
+2. **Accumulator narrowing (32→19 bits)**: 19 bits is the minimum for 8×8×8 signed matmul (max |C| = 8×128² = 131072 = 2¹⁷, needs 19-bit signed). Reduced both area and delay significantly.
+3. **Removing resets from datapath FFs**: Reset is only asserted pre-stream, so PE weight/activation/psum/carry registers don't need reset. Only the valid pipeline keeps async reset. Saved FF area and simplified logic.
+
+### 3. What Didn't Work / Regressions
+- **Unsigned multiply with sign correction**: Extra negate/abs logic increased delay (950ps) and area.
+- **Booth-2 radix-4 multiplier**: Too complex to implement correctly within step budget; sign extension bugs.
+- **Sklansky prefix adder**: Implementation errors in the prefix tree; hard to get right by hand.
+- **CSA narrower than 19 bits** (16/18-bit): Sign extension broke for negative accumulated sums.
+- **CPA absorbed into deskew**: Deskew registers widened from 19→32 bits, negating area savings.
+- **Higher target_delay** (700–2000ps): Consistently worse — Yosys increased delay without sufficient area reduction.
+
+### 4. Lessons Learned
+- **Carry-save accumulation is the key lever for systolic MAC chains** — it eliminates the per-PE carry chain, replacing O(N) carry depth with O(1) full-adder depth, with the trade-off of doubled accumulator registers.
+- **Minimum-width arithmetic matters**: Going from 32→19 bits saved ~15% area and ~20% delay with zero functional impact.
+- **Hand-coded prefix adders and Booth multipliers are error-prone** — better to let Yosys optimize the multiplier from `$signed(a)*$signed(w)` and focus on the accumulator structure.
+- **Removing unnecessary resets is a safe, free area win** when the protocol guarantees pre-stream reset and clean initialization via the load/compute protocol.
