@@ -47,7 +47,7 @@
  },
  "footnotes": [
   "Rows marked \"measured before suite-v1\" are seed data: runs from July 2026, made with an unpackaged rtlscout that predates version 0.2.0. Each is replaced when reruns of that entry under suite-v1 are published.",
-  "The seed runs were checked against the original 830-cycle vector file. suite-v1 ships a 6,782-cycle file whose first 830 cycles are identical.",
+  "The seed runs were checked against the original 830-cycle vector file. suite-v1 ships a 6,782-cycle file whose first 830 cycles are identical. Their best designs were re-evaluated with rtlscout 0.2.0 against the 6,782-cycle file on 2026-10-06: all twelve pass every check and reproduce the recorded cost.",
   "The seed runs were launched six at a time (three Verilog and three Spire HDL runs of one model per campaign), so their wall-clock times include that load.",
   "All entries were called through OpenRouter without prompt caching, so every step pays for its full input."
  ]
