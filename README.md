@@ -44,7 +44,7 @@ One JSON object per run, one top-level key per line, one evaluation per line.
 | `suite` | string | suite tag the run was measured under, e.g. `suite-v1`; `pre-v1` for seed runs |
 | `origin` | string | `campaign` (launched by `rtlscout_bench.campaign`), `seed` (older run adopted as initial data) or `manual` (other run directory adopted by hand) |
 | `status` | string | `completed`, or `ended-early` when rtlscout reported an error for the run |
-| `rtlscout` | string | version of the rtlscout package that produced the run, captured when the campaign was launched; free text for seed runs |
+| `rtlscout` | string | version of the rtlscout package that produced the run, captured when the campaign was launched; an install from git adds its commit (`0.2.0+git.f4152b6`); free text for seed runs |
 | `spire_hdl` | string or null | version of spire-hdl installed at launch; null when not recorded |
 | `bench_commit` | string or null | commit of `rtlscout-bench` in use: at launch for campaign runs, at recording time for adopted runs; ends in `-dirty` if the checkout had uncommitted changes |
 | `campaign` | string | campaign name, i.e. `campaigns/<name>.json`; only for `origin: campaign` |
@@ -180,6 +180,11 @@ which verifies: the schema of every record; that each record sits in the directo
 open-weights policy; that every run has its transcript, and its `best_design/` when it has a best design; that
 no stored text contains an API-key pattern; that the leaderboard files only refer to runs that exist and give a
 reason for each exclusion; and that the site builds from the selection.
+
+## Licence
+
+The records, summaries, transcripts and curation files in this repository are published under
+[CC BY 4.0](LICENSE) (Felix Arnold). Attribution: "RTL Scout leaderboard data, https://github.com/plex1/rtlscout-bench-data".
 
 ## Third-party material
 
