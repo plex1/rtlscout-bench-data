@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "task": "fpmul-adp",
+ "title": "FP16 multiplier",
+ "description": "An IEEE binary16 multiplier (1 sign, 5 exponent, 10 fraction bits) with subnormal inputs and outputs, round to nearest even, canonical quiet NaN for invalid operations. The starting point is a plain readable Verilog implementation: unpack, 11x11-bit significand multiply, leading-zero count, normalise, round, pack.",
+ "metric_label": "area × delay",
+ "unit": "µm²·ps",
+ "flow": "Yosys synthesis and OpenROAD static timing analysis on ASAP7. Correctness is proven, not sampled: every evaluation checks the design for formal equivalence with the reference multiplier (yosys-abc cec) and re-simulates the gate-level netlist on about 18.9 million enumerated operand pairs (every subnormal or zero operand against structured partners, plus LFSR-driven broad pairs).",
+ "baselines": {
+  "verilog": {
+   "cost": 145429.23,
+   "area": 108.69,
+   "delay": 1337.97,
+   "suite": "suite-v1",
+   "rtlscout": "0.2.0+git.f4152b6",
+   "campaign": "fpmul_baseline_20261010"
+  }
+ },
+ "runs": {},
+ "exclude": [],
+ "notes": {},
+ "footnotes": [
+  "All entries were called through OpenRouter without prompt caching, so every step pays for its full input."
+ ]
+}

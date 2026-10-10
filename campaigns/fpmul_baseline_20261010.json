@@ -1,0 +1,46 @@
+{
+ "schema": 1,
+ "campaign": {
+  "name": "fpmul_baseline_20261010",
+  "suite": "suite-v1",
+  "started": "2026-10-10T20:39:16",
+  "argv": [
+   "--baselines-only",
+   "--task",
+   "fpmul-adp",
+   "--name",
+   "fpmul_baseline_20261010"
+  ],
+  "matrix": "campaign_matrix.yaml",
+  "open_weights_only": true,
+  "parallel": 2,
+  "rtlscout": "0.2.0+git.f4152b6",
+  "spire_hdl": "0.4.0",
+  "bench_commit": "e37ce932b2b9cfa3b619c16558381931f432f386",
+  "finished": "2026-10-10T20:40:21"
+ },
+ "baselines": {
+  "fpmul-adp/verilog": {
+   "task": "fpmul-adp",
+   "language": "verilog",
+   "benchmark": "fpmul_f16_verilog",
+   "cost": 145429.23320427086,
+   "area": 108.69390110190835,
+   "delay": 1337.9705,
+   "status": "ok",
+   "cmd": [
+    "python",
+    "-m",
+    "rtlscout.run_eval",
+    "benchmarks/fpmul_f16_verilog/context/starting_point.v",
+    "--benchmark",
+    "benchmarks/fpmul_f16_verilog",
+    "--cost-metric",
+    "area_delay_product",
+    "--json"
+   ],
+   "env": {}
+  }
+ },
+ "runs": []
+}
