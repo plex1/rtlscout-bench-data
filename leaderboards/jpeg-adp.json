@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "task": "jpeg-adp",
+ "title": "core_jpeg 2-D IDCT",
+ "description": "Full 8x8 two-dimensional inverse DCT of the baseline JPEG decoder core_jpeg (ultraembedded, Apache-2.0): the row pass, a double-buffered corner-turn with four 32x32 dual-port RAMs, and the column pass, composed exactly as in the original decoder. Each pass is the factorized (AAN-style) algorithm with 4096-scaled cosine constants, time-sharing five multipliers over an 8-beat schedule, in 32-bit wrap-around arithmetic. The unmodified upstream RTL is the starting point.",
+ "metric_label": "area × delay",
+ "unit": "µm²·ps",
+ "flow": "Yosys synthesis and OpenROAD static timing analysis on ASAP7. The gate-level netlist is re-simulated against the testbench on every evaluation: 323 coefficient blocks (directed extremes, full-range random, JPEG-realistic and sparse) streamed back-to-back on the decoder's fixed schedule, 20,672 outputs compared against a trace recorded from the upstream RTL.",
+ "baselines": {
+  "verilog": {
+   "cost": 9496575.05,
+   "area": 4273.69,
+   "delay": 2222.1,
+   "suite": "suite-v1",
+   "rtlscout": "0.2.0+git.f4152b6",
+   "campaign": "jpeg_baseline_20261010"
+  }
+ },
+ "runs": {},
+ "exclude": [],
+ "notes": {},
+ "footnotes": [
+  "All entries were called through OpenRouter without prompt caching, so every step pays for its full input."
+ ]
+}

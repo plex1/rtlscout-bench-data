@@ -1,0 +1,47 @@
+{
+ "schema": 1,
+ "campaign": {
+  "name": "jpeg_baseline_20261010",
+  "suite": "suite-v1",
+  "started": "2026-10-10T20:25:28",
+  "argv": [
+   "--baselines-only",
+   "--task",
+   "jpeg-adp",
+   "--name",
+   "jpeg_baseline_20261010"
+  ],
+  "matrix": "campaign_matrix.yaml",
+  "open_weights_only": true,
+  "parallel": 2,
+  "rtlscout": "0.2.0+git.f4152b6",
+  "spire_hdl": "0.4.0",
+  "bench_commit": "531a9419efa98e16eb6bcf5088fbbcb6868fd231",
+  "finished": "2026-10-10T20:27:53"
+ },
+ "baselines": {
+  "jpeg-adp/verilog": {
+   "task": "jpeg-adp",
+   "language": "verilog",
+   "benchmark": "jpeg_idct_2d_verilog",
+   "cost": 9496575.05048669,
+   "area": 4273.689402367609,
+   "delay": 2222.1023,
+   "status": "ok",
+   "cmd": [
+    "python",
+    "-m",
+    "rtlscout.run_eval",
+    "benchmarks/jpeg_idct_2d_verilog/context/starting_point.v",
+    "--benchmark",
+    "benchmarks/jpeg_idct_2d_verilog",
+    "--cost-metric",
+    "area_delay_product",
+    "--skip-cec",
+    "--json"
+   ],
+   "env": {}
+  }
+ },
+ "runs": []
+}
