@@ -1,0 +1,29 @@
+## Summary
+
+**Best result: `design_tree.v` — PASS, cost 1.918e6 area_delay_product** (delay 484.9ps, area 3954), vs. the provided starting point at 4.62e6 (delay 1004ps, area 4604) — a **2.4× improvement**.
+
+### 1. Approaches tried (in order)
+- **`design_base.v`** (copy of starting point): PASS, 4.62e6. Baseline systolic array with 32-bit psum chains.
+- **`design_chain.v`** (retimed accumulator chain with product pre-registers): PASS, 3.05e6. Narrowed accumulators to 19 bits, split mult/add critical path, eliminated the a_east registers (byte broadcast + per-byte taps instead of eastward flow).
+- **`design_retime2.v`** (full retiming with corrected load-cycle semantics): PASS, 2.92e6. Pre-registered products re-evaluated every cycle (including during weight loads), zero padding registers.
+- **`design_csa.v`** (carry-save accumulator chain): PASS, 2.92e6→kept. Replaced the 19-bit CPA per PE with a 3:2 CSA; single CPA per column at the bottom.
+- **`design_tree.v`** (merged Baugh-Wooley compressor tree per PE) — **the winner**: product never formed as a single number; the 8 BW partial-product rows are merged directly with the incoming (sum,carry) chain pair and reduced by compressors to the next register pair. 1.92e6.
+- **`design_booth.v`/`design_booth2.v`** (Booth radix-4 recoding to shrink the tree): correct logic achieved but worse cost (2.56e6) and a buggy final variant (unresolved FAIL).
+
+### 2. Optimizations with most impact
+1. **Merged BW compressor tree** (multiplier CPA + accumulate CPA eliminated into one 5-8-CSA tree feeding the sum register directly): −36% cost.
+2. **Narrowing 32-bit accumulators → 19/20-bit chains** (max |Σ of 8 signed 8×8 products| = 2^17): big area/delay win, exact math.
+3. **Splitting the multiply-accumulate critical path** via product pre-registers / CSA / tree registration: delay 1004 → 485ps.
+4. **Preserving the reference's exact operand schedule** (term A[m][i]·B[i][j] multiplied at en-index m+i+j) so the 15-cycle latency and mid-load semantics hold with no padding registers.
+
+### 3. What didn't work / regressed
+- **Retiming across weight-load boundaries**: the reference's per-row/per-column phase stagger means a mid-drain reload assigns *different weights to different in-flight terms*; a naive phase-flattened retiming failed 21 checks (fixed by keeping the exact multiply schedule and making pre-registers re-evaluate every cycle, sampling the weight captured at the end of the previous en-cycle — NOT the "next" weight; two subtle post-edge/pre-edge sampling conventions had to be discovered by tracing failing vectors).
+- **Verilog multi-driver bug**: `wire [N-1:0] r = 0` + per-bit `assign r[k]=...` conflicts silently (constant wins, all rows zero) — use `reg` + `always @(*)` for assembled vectors.
+- **Booth radix-4**: net loss — the decode logic (`ng/tw/on` per digit), the correction row, and ternary-mux row generation cost more than the 8-row BW AND-grid, despite the shallower tree (4 vs 5 stages). Also two decode-table mistakes cost 3 evals: the (1,1,1) digit needs `ng = a1 & ~(am&a0)`, while `on = am^a0` is already correct for all cases.
+
+### 4. Lessons learned
+- **Trace the golden vectors byte-for-byte** to reverse-engineer exact sampling conventions (pre-edge vs. post-edge, stall freeze points) before writing retimed RTL; the spec's prose ("15 cycles after accepted") hides post-edge sampling details.
+- **Preserve phase-stagger semantics** in systolic retimings — the stagger is load-bearing across reloads, not just pipelining.
+- **Merged compressor trees beat separate multiplier+CSA** for 8×8 signed MACs; but for such small operands, Booth recoding's overhead exceeds its depth savings — BW AND-grid + balanced tree is the sweet spot.
+- Try `target_delay` sweeps early and cheaply: 430/650 both slightly worse; 500 was near-optimal for this structure.
+- A dedicated Python brute-force checker for partial-product row identities is worth writing *before* running the full testbench (65536 cases vs. 21-error-limited testbench aborts).

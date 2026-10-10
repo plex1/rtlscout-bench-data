@@ -1,0 +1,38 @@
+# Session Summary
+
+## Final Result
+**PASS at ADP 2,487,916** (`tpu_v4.v`) — a 46% improvement over the original logikbench starting point (4,624,409, ADP = 4604 area × 1004 ps).
+
+## 1. Approaches Tried
+
+| Design | Result | Key Idea |
+|---|---|---|
+| `starting_point.v` | PASS, 4.62M | Original PE-mesh reference (baseline) |
+| `design.v` | FAIL | Flattened per-column chains, activation broadcast (no east chain) |
+| `tpu_opt1.v` | **PASS, 3.23M** | Original schedule, narrow internal accumulators (19-bit vs 32-bit) |
+| `tpu_v2.v` | FAIL (lint) | Activation broadcast + weight delay lines replacing east chain/de-skew |
+| `tpu_v4.v` | **PASS, 2.49M** ← BEST | v1 topology + carry-save (Wallace-tree) MAC stages |
+| `tpu_v5.v` / `tpu_v6.v` | FAIL | 12-operand tree + tapered CS widths / wide weight delay lines |
+
+**What worked best:** `tpu_opt1.v` (keep the exact original per-product schedule, just narrow the accumulators) as the correctness backbone, then `tpu_v4.v` layered a carry-save datapath on top of that same proven topology.
+
+## 2. Highest-Impact Optimizations
+
+1. **Carry-save accumulation** (`tpu_v4.v`): kept each partial sum as (S, C) mod 2¹⁹, injecting the signed 8×8 product as 10 raw partial-product rows into a 14-operand Wallace tree. This eliminated every carry-propagate adder from the 8-stage chain (one 19-bit CPA at the output instead). Delay dropped **808 → 522 ps**; the critical path became a pure 5-level CSA + FF.
+2. **Narrow internal accumulators** (19/17/18-bit tapered, sign-extended to 32 only at the pins): area 4604 → 3998 in v1.
+3. **Baugh-Wooley-style sign handling**: `A·B = Σ Au·b_k·2^k − 2^7·Au·b7 − 2^8·Bu·a7 + 2^16·a7·b7`, with corrections injected as complemented rows plus a shared +2 constant — verified algebraically (mod 2¹⁹) before coding.
+
+## 3. What Didn't Work / Regressions
+
+- **Flattened per-column chains** (`design.v`): computing products at cycle `m+7+i` (j-independent) broke the original's `m+i+j` product schedule — mid-drain weight reloads sample weights at *per-element* times, so the flattening is not cycle-accurate. Uniform tiles masked this; only random tiles caught it.
+- **Tapered carry-save widths** (v5/v6): sign-extending (S, C) pairs across widths is unsound — S+C is only determined mod the narrower width. Caused off-by-2¹⁶/2¹⁷ errors (e.g. 0xfffe0400 → 0x0001f400). **Fix: uniform 19-bit CS stages.**
+- **12-operand algebra** (v5/v6): merging the k=7 row into the correction left errors (e.g. `0000be...` vs `000028...`); never fully resolved before the step budget ran out.
+- Trivial but costly: two silent-overflow bugs (`[13*W-1:0]` holding 14 operands; 8-bit `<<k` truncation) each burned an eval; genvar/integer misuse in generate loops caused several lint-only eval losses.
+
+## 4. Lessons Learned
+
+- **Preserve the original's per-element schedule exactly** when optimizing a cycle-accurate design; only transform the *arithmetic inside* a stage, not the dataflow timing.
+- **Verify arithmetic identities with hand numerical checks before synthesis** (e.g. A=B=127 → 16129) — I validated the 14-operand form this way successfully, but skipped it for the 12-operand merge and paid for it.
+- **Don't taper carry-save representations**; the (S,C) invariant is width-relative.
+- **Bound-check every packed concatenation** — silent truncation/overflow in Verilog cost two full eval cycles.
+- Next time: start from the proven v1 topology, apply one arithmetic transform per eval, and budget ~5 steps for lint-level (genvar/width) debugging rather than discovering them via failed runs.

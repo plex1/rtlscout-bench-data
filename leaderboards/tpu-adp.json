@@ -11,9 +11,9 @@
    "cost": 4624408.88,
    "area": 4604.07,
    "delay": 1004.42,
-   "suite": "pre-v1",
-   "rtlscout": "pre-0.2.0 (unpackaged, 2026-07)",
-   "source": "the shipped starting point, evaluated once with the task's metric and flags by the 2026-07 campaigns that produced the seed runs"
+   "suite": "suite-v1",
+   "rtlscout": "0.2.0+git.f4152b6",
+   "campaign": "20261006_064936"
   }
  },
  "runs": {
@@ -36,6 +36,11 @@
    "20260727_104159",
    "20260727_104201",
    "20260727_104203"
+  ],
+  "glm-5.3-flash": [
+   "20261010_155743",
+   "20261010_155745",
+   "20261010_155747"
   ]
  },
  "exclude": [],

@@ -1,0 +1,43 @@
+{
+ "schema": 1,
+ "campaign": {
+  "name": "20261006_064936",
+  "suite": "suite-v1",
+  "started": "2026-10-06T06:49:36",
+  "argv": [
+   "--baselines-only"
+  ],
+  "matrix": "campaign_matrix.yaml",
+  "open_weights_only": true,
+  "parallel": 2,
+  "rtlscout": "0.2.0+git.f4152b6",
+  "spire_hdl": "0.4.0",
+  "bench_commit": "7fc8b795b0d5e88daeca9ca79e30d40af1aab387",
+  "finished": "2026-10-06T06:53:04"
+ },
+ "baselines": {
+  "tpu-adp/verilog": {
+   "task": "tpu-adp",
+   "language": "verilog",
+   "benchmark": "tpu_verilog",
+   "cost": 4624408.882038144,
+   "area": 4604.072234570822,
+   "delay": 1004.4171,
+   "status": "ok",
+   "cmd": [
+    "python",
+    "-m",
+    "rtlscout.run_eval",
+    "benchmarks/tpu_verilog/context/starting_point.v",
+    "--benchmark",
+    "benchmarks/tpu_verilog",
+    "--cost-metric",
+    "area_delay_product",
+    "--skip-cec",
+    "--json"
+   ],
+   "env": {}
+  }
+ },
+ "runs": []
+}
