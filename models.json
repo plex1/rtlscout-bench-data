@@ -22,6 +22,13 @@
    "open_weights": true,
    "price_per_mtok": {"input": 0.5, "output": 2.2},
    "price_note": "via OpenRouter, no prompt caching"
+  },
+  "openrouter:z-ai/glm-5.3-flash": {
+   "name": "GLM 5.3 Flash",
+   "vendor": "Z.ai",
+   "open_weights": true,
+   "price_per_mtok": {"input": 0.15, "output": 0.5},
+   "price_note": "via OpenRouter, no prompt caching; list price on 2026-10-10"
   }
  }
 }
