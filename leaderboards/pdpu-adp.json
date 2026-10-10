@@ -1,0 +1,25 @@
+{
+ "schema": 1,
+ "task": "pdpu-adp",
+ "title": "PDPU 16-lane posit dot product, pipelined",
+ "description": "The pipelined 16-lane posit dot-product-accumulate unit of PDPU (ISCAS 2023, Apache-2.0): sixteen posit(8,2) products summed into a posit(16,2) accumulator through radix-4 Booth multipliers, alignment with 14-bit truncation, a compressor tree and a final normalise-and-round, in five pipeline stages. The upstream SystemVerilog with N raised from 4 to 16 is the starting point; the 5-cycle latency is part of the contract.",
+ "metric_label": "area × delay",
+ "unit": "µm²·ps",
+ "flow": "Yosys synthesis and OpenROAD static timing analysis on ASAP7. The gate-level netlist is re-simulated against the testbench on every evaluation: 2,000,000 vectors (directed corners and LFSR-driven broad vectors) streamed one per cycle and checked five edges later against the upstream combinational unit, which the testbench embeds as the reference model; the unit is architecturally inexact against ideal posit arithmetic, so bit-exactness to the reference is what counts.",
+ "baselines": {
+  "verilog": {
+   "cost": 968044.66,
+   "area": 1063.51,
+   "delay": 910.24,
+   "suite": "suite-v1",
+   "rtlscout": "0.2.0+git.f4152b6",
+   "campaign": "pdpu_baseline_20261010"
+  }
+ },
+ "runs": {},
+ "exclude": [],
+ "notes": {},
+ "footnotes": [
+  "All entries were called through OpenRouter without prompt caching, so every step pays for its full input."
+ ]
+}

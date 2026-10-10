@@ -1,0 +1,47 @@
+{
+ "schema": 1,
+ "campaign": {
+  "name": "pdpu_baseline_20261010",
+  "suite": "suite-v1",
+  "started": "2026-10-10T20:30:43",
+  "argv": [
+   "--baselines-only",
+   "--task",
+   "pdpu-adp",
+   "--name",
+   "pdpu_baseline_20261010"
+  ],
+  "matrix": "campaign_matrix.yaml",
+  "open_weights_only": true,
+  "parallel": 2,
+  "rtlscout": "0.2.0+git.f4152b6",
+  "spire_hdl": "0.4.0",
+  "bench_commit": "47589e6e77129e0c3f11b0c5de1fd8cdd18953a6",
+  "finished": "2026-10-10T20:33:06"
+ },
+ "baselines": {
+  "pdpu-adp/verilog": {
+   "task": "pdpu-adp",
+   "language": "verilog",
+   "benchmark": "pdpu_dot16_pipe_verilog",
+   "cost": 968044.6621585514,
+   "area": 1063.508947574121,
+   "delay": 910.2365,
+   "status": "ok",
+   "cmd": [
+    "python",
+    "-m",
+    "rtlscout.run_eval",
+    "benchmarks/pdpu_dot16_pipe_verilog/context/starting_point.v",
+    "--benchmark",
+    "benchmarks/pdpu_dot16_pipe_verilog",
+    "--cost-metric",
+    "area_delay_product",
+    "--skip-cec",
+    "--json"
+   ],
+   "env": {}
+  }
+ },
+ "runs": []
+}
