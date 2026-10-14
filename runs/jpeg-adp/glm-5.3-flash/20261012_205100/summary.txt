@@ -1,0 +1,31 @@
+## Session Summary
+
+**Best result: `design_v8.v` — PASS, cost 4.163e6 area_delay_product** (13.05e6 for the original starting point → **3.1× improvement**; delay 3053→1004 ps, area 4274→4146).
+
+### 1. Approaches tried (in order)
+- **Baseline copy** (`design.v`): original core_jpeg composition verbatim — 13.05e6.
+- **v2** (`design_v2.v`): removed unused transpose RAM read port, 2-level read mux, narrowed multipliers — *slower* (mux got worse).
+- **v3** (`design_v3.v`): **one-hot AND-OR transpose read path** + exact signed-division rewrite — 5.75e6. Big win.
+- **v4** (`design_v4.v`): exact `(x*181)/256` via early low-byte zero-detect (181 is odd ⇒ `(x·181) mod 256 == 0 ⇔ x[7:0]==0`) + fixup folded into the downstream output add — **4.33e6**.
+- **v6/v7/v8**: multiplier restructuring into 2-stage chunked partial products; **v8 (7-bit/7-bit/top 3-way split, per-array b-register copies) won at 4.163e6**.
+- **v9/v10/v11**: carry-save (3:2) combine registered instead of raw partials; consumer-side recombination; 4-way splits — all failed or regressed.
+
+### 2. Highest-impact optimizations
+1. **Transpose read mux → one-hot decode + balanced AND-OR tree** (v3): 3446→1437 ps. The 32:1 mux over 4×20-bit RAM arrays was the single worst structure.
+2. **Replacing the signed `/256` divider** with early operand-based zero-detect + fixup folded into an existing adder (v4): 1437→1057 ps, and removed two 32-bit dividers + increment adders.
+3. **Proven width minimization** (mathematical range analysis on the fixed algorithm): x-pass outputs 20-bit, y-pass outputs 17-bit, constants 13-bit, products exact at 28–32 bits — allowed narrow multipliers everywhere without any behavior change.
+4. **Multiplier chunking** (v8): 7b+7b+top 3-way split with duplicated b-registers (fanout control) → 1004 ps.
+
+### 3. What didn't work / regressed
+- **v10** (carry-save pair registered, consumers recombine): broke pipeline alignment — consumers are scheduled one cycle after the register, so the recombination must be *in* the registered stage. 19k errors.
+- **v11** (4-way split): three separate bugs — middle chunks of a split operand must be **zero-extended** (only the top chunk is signed); wrong shift constants for the top chunks (10/12 instead of 12/15). Still failing at session end (12k errors) — likely one more residual sign/shift slip; abandoned rather than debugged further.
+- **`target_delay` sweeps** (250/500/1200 ps): netlist essentially identical — ABC area-maps when the constraint is unreachable and doesn't relax when it's loose. RTL structure is the only real lever in this flow.
+- Naive "fold fixup into the multiply" (v3 first attempt): inexact for |x·181| ≥ 2³¹ (product sign-bit flips) — 3 vector misses; had to use the exact product form.
+
+### 4. Lessons learned
+- **Verilog signedness is the #1 bug source**: a 1-bit unsigned term poisons an entire expression's signedness (turning `>>>` into logical shift — v4's 11k errors). Declare even 0/+1 fixup values as `signed [31:0]`.
+- In a multi-chunk partial-product split: **only the top chunk is signed; every middle chunk must be zero-extended**, and each chunk's shift must equal its bit offset — verify by expanding `a = Σ chunkᵢ·2^(kᵢ)` on paper before writing RTL.
+- Check **register-load vs. consume timing** explicitly when restructuring pipelines (the v4 off-by-one and v10 one-cycle-early bugs were both silent structural slips, not math errors).
+- Range proofs (all-input bounds, not just testvector-observed ranges) are extremely profitable here: JPEG IDCT has tight analytic bounds, so 20/17-bit storage and narrow multipliers are *exact*, not approximate.
+- Don't waste steps on synthesis-knob sweeps when the tool provably ignores them; spend them on datapath structure.
+- Errors-in-unexpected-places usually means a structural/scheduling bug, not an arithmetic one — inspect the code before theorizing about overflow.

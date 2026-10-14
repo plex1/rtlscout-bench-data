@@ -1,0 +1,39 @@
+Baseline (design.v = starting_point.v, eval 1):
+  area 4273.7, delay 2222 ps, ADP 9,496,575.
+  Critical path: transpose RAM read decode (32-entry register array, 5-bit addr)
+  -> 32:1 32-bit mux -> ram_read1_q.  Huge: 1446 ps on the first gate (5-bit addr
+  decode into 32 FFs = 640 register bits + 2*32:1*32b muxes per RAM x4 RAMs).
+
+Plan:
+1. Transpose: replace the 4 dual-port RAMs (32x32b, read-first) with a single
+   bank structure: 8 banks x 32x32b with single-bit addr decode? Instead:
+   restructure so that each of the 4 read lanes uses its own bank of 8x32b
+   (bank = row of destination), i.e. store the block in 8 rows x 8 cols.
+   Write of row r goes to all... hmm — write addr = {buf,row}: data0..3 lanes
+   on a beat all belong to the SAME input row, and the beat writes 4 different
+   columns of that row. So bank r (row r) needs 4 write ports (one per lane,
+   distinct columns) and, on read, lane j needs column c=col_seq[k] of row
+   row_seq[k] -> reads column col of bank row -> out of ONE bank per lane beat.
+   So implement bank = array of 8 regs [31:0] x 8 columns with 4 dedicated
+   write ports (lane0..3) and 1 read port (8:1 mux of 32b).
+   Total FFs same (2048) but decode is 3-bit row select -> 8 rows of 8 regs
+   (8 write-enable groups of 4 lanes each) + 8:1 mux per lane. Much less mux
+   logic: instead of 4 x (32:1 x32b shared 5-bit decode across 4 RAMs).
+
+2. 1-D passes: mul_b is a constant per beat -> make multiplier constant-aware
+   (mul with muxed shift-add). Try: replace 32x32 signed mult with constant
+   multipliers using shift-add on 12-bit constants (C1..C7) and the *181/256.
+   Big area saving (10 x 32x32 mults -> 5 per pass; constant -> ~5 adders).
+
+3. Delay: reported delay 2222 ps is the RAM decode path; after fix, the mult
+   path (~? ps) dominates. Can pipeline by one more cycle if needed (gap
+   tolerant? need care with row pass block_out/valid timing and streamer
+   overlap — maybe safe since downstream is elastic double buffer... the
+   transpose FSM needs ready=1; deeper pipeline adds latency but the overlap
+   means throughput must be >= 1 beat/cycle on average; fine).
+
+4. Try target_delay sweep (500 -> 1000/1500) after structural fixes.
+
+Cost model: ADP = area * delay. Current: area 4274, delay 2222.
+Multiplier area is probably ~40% of total. RAM decode is the delay.
+Target: area ~2500, delay ~500 => ADP ~1.25M (8x better).

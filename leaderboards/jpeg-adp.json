@@ -16,10 +16,34 @@
    "campaign": "jpeg_baseline_20261010"
   }
  },
- "runs": {},
- "exclude": [],
+ "runs": {
+  "glm-5.3-flash": [
+   "20261012_205100",
+   "20261013_035244",
+   "20261013_114018"
+  ]
+ },
+ "exclude": [
+  {
+   "entry": "glm-5.3-flash",
+   "run": "20261010_202826",
+   "reason": "superseded by suite-v2 runs"
+  },
+  {
+   "entry": "glm-5.3-flash",
+   "run": "20261010_202828",
+   "reason": "superseded by suite-v2 runs"
+  },
+  {
+   "entry": "glm-5.3-flash",
+   "run": "20261010_202830",
+   "reason": "superseded by suite-v2 runs"
+  }
+ ],
  "notes": {},
  "footnotes": [
-  "All entries were called through OpenRouter without prompt caching, so every step pays for its full input."
+  "Rows labelled as measured before the current suite are earlier data (pre-v1 seed runs from July 2026 with an unpackaged rtlscout, or suite-v1 runs from October 2026 without the provider pin and completion cap). Each is replaced when reruns of that entry under the current suite are published.",
+  "All entries were called through OpenRouter without prompt caching, so every step pays for its full input.",
+  "Before 2026-10-12 the task text cited the starting point as `context/starting_point.v`; the file is `starting_point.v` in the agent's workspace, so every run of that period lost one step to a failed read. Corrected on 2026-10-12; the task is otherwise unchanged."
  ]
 }

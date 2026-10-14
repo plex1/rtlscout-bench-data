@@ -1,0 +1,29 @@
+## Summary
+
+**Final result: `design7.v` — PASS, ADP 4.86M** (area 4212 µm², delay 1154 ps) vs. baseline `design.v` (original core_jpeg composition) at 9.50M (area 4274, delay 2222 ps). ~2× improvement.
+
+### 1. Approaches tried
+- **`design.v`** (baseline, included the original RTL): ADP 9.50M, delay 2222 ps — critical path was the transpose RAM read decode (5-bit addr → 32-entry register decode → 32:1×32b mux).
+- **`design5.v`** — shared parameterized 1-D pass (`jpeg_idct_1d`) with 5 time-shared constant shift-add multipliers (17/21-bit operand regs), 20-bit transpose storage, single 128-word array: PASS but ADP 11.0M — Yosys built a 128:1 mux per read (worse than 4×32:1).
+- **`design6.v`** — transpose as 8 arrays of 16 words (buffer×lane) with two-stage read mux: **ADP 8.04M** (delay 1963).
+- **`design7.v`** — algebraic read-path redesign (see below): **ADP 4.86M** ✅.
+- **`design8.v`** — 7 dedicated constant multipliers replacing 5 time-shared ones: never reached correctness (beat-alignment bugs, ~19400/20672 failing at step limit; reverted).
+
+### 2. Most impactful optimizations
+- **Transpose read-path algebra** (biggest win): derived that the original's read address is `addr(i) = g(i) + 8·b(k(i))` with `g = i[5:3]` (stable 8 cycles) and `b = k[0]^k[2]`, so each lane needs only 2 words per group. Two 8:1 prefetch muxes (select = *next* group) + one 2:1 by `b` per lane → delay 1963→1154 ps.
+- **Two-stage registered mux** (design6): splitting 32:1 into 16:1→FF→2:1 cut ~260 ps.
+- **Constant shift-add multipliers** replacing 32×32 signed multipliers (5 per pass ×2 passes): area 4274→~4100.
+- **Width narrowing**: 20-bit signed transpose storage (row-pass outputs provably bounded by 2^19), 21-bit y-pass operand regs, 20-bit block_out — all provably lossless.
+
+### 3. What didn't work / regressed
+- Single 128-word transpose array → *longer* mux than 4 separate 32-word RAMs.
+- 17-bit combining-stage registers (`o_t*`): far too narrow — constants carry ×4096 scaling so intermediates reach ~2^29; had to keep 32-bit wrap combining (correctness requires it).
+- Truncating signed division `/256`: positive case has NO +1 bias (plain truncation); negative case is `(p+255)>>>8`.
+- Verilator quirks: dynamic array-word select loses signedness (needs explicit sign-extension concat); mismatched port widths silently truncate (y-pass needed 20-bit ports, `IW_16(0)` param omission broke it).
+- design8's dedicated per-constant multipliers: the original reloads operands at beats I missed (e.g. beat 2 re-mults `a0·C2`); my "simplification" of the beat→product mapping was wrong, and 3-stage product pipelines still left mismatches — ran out of steps.
+
+### 4. Lessons
+- **Don't simplify reference behavior by memory** — re-derive every scheduling detail (beat→operand reloads like `mul0_a <= block_in_0_1` with stale constant) from the RTL before restructuring; my costliest failures were from unverified assumptions about the 8-beat schedule.
+- Failures come in *pairs* (a sign-extension loss + a wrong bias looked similar); diff actual vs. expected patterns (e.g. `0x000fff44` vs `0xffffff44`) pinpoints width/sign bugs fast.
+- Mux structure dominates delay in register-array designs; algebraic access-pattern analysis (which words are ever read per cycle) beats generic "split the mux" fixes.
+- A passing design7 exists; design8 (potentially ~15–25% area saving) is the natural next step: keep design7 wholesale, and port the dedicated-multiplier idea only after exhaustively tabulating the original's operand/constant loads per beat (including the redundant beat-2/4 loads).

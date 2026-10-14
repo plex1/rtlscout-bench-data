@@ -1,0 +1,27 @@
+## Summary
+
+**Final result: PASS, cost 2,854,476** (`design_v27.v`) — a 38% improvement over the starting point's 4,624,409 (area 4346, delay 657 ps vs. 4604 / 1004 ps).
+
+### 1. What I tried, and what worked best
+- **`design_v3.v`** — original skeleton + 19-bit internal accumulator (exact: Σ of eight 8×8 signed products ∈ [−2¹⁷, 2¹⁷]), sign-extended to 32 at the output: 3.27M.
+- **`design_v4.v`** — carry-save psum chain: per-PE path became multiply → single 3:2 compressor → register, with one CPA at each column exit: 2.89M.
+- **`design_v27.v` (best)** — v4 + trimmed carry register: the stored carry word `maj<<1 mod 2¹⁹` has a structurally zero bit 0, so only `maj[18:0]`'s low 18 bits are registered: **2.85M**.
+- Explored (passed but didn't beat v4): explicit Sklansky prefix adder (`design_v15.v`, 3.16M), Booth recoding with registered control (`design_v10.v`, 3.11M) and combinational control (`design_v26.v`, 3.01M), 13-operand CSA tree (`design_v5.v`, 3.07M), row-0/1 constant folding (`design_v28.v`, 2.86M).
+
+### 2. Most impactful optimizations
+1. **Carry-save accumulation** (−22% cost): removed the carry-propagate adder from the per-cycle loop.
+2. **19-bit accumulator instead of 32** (−29%): shrinks all 64 adders plus the 896 de-skew flops; sign-extension at the output preserves the contract.
+3. **Dead-flop elimination** (−1%): `maj[PW-2:0]` carry trimming.
+
+### 3. What didn't work / regressions
+- **Broadcast architecture (`design_v2.v`)**: the original forms product (m,i,j) at compute position p(m)+i+j, so mid-drain weight reloads mix old/new weights along anti-diagonals. This timing is contractual — any architecture that changes product formation order fails the trace.
+- **PW=18 is impossible**: vectors contain 8·(−128)·(−128) = +2¹⁷ (0x00020000), needing 19 bits.
+- **Hand-rolled signed-arithmetic trees** (v6, v9, v11, v16b) repeatedly failed on subtle bugs: Booth k=0 sign decoder, ±2 rows dropped, wrong zero-padding, a concatenation width overflow (27→19 bits), and a CSA tree with one unconsumed operand.
+- **Explicit Sklansky adder** was *slower* than yosys's inferred adder (796 vs 830 ps), and Booth muxes added ~1100 area for ~40 ps delay — bad trade in this flop-dominated design.
+
+### 4. Lessons learned
+- **Flops dominate area here** (~97% of v4): minimizing registered width/ports beats fancier logic trees; every extra registered control bit costs ×64.
+- **Verify identities numerically first** — including boundary/padding cases — before writing RTL; most failures were algebra/implementation slips, not architecture.
+- **Audit CSA trees**: every generated partial product must be consumed downstream; audit concatenation widths against the declared vector.
+- Classic pitfalls cost real steps: shared `genvar` across nested generate loops, and the prefix-adder off-by-one (`{GO[PW-2:0],1'b0}` not `{GO[PW-1:1],1'b0}`).
+- `target_delay` sweeps (400–1500 ps) were unproductive — the default 500 was always best; structural changes were the real lever.

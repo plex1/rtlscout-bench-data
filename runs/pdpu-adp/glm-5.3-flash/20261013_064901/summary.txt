@@ -1,0 +1,17 @@
+## Summary
+
+**1. Approaches tried and what worked best**
+- **`starting_point.v`** (upstream PDPU SystemVerilog, booth multipliers + CSA trees + recursive comp_tree): evaluated first, **PASSED** — this remains the best result at **9.68e5 ADP** (area 1063.5, delay 910 ps @ target 500). Its worst path is pipe2→pipe3 (exponent-max/comparator tree feeding the alignment shifters).
+- **`design.v`** — a from-scratch, bit-exact rewrite with the same 5-stage cut points but simplified datapath: behavioral `*` multipliers instead of booth+CSA, an 18-operand two's-complement adder tree instead of the 17-operand CSA tree, priority-if LZC/decode/encode functions, and the algebraic identity `Σ(s_i?~x_i+1:x_i) = Σ(s_i?~x_i:x_i) + popcount(s)` to remove per-lane incrementers. **Never reached a passing evaluation** (~78% vector failures at session end).
+
+**2. Optimizations with most impact**
+- None landed, but the rewrite targets were well chosen: replacing booth/Wallace with `*` operators lets Yosys map to compact multipliers, and the popcount identity removes 17 twenty-bit incrementers. These were expected to cut both area and the pipe2→pipe3 critical path.
+
+**3. What didn't work / regressions**
+- Casez LZC functions: **lint failure** (no X/Z literals / casez allowed) → replaced with priority if/else.
+- A chain of slice/logic bugs in `design.v`, each costing a full 2M-vector eval to discover: regime-sign bit `val[6]` not `val[5]`; encoder shift written as left-shift instead of right-shift with the reference's 46-bit container; reduction trees looping over output-count instead of input-count (silently dropping operands — the most damaging bug); leaf extension `{7'b0,pv}` truncating to 21 bits; acc field extraction (`r1_dx[12 +: 7]`, mant `r1_dx[11:0]`); unsigned `r4_max + eadj` instead of signed; and the final-mantissa slice (`snorm[18:6]`, sticky `|snorm[5:0]` — fixed as the last edit but **never evaluated**).
+
+**4. Lessons learned / next time**
+- Each failed evaluation burns a step; **desk-check every constant and slice against the `__ref` modules in `tb.sv` once, up front** (they are the authoritative sv2v reference). I'd enumerate all derived widths and field offsets in a comment block and verify each usage before the first eval.
+- Balance ambition: a safer plan was to copy `starting_point.v` and make *targeted* replacements (booth→`*`, CSA→`+`, prune dead modules), keeping proven control/slice logic intact.
+- Next agent: `design.v` has all known bugs fixed; diff it stage-by-stage against `pdpu_top__ref` (esp. stage C clamp `df[6:4]` and stage E), or unit-test `dec8/dec16/enc16` in isolation before a full eval. `starting_point.v` is the safe fallback that already passes.

@@ -1,0 +1,29 @@
+## Session Summary
+
+**Final best: PASS, cost 787,733 area_delay_product** (area 1012.8, delay 777.7 ps) vs. baseline 968,045 (delay 910.2) — **~19% improvement**. Best design is in `starting_point.v` as of eval 4; later edits regressed it, so the eval-4 state should be recovered by reverting the W-folding and comparator edits.
+
+### 1. Approaches tried
+- **Baseline eval** of the provided 5-stage PDPU pipeline (original ISCAS'23 code, yosys-friendly flat arrays).
+- **Cross-stage rebalancing** (legal since only the 5 register boundaries are fixed): moved per-lane CSA-to-binary product adders from stage 2→3 into stage 1→2; split the 17-input exponent compare tree between stages 0/1 (tried 1 and 2 levels in stage 0); moved the final negate between stages 3 and 4.
+- **CSA tree replacement**: swapped the 4:2-compressor tree (ripple `cout` chain across all 20 bits) with a ripple-free recursive 3:2 Wallace tree (`csa3_tree`) with mod-2^k truncation at every level.
+- **Sign-handling algebra**: replaced per-lane two's-complement negation with one's-complement + a single correction operand folded into the CSA tree.
+- **Fast LZC**: Kogge-Stone prefix-OR + one-hot encoder replacing the index-mux-chain LZC.
+- **Fast comparator**: sign-flip biasing + prefix-GT (replaced the case-split comparator).
+
+### 2. Highest-impact optimizations
+1. **Moving per-lane product completion (16 adders) into stage 1→2**: 968k → 904k.
+2. **Ripple-free 3:2 Wallace tree** replacing the 4:2-compressor CSA tree (removed 20-bit ripple chains): → 787,733 (best).
+3. Simpler exponent-adjust (`adj = DP−1−lz` in all cases) and W-folding reduced area (~1000 → ~988) but hurt delay when combined with wrong stage cuts.
+
+### 3. What didn't work
+- **My first LZC rewrite found the highest set bit instead of the lowest** (the original's tree prefers the lower index) → 93% mismatch; a corrected LSB-prefix version passed but at 868 ps (worse than the original LZC).
+- **W-folding correction operand**: three wrong algebraic forms (`0x4000·C`, `((128−C)<<14)|C` with a bit-shift error, `(C−Z)` variants) before the correct `W = ((128−C) mod 128)<<14 | C` with `C = popcount(signs)`; several debug cycles lost, including a misdeclared `pipe1_rg_exp_pm` width and a duplicate `wop` declaration.
+- **Quad-max in stage 0** (decoder + 2 compare levels from input ports): 880 ps — stage 0 became critical.
+- **Prefix-GT comparator**: incorrect span logic → 82% mismatch; reverted.
+- Final state (W-folding + original LZC) = 829,861: still worse than eval 4.
+
+### 4. Lessons learned
+- **Bank a passing eval before any risky edit, and keep a copy per milestone** (`design_eval4.v` etc.) — I burned ~15 steps re-deriving a passing state instead of reverting.
+- **Derive bit-exactness algebra with concrete numeric examples before writing RTL** (e.g., `~0 = 0x3FFF` invalidates "zero-lane" special cases; mod-2^k truncation legality needs every following op to be an addition).
+- **Delay isn't a simple sum over stages**: after each change the reported critical path jumps to a different stage; optimize the reported path each time and re-check, rather than pre-optimizing several stages at once.
+- Target_delay 250 vs 500 changed nothing (paths ~780–900 ps both violate); structural changes are the real lever, as the tips said.

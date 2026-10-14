@@ -1,0 +1,31 @@
+## Summary
+
+**Best result: `design5.v` — 780,015 ADP** (delay 883 ps, area 883), vs. the provided `starting_point.v` baseline of 968,045 (delay 910 ps, area 1063). All designs were verified bit-exact on the 2M-vector testbench.
+
+### 1. Approaches tried
+| File | Idea | Result |
+|---|---|---|
+| `starting_point.v` | upstream 6-register baseline | PASS 968k |
+| `design1.v` | algorithmic restructure (see §2) | PASS **824k** |
+| `design2.v` | pipeline rebalance, diff in R2 | 1050 ps, worse; rebalanced → PASS **808k** |
+| `design4.v` | + Kogge-Stone prefix adders/OR-scan decode | PASS 885k (max+17 subs in one region too slow) |
+| `design5.v` | design4 + aggressive stage rebalance, 19-bit rows | PASS **780k** ← best |
+| `design6.v` | prefix comparator max tree + shift split across register | PASS 849k (area regression) |
+| `design7.v` | + parallel-absolute-value, merged exponent add, restructured encoder | FAIL (encoder) |
+
+### 2. Optimizations with most impact
+- **Sign handling reformulation** (design1): replaced 17 per-lane two's-complement ripple adders with bit-wise XOR-folding of each aligned row plus *one* popcount-derived correction row (−k·2¹⁴+k, mod 2¹⁹) folded into the Wallace tree — exact, no adder chain.
+- **Booth/CSA multipliers → plain 4×4 multiplies**: the mantissa datapath is exactly an 8-bit unsigned product; removed ~all booth encoder/partial-product/CSA area.
+- **Stage rebalancing** (design5): moved the exponent subtract+clamp+align-hi-shift into R3 and the fold+compress+carry-propagate add into R4; shortened rows to 19 bits (result provably fits).
+- **Parallel-prefix arithmetic** (`ks_add`, `or_scan`): Kogge-Stone for exponent add, subtract, CPA, final-exponent add, and a merged encoder round/negate add (saves one adder); OR-scan replaces the decoder's negate adder.
+
+### 3. What didn't work / regressions
+- Stacking maxtree + 17 subtractors in one region (design4) — 1033 ps critical path.
+- `max2p` comparator sign case inverted (fixed: select the *positive* operand), and reading a 17th element from a 16-entry registered vector (out-of-range slice → zeros) — both caught only by simulation.
+- design7's encoder restructure (single 31-bit barrel replacing regime adders) is still incorrect — left as the open thread; `design6`'s conservative encoder would be the fallback to graft onto design5's datapath.
+- Debugging constraint discovered: Verilator aborts at the first `TB_ERROR`, and only the *head* of stdout is shown on failure — so I embedded a self-test (`test7.v`) printing verdicts at t=0 with a dummy top ($finish/$fatal break Yosys/lint).
+
+### 4. Lessons learned
+- Verify every indexing assumption on packed flat vectors (off-by-one slices compile silently and produce all-zero data).
+- The eval harness's stdout head (not tail) is the debugging channel; keep prints early and never call `$finish`.
+- Next steps if resumed: fix design7's encoder (compare against design6's encoder in isolation), then sweep `target_delay` (400/600 ps) around design5, and try speculative carry-select for the final CPA.

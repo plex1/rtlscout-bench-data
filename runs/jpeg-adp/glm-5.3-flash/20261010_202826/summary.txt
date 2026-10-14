@@ -1,0 +1,25 @@
+## Summary
+
+**Final result: PASS (starting_point.v, cost 9.497e6 area_delay_product, unchanged baseline).**
+
+### 1. Approaches tried
+- **Baseline eval** of the unmodified `starting_point.v`: PASS at 9.497e6 (delay 2222 ps dominated by the 32-bit RAM decode path; area dominated by ten generic 32×32 multipliers + four 32×32×32 dual-port RAM arrays).
+- **Full rewrite** (`design.v`): per-(beat,slot) *constant* multipliers (13-bit cos constants), narrowed datapaths (17→18-bit operands, 29/31-bit products where provably safe, 21-bit transpose RAMs), merged the duplicate beat-3/beat-4 products, replaced `(x*181)/256` with shift+correction, 4-stage 1-D pipeline instead of 5.
+- **Bisect variants**: `xonly.v` (x-pass alone), `mix2.v` (my x-pass + original transpose/y-pass), `design_dbg.v` (instrumented with `$display` prints, `#N; $finish` early-exit to fit log tail).
+- **Minimal-touch edit**: replaced only the multiplier stage of both 1-D passes inside `starting_point.v` with per-beat constant multiplies, keeping everything else verbatim (this was the last edit, not yet evaluated).
+
+### 2. What had most impact (when it worked)
+- Diagnosing via instrumented `$display` + `#500; $finish` — this localized the bug: block 0 (all-zero coefficients) must produce all-zero outputs, and the debug prints showed exactly which stage first emitted nonzero garbage.
+- Hand-tracing block 1 (DC-only block, expected output 0x0ffe everywhere) against the golden vector confirmed the 1-D core math and the beat→lane mapping were correct.
+
+### 3. What didn't work / caused regressions
+- My rewritten x-pass was **not** the root problem — `xonly.v` with correct `outport_idx_o` mapping emitted zeros for block 0 correctly. The bug was in my **reconstructed transpose read-address sequence**: I used a combinational guess `{yrcnt[0]^yrcnt[2], yrcnt[5:3]}` instead of the original's *registered read-ahead* `rd_addr_q` (init 8, delta seq `[-8,+8,0,-8,+8,-8,+1,+8]`, one cycle ahead of consumption). Fixing this still left errors (20622/20672 → wrong values, right positions), indicating remaining pipeline-alignment differences in my 4-stage rewrite.
+- `mix2.v` got to 4995 errors — the residual came from my x-pass's **31-bit vs 32-bit arithmetic** choices: the oracle's `(x*181)` product wraps at 32 bits, and its sums (e.g. `(mul0-mul1)+(mul2-mul3)`) also wrap, so truncating any intermediate to 31 bits diverges. Golden vectors encode these wrap artifacts bit-exactly.
+- Burned many steps on circular "mental simulation" — the logic looked right on paper three times while being wrong.
+
+### 4. Lessons learned
+- **Preserve 32-bit wrap semantics everywhere the oracle does** — any width "optimization" of intermediates that the oracle computes in 32-bit wrapped context is a correctness bug, not an optimization. Only narrow stages whose values are provably in-range (e.g. `>>>11` row outputs, transpose storage).
+- **Never reimplement a schedule from inference** (the transpose address generator) — copy the sequential behavior verbatim first, then optimize the data path around it.
+- **Bisect early with cheap experiments** (x-only, mixed original/optimized) instead of re-deriving; one eval per hypothesis beats ten re-reads.
+- **Debug prints + early `$finish`** is the only viable observability channel here (tb.sv is write-protected); keep printed volume small so it survives the log tail.
+- Next time: start from verbatim original + single localized change (constant multipliers only), evaluate, then narrow widths one stage at a time with an eval after each. The minimal-touch edit in `starting_point.v` (both 1-D passes now use per-beat constant multiplies, `midx_q`-scheduled) is the ready starting point for the next agent — it still needs evaluation, and the transpose RAMs (32×32×32, unused port) remain the biggest untouched area/delay lever.

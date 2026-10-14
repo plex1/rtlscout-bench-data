@@ -1,0 +1,25 @@
+## Summary
+
+**Final best: `design.v` — PASS, 873,824 area_delay_product (area 984.5, delay 887.5 ps), vs. 968,045 for the provided starting point (‑9.7%).**
+
+### 1. Approaches tried
+- **Baseline eval** (`starting_point.v`): 968k ADP, critical path = booth-multiplier/CSA region, all stages far over the 500 ps target.
+- **Full transcription with inlined 4×4 mantissa multiply** (`design.v`): replaced the radix-4 booth multiplier (which computed sum/carry vectors that were re-added in stage 2) with a plain `*` product. **This was the best change.**
+- **Comparator simplification**: replaced the sign-case + low-bit compare with a direct `$signed(a) > $signed(b)` max (used in the 17-way exponent max tree). Small win.
+- **Pipeline rebalance**: moved shift-amount computation to stage 1→2, moved negation to stage 3→4 via `{1'b1, ~v}` plus a popcount correction operand in the CSA tree, added a Sklansky prefix adder for the final CPA. Did not complete/correct in time.
+- **Ripple-free 4:2 compressor**: regression, reverted.
+
+### 2. Most impactful optimizations
+- Inlining the 4×4 multiply: 968k → 884k (removed booth encoders, partial-product shifter network, and a 20-bit re-add per lane — area **and** delay win).
+- Signed-max comparator: 884k → 874k.
+
+### 3. What didn't work / regressed
+- **Ripple-free 4:2 compressor**: first version wrongly OR'd the two overlapping carry vectors (must be *added*); after fixing, the synthesizer mapped it to a full 22-bit adder per compressor — delay 887→973 ps. Reverted to the original ripple (cin-chained) 4:2.
+- **One's-complement negate trick**: `{1'b1, ~v}` = `-v-1`, not `-v`; needed a popcount operand (I had this right) but then registered the popcount from the wrong stage (it arrived 2 cycles early) and my edit tooling churn (failed `old_string` matches, duplicated declaration blocks) left the file inconsistent — ~15 steps lost to repair instead of optimization.
+
+### 4. Lessons / what I'd do differently
+- **Use `replace_file` (or one large, careful rewrite) for structural changes**; incremental `edit_file` calls with slightly-off context strings repeatedly failed and corrupted the file with duplicates.
+- **One structural change per evaluation** — batching the comparator and 4:2 changes made attribution and debugging harder.
+- **When adding any signal to a pipelined design, register it through every stage explicitly** and verify stage alignment before simulating; timing alignment (not math) was the actual bug source.
+- The cost metric was delay-dominated (both baseline and best had ~380 ps negative slack), so **area trimming alone barely moves ADP** — rebalancing logic across the 5 fixed pipeline stages is the real lever, and that is exactly where correctness bugs crept in.
+- Still untried and worth doing next: `target_delay` sweep, Kogge-Stone/Sklansky final CPA, and truncating the CSA tree width (top bits of the 21-bit sum may be constant/unused).

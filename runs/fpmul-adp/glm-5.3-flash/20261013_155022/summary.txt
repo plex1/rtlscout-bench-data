@@ -1,0 +1,27 @@
+## Summary
+
+**Baseline:** `starting_point.v` = 145,429 (area 108.7, delay 1338). **Best final:** `design9.v` = **114,563** (delay 936, area 122.4), a 21% improvement.
+
+### 1. Approaches tried
+- `design1.v`: replaced the 22-bit leading-zero priority encoder with leading-one indices of the operands (`L = i_a + i_b + prod[i+j+1]`) plus barrel-shift normalization and mod-128 exponent math → 146,176 (no win alone).
+- `design2/3/4.v`: **one-hot** leading-one encoding, AND-OR funnel window `V = X >> ij` (p1 = product's leading one falls out as V[12]), early under/overflow compares on `H = ea_eff + eb_eff + ij` with a late 2-bit select `s = p1+carry`, flattened SOP pack → 123,182.
+- `design8.v`: binary priority-mux + 5-stage barrel shifter instead of one-hot → same cost, less area/more delay (113.8 / 1028).
+- `design9.v` (**winner**): one-hot funnel for the normal path + **46-bit binary barrel shifter for the subnormal path** with `ts = 26 − exp_sum` computed early from exponents only → 114,563.
+
+### 2. Highest-impact optimizations
+- Eliminating the 22-bit LZC/normalizer via operand-derived leading-one position (~−15k).
+- Merging the two sticky funnels: `sticky1 = sticky0 | V[0]` (design7, −6k).
+- Replacing the 25-way one-hot subnormal funnel with a plain 6-stage barrel shifter keyed on early-computed `ts` (−2.4k).
+- Early exponent compares + 3 parallel candidates (+29/+30/+31) selected late; flat pack where zero-input and subnormal-zero cases fall out naturally (their fraction fields are already 0).
+
+### 3. What didn't work
+- Shared single rounding increment (mux unrounded fields first, design5): 123,977 — worse.
+- Single adder `EN_sel = H0[4:0]+29+s`: 118,299 — the late carry-in into an adder beat the mux structure.
+- Subnormal fraction sharing the V window (design10): 117,799.
+- Shrinking the shifter 46→35 bits: 120,070 — Yosys remapping made it *slower*; synthesis results are nonmonotonic vs. apparent logic size.
+- `target_delay` is ignored by this flow (identical results at 250/500 ps) — RTL structure is the only lever.
+
+### 4. Lessons learned
+- Recurring bug classes: edge cases at range boundaries (overflow at e_norm=31/32), rounding-increment inclusion in zero-detection (`sub_zero = ~carry_s & ~|frac_sub`), NaN's frac bit 9 needing `nan_in |` override, off-by-one in guard/frac indexing (`guard = prod[ts−1]`, frac = `prod>>ts`), undeclared genvars, and signal name collisions across sections.
+- Verify each structural rewrite in small increments; every eval that failed traced to one localized indexing/gating bug, not the architecture.
+- Next time: budget more steps for the multiplier itself (custom Wallace/CSA tree) — the remaining ~600 ps multiplier dominates the path; post-multiply logic is now well optimized.

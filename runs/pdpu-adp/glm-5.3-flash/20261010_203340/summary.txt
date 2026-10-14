@@ -1,0 +1,22 @@
+## Session Summary
+
+**Final state:** Best passing design = `starting_point.v` (baseline), **ADP = 968,045** (area 1063.5, delay 910.2 ps @ target 500). No optimized variant beat it, but I isolated the exact bug blocking the most promising one — `design3.v` is **one line from passing** (fix below).
+
+### 1. Approaches tried
+- **Baseline** (`starting_point.v`): PASS, 968,045. Critical path = pipe2→pipe3: 17× (7-bit exp subtract + saturate + 14-bit barrel shifter + 20-bit negate-incrementer).
+- **`design1.v`** (re-cut: decode | compare+mul | diff | align+negate | CSA+add+normalize | comb-encode): PASS but **worse** (ADP 1,424,889, delay 1224 ps). First version had 6-cycle latency (FAIL) — removing the output FF (combinational encoder) restored the required 5-cycle latency.
+- **`design2.v`/`design3.v`**: direct 4×4 multiplies replacing booth/CSA (exact mod 2⁸), XOR+popcount negate replacing 17 incrementers, b-decoder elimination, slim encoder. Never passed due to one masking bug (below).
+
+### 2. Most impactful optimizations
+- Verifying latency contract early (6-cycle bug caught by error signature).
+- Control experiment (zeroing the popcount operand) proved the XOR+popcount correction operand *is* wired and effective — the substitution Σ(±m) ≡ Σ(m^sign) + popcount (mod 2²⁰) is sound; it was never validated only because of the masking bug.
+
+### 3. What didn't work / regressions
+- **The killer bug:** I "simplified" product alignment to a single `>> (MUL_WIDTH - ALIGN_WIDTH)` believing MUL_WIDTH=16. Actually **MUL_WIDTH = 8** (posit(8,2) mantissas are 4×4=8 bits, ALIGN_WIDTH=14 > 8), so the shift amount was −6 → wrapped to ~2³² → **all 16 products became 0** (1.86M errors, `exp=0008 got=0000`). Must restore `if(ALIGN_WIDTH>MUL_WIDTH) prod << (ALIGN_WIDTH-MUL_WIDTH)` in the product generate of `design3.v`.
+- My "b-decoder is redundant" claim was **false** (0x40 decodes to mantissa 4, not 0) — b-decoders must stay.
+- Encoder slimming (kshift) broke rounding twice; reverted to the upstream encoder.
+
+### 4. Lessons / next steps
+- Compute localparams numerically *before* restructuring shifts (MUL_WIDTH=8, not 16); a negative constant shift silently zeroes in Verilog.
+- Change one thing per evaluation; use zeroing experiments to isolate wiring vs. algebra bugs.
+- **Immediate next step:** in `design3.v`, restore `<< (ALIGN_WIDTH-MUL_WIDTH)` for the 16 product terms, re-evaluate — it should pass with the XOR+popcount negate + direct multiplies + re-cut stages, likely well under 968k. Then balance the normalize/encode stage (design1's 1224 ps output stage suggests splitting round/negate from the shift).

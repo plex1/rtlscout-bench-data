@@ -1,0 +1,25 @@
+## Session Summary
+
+**Final result: PASS, best cost 968,044.66 ADP** (baseline `starting_point.v`, area 1063.5, delay 910.2ps). The session ran out of steps mid-optimization; the improved variant was never successfully evaluated.
+
+### 1. Approaches tried
+- **Baseline eval** (eval_1): `starting_point.v` → PASS, ADP 968k. Critical path: **pipe2→pipe3** = 21-bit exponent-diff subtract + 14-bit barrel shift + 17×20-bit negate-increment + two's-complement conversion, then the CSA tree after pipe3.
+- **"Combinational core + output delay line" trick** (eval_2): turned all `FFNR` flops into assigns, delayed only the 16-bit output by 5 flops. Result: PASS but **ADP 2.73M (2.8× worse)**. Conclusion: **the harness DOES constrain input→register paths** (STA includes them), so latency-preserving "delay-line" tricks don't pay — the combinational delay just moves into the input path. Genuine pipeline balancing is required.
+- **Popcount-folded negation + restructured pipe3/pipe4** (`starting_point.v`, edited in place; also `v1_popcnt.v` as a scratch attempt): replace the 17 negate-incrementers with XOR-masked rows + popcount rows folded into the CSA tree, move the tree before pipe3, put the carry-propagating adder on pipe3→pipe4, merge the pipe5 negate into one adder, and merge the encoder's round-increment with the output negate.
+
+### 2. The key algebra (for the next agent)
+Two's-complement negate without incrementers — `s*|p| = (s ? ~|p| : |p|) + s (mod 2^w)`:
+- Feed each of the 17 items as `(pipe2_signs[y] ? ~product_shifted : product_shifted)` zero-extended to 21 bits — **no incrementer**.
+- Add **one popcount row set**: rows = `signs_pop << p` for bit planes p (folds all the `+s_y` terms). **CAUTION: `signs_pop` must be 5 bits (17 items) → needs 5 rows, `.N(22)`;** my last edit used only 4 rows/`.N(21)`, which is wrong for popcount≥16. Verify before evaluating.
+- Same identity merges the pipe5 negate: `sum_c = (R ^ {SUM_WIDTH{final_sign}}) + final_sign`, and the encoder round: `result_rnd = (value_before_round ^ {(n-1){sign_i}}) + (sign_i ^ round_value)` — one adder instead of negate-then-add.
+
+### 3. What failed / regressed
+- First popcount attempt (v1) used **per-item popcounts of the data** as correction rows — wrong algebra (double count); 1.89M/2M errors.
+- `{a,b} + c` concat pitfall: concatenation is **not** an adder; must use `$signed({1'b0,a}) + $signed({1'b0,b})`.
+- Duplicate `localparam`/declaration edits and a dropped `sum_result` adder caused Verilator lint failures (burned ~10 steps).
+- `edit_file` failed repeatedly on `old_string` mismatches (whitespace/typos in my own reproductions of file text) — very expensive.
+
+### 4. Lessons / next steps
+- **Use `replace_file`/`create_file` with complete, verified content** instead of long `edit_file` chains; typos in `old_string` cost a step each.
+- Read back the edited region after every edit before evaluating.
+- Remaining optimization queue: (a) fix the 5-row popcount bug and evaluate the balanced pipeline; (b) try a faster 21-bit final adder (the pipe3→pipe4 carry-propagate adder is then the long pole, ~700ps at ADP's operating point); (c) consider truncating the exponent-diff before the barrel shifter (only bits [3:0] matter since shifts >13 all give ALIGN_WIDTH); (d) sweep `target_delay` last (lower → less delay, higher → less area), only a couple of tries.

@@ -1,0 +1,26 @@
+## Session Summary
+
+**Final result:** `design11.v` — PASS on all 18,874,371 checks, cost **109,917** area_delay_product (1065.6 ps delay × 103.2 area), a **24.4% improvement** over the starting point (145,429).
+
+### 1. Approaches tried
+- **Baseline** (`design.v`): verbatim copy of the provided starting point to establish cost and confirm the flow.
+- **Shifter-free normalisation** (`design3`/`design4`): replaced the generic 22-bit left/right shifters with one-hot leading-one bus + AND-OR window muxes, and moved rounding into the packed fraction domain.
+- **Custom multiplier** (`design5`–`design10`): explicit carry-save tree + Kogge-Stone CPA to beat Yosys's mapping of `*`.
+- **Exponent critical-path restructuring** (`design11`): 7-bit Kogge-Stone adder computing both `Am+P` and `Am+P+1` in parallel so the late rounding carry only drives a 2:1 mux.
+
+### 2. Most impactful optimizations
+- **Window muxes instead of shifters** (`design3`, 145k→114k): the single biggest win — a one-hot `h[k]` bus and OR-prefix/sticky trees replace three generic shifters, and shifter output bit-width reductions (N, frac, subnormal path all narrowed to ≤11 bits).
+- **Packed-domain rounding with carryless exponent update**: `c = r & &N[9:0]` instead of an 11-bit round adder; the exponent anchor `Am = S−35` is computed in parallel with the multiplier so only the leading-one position `P` sits after it.
+- **Dual-sum prefix adder for the exponent** (`design11`, 114k→110k): precompute `T−35` and `T−34`; rounding carry becomes a select, removing it from the critical path.
+
+### 3. What didn't work
+- **Custom CSA+Kogge-Stone multiplier never beat `*`** (design8/10 ≈ 115–116k vs 114k). Worse, two silent bugs cost ~5 steps: zero-width replication `{0{...}}` in partial products, and a fake left-shift `{g3[7:0], 8'b0}` that discards upper generate bits before shifting (real `<<` fixed it). Verilog concatenation "shifts" are bit-slicing, not shifts.
+- **Missing `assign` keyword** on multi-statement lines broke synthesis once (design11 first cut).
+- Removing the `carry_s` mux leg at T=35 broke 228 cases — the subnormal path's rounding is independent of the normal path's `c`.
+- `target_delay` sweeps (100/500/800/1500) changed nothing material; delay is structural.
+
+### 4. Lessons learned
+- At 11×11 multiply size, Yosys's mapping of `*` is near-optimal; hand-built trees add area without speed. Don't re-implement what the tool maps well — restructure *around* it instead.
+- The real lever was **reducing the number and width of post-multiplier operations** (shifters → muxes, ripple round-adders → AND reductions, late adds → parallel precomputation).
+- Verify custom arithmetic with quick hand-traces before full evaluation; a systematic 40k-case failure pattern (all T=35) was diagnosable in seconds once compared against the pass/fail boundary.
+- Next time: spend saved steps on the subnormal-path shift (still a generic `>>`) and a possible Brent-Kung variant of the exponent prefix adder.

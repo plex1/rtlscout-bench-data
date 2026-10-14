@@ -5,21 +5,29 @@
  "description": "An IEEE binary16 multiplier (1 sign, 5 exponent, 10 fraction bits) with subnormal inputs and outputs, round to nearest even, canonical quiet NaN for invalid operations. The starting point is a plain readable Verilog implementation: unpack, 11x11-bit significand multiply, leading-zero count, normalise, round, pack.",
  "metric_label": "area × delay",
  "unit": "µm²·ps",
- "flow": "Yosys synthesis and OpenROAD static timing analysis on ASAP7. Correctness is proven, not sampled: every evaluation checks the design for formal equivalence with the reference multiplier (yosys-abc cec) and re-simulates the gate-level netlist on about 18.9 million enumerated operand pairs (every subnormal or zero operand against structured partners, plus LFSR-driven broad pairs).",
+ "flow": "Yosys synthesis and OpenROAD static timing analysis on ASAP7. Correctness: the gate-level netlist is re-simulated on about 18.9 million enumerated operand pairs (every subnormal or zero operand against structured partners, plus LFSR-driven broad pairs); all checks must pass.",
  "baselines": {
   "verilog": {
    "cost": 145429.23,
    "area": 108.69,
    "delay": 1337.97,
-   "suite": "suite-v1",
-   "rtlscout": "0.2.0+git.f4152b6",
-   "campaign": "fpmul_baseline_20261010"
+   "suite": "suite-v2",
+   "rtlscout": "0.2.0+git.ce38834",
+   "campaign": "glm53_suite_v2_20261012"
   }
  },
- "runs": {},
+ "runs": {
+  "glm-5.3-flash": [
+   "20261013_155022",
+   "20261013_155024",
+   "20261013_155026"
+  ]
+ },
  "exclude": [],
  "notes": {},
  "footnotes": [
-  "All entries were called through OpenRouter without prompt caching, so every step pays for its full input."
+  "Rows labelled as measured before the current suite are earlier data (pre-v1 seed runs from July 2026 with an unpackaged rtlscout, or suite-v1 runs from October 2026 without the provider pin and completion cap). Each is replaced when reruns of that entry under the current suite are published.",
+  "All entries were called through OpenRouter without prompt caching, so every step pays for its full input.",
+  "Until 2026-10-13 every evaluation of this task also ran rtlscout's combinational equivalence check (yosys-abc cec, 120 s), which rejected designs that restructure the significand multiplier although they passed all 18.9 million vectors. The runs made under that gate were discarded; the task runs with --skip-cec like the other three since then."
  ]
 }

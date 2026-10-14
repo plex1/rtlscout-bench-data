@@ -1,0 +1,30 @@
+## Summary
+
+**Final result: `tpu_v5.v` @ `target_delay=400` — PASS (0/6782 checks), cost 1.986e6 area_delay_product** (vs. 3.32M for the straightforward faithful version, ~40% better; starting point was 831 ps critical path / 32-bit accumulators).
+
+### 1. Approaches tried
+- **v1 — collapsed schedule** (per-row delay `i+7`, no output de-skew): failed. The original's per-PE schedule `E(m)+i+j` plus per-column de-skew is *part of the cycle-accurate contract* — mid-drain weight reloads cut each column's accumulation at a different anti-diagonal, so the schedule cannot be algebraically rearranged.
+- **v2 — faithful schedule, narrowed accumulators**: PASS, 3.32M (baseline).
+- **v3 — carry-save accumulation**: PASS, 2.49M.
+- **v4/v5 — Booth recoding precomputed and stored in the weight-load shift chain**: PASS, 2.15M → 2.12M.
+- **v7 — merged input-skew + east-flow delay lines**: correct but slower mapping (2.07M @400) — reverted to v5.
+- **v8/v9/v10/v11 — non-Booth sign-correction multiplier, 3-level trees, Kogge-Stone output CPA**: never beat v5 (see §3).
+
+### 2. Highest-impact optimizations
+1. **19-bit exact accumulators instead of 32** (v2): shrinks all 64 accumulators, compressor trees, and 28 de-skew registers. Note 18 bits is *not* enough — the vectors contain all-(−128) tiles with |C| = 8·128² = 131072, exactly overflowing 18 signed bits.
+2. **Carry-save (sum, carry) accumulation** (v3): removed the 19-bit CPA from the per-cycle loop; the single carry-propagate add per column moved to the output side. 831 → 594 ps.
+3. **Stored Booth recoding** (v4/v5): the 12 recode bits depend only on the stationary weight, so the load chain shifts recodings, not raw weights; per-cycle path becomes one AOI22-style select + 4-level 3:2 tree. 594 → 533 ps.
+4. **`target_delay=400` sweep**: same RTL, better mapping (489 ps) → 1.986M. Worth doing; the default 500 ps left ~5% on the table.
+
+### 3. What didn't work / regressed
+- Booth-on-activation (v6): puts encode logic back in the per-cycle path (2.27M).
+- Merged delay chains (v7): area saved, mapping slower.
+- **3-level compressor trees are provably impossible**: 7 Booth rows + sparse +1 row need 4 CSA levels (7→5→4→3→2); I burned two attempts (v10/v11) on this miscount.
+- Non-Booth sign-correction multiplier (v8/v9): repeatedly failed on **concatenation width/alignment bugs** in sparse correction rows (e.g. `{5{a7}}, a7&~wl, 7'b0` lands payload at [13:7] instead of [14:8]).
+- Delay targets 850/380/320: all mapped identically or worse — 400 was the sweet spot.
+
+### 4. Lessons learned
+- **Verify bit-slicing arithmetic with a scratch simulation before spending an evaluation**: every failure after v3 was a concat-width or index bug, not a conceptual error. A 5-line local test of one PE against `$signed(a)*$signed(w)` would have saved ~6 steps.
+- **Prove depth lower bounds before building**: row-count arithmetic (7→2 needs 4 levels) is trivial to check on paper and would have avoided v10/v11 entirely.
+- **Preserve the exact schedule first, optimize inside it**: the systolic timing contract (latency 15, stall semantics, mid-drain reload) is unfalsifiable from the spec text alone; v1's elegant-but-wrong shortcut cost 4 steps.
+- If resumed: evaluate the already-written corrected `tpu_v11.v` (4-level tree, corrected final stage), and try de-skew-free variants that keep the *per-column* finish offset inside the valid pipe rather than the datapath.

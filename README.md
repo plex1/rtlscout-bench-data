@@ -76,7 +76,7 @@ Two runs belong in the same leaderboard row only if all of these fields and `sui
 | field | type | meaning |
 |---|---|---|
 | `started` | string | start of the run, `YYYY-MM-DDTHH:MM`, from the run id |
-| `best` | object or null | the best passing design: `cost`, `area` (µm²), `delay` (ps), `eval` and `step` at which it appeared, `file` in `best_design/`. null if no evaluation passed |
+| `best` | object or null | the best passing design: `cost`, `area` (µm²), `delay` (ps), `eval` and `step` at which it appeared, `file`, `td` (the `target_delay` the evaluation used, the agent's own or the task default; pass it as `--target-delay` to reproduce the cost) in `best_design/`. null if no evaluation passed |
 | `n_evals` | int | number of evaluations the agent ran |
 | `n_failed` | int | evaluations that did not pass the testbench or the flow |
 | `steps_used` | int | agent steps taken (at most `max_steps`) |
@@ -85,6 +85,8 @@ Two runs belong in the same leaderboard row only if all of these fields and `sui
 | `price_per_mtok` | [number, number] or null | list price in USD per million input and output tokens used for `usd` |
 | `price_cache_per_mtok` | [number, number] | cache-write and cache-read price; present only when the run used a cache |
 | `usd` | number or null | API cost of the run: tokens times prices. Recomputable from the two fields above |
+| `llm_providers` | object, optional | how many LLM calls each upstream provider served, e.g. `{"Z.AI": 61}` (rtlscout ce38834 and later) |
+| `finish_reasons` | object, optional | how the LLM calls ended, e.g. `{"tool_calls": 59, "length": 2}`; `length` = the completion cap was hit |
 | `error` | string | rtlscout's error text; present only for `ended-early` |
 
 ### `evals`: one object per evaluation, in order

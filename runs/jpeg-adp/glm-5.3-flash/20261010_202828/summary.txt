@@ -1,0 +1,26 @@
+## Summary
+
+**Final result: PASS, cost 4.617M area_delay_product** (baseline starting point: 9.50M — a 2.06× improvement). Best design is `design.v` (confirmed in eval_8/eval_11); area 3897, delay 1184ps.
+
+### 1. Approaches tried
+- **Baseline eval** (`starting_point.v`): 9.50M (area 4274, delay 2222ps — critical path was the transpose RAM read mux).
+- **Full rewrite** (`design.v`): 1-D passes with narrowed, bound-provable widths; corner-turn rebuilt from 4 dual-port 32×32 RAMs into 8 row-banks × 2 block-copies of 8-deep **shift registers**; ÷256 divider replaced by sign-fixup + arithmetic shift; accumulator de-muxed into one dedicated register + enable per value; `*181` products registered one cycle early. → 4.62M.
+- **2-stage split multipliers** (low/hi partial products, shifted pipeline): 5.34M — **worse**, reverted.
+- **Constant-coefficient multipliers** with per-beat operand muxes (`design2.v`): FAIL — beat-mux timing error (operand select and product register used misaligned beat enables).
+- **target_delay sweep**: 500ps → 4.62M; 1000ps → identical 4.62M; 1400ps → 4.93M. Low constraint is optimal.
+
+### 2. Most impactful optimizations
+1. **Shift-register transpose** (no address decode, no 32:1 read mux): eliminated the original's worst timing path, dropping delay 2222→~1430ps. Key insight: the original re-reads each RAM word across several beats, so a bank that pops once per column and *holds* its tap reproduces the delivery pattern exactly.
+2. **Width narrowing** (16→18-bit A path, 29-bit products, 31-bit accumulators, 20-bit x-out): big area win while preserving every 32-bit wrap point.
+3. **Dropping the 5th multiplier** (move `(x0±x4)·C4` to other lanes; beat-4 reload is redundant since beats 3/4 carry identical data) and the **redundant second product register**.
+4. **Divider elimination** and de-muxed accumulator.
+
+### 3. Regressions/failures
+- **Register-reuse bugs**: the original reuses `o_t0` (overwritten by s4 at case 4, so `t5 = s4 − s5`, not `t0 − s5`) and `o_t4/o_t3` (case 6 computes `s1 ± s2`, not `t4 ± s2`). My split registers exposed the true dataflow; three eval cycles were lost to these.
+- **Re-timing the ÷256 across the output stage** caused misalignment twice; the working form registers `*181` in case 6 (same cycle the operands are written) and does fixup+shift in case 7.
+- **2-stage multiplier split** hurt: the y-pass operand-load path (transpose tap → muxed operand regs) became critical.
+
+### 4. Lessons
+- Trace the *original* pipeline delays and register-reuse aliasing precisely before restructuring — the two register-reuse subtleties cost more steps than any optimization.
+- Keep a known-good checkpoint and make one structural change per eval; reverts were cheap and reliable.
+- Structural changes (mux elimination) dominate; `target_delay` is a minor knob. If more steps remained: fix the beat-mux alignment in `design2.v` (constant multipliers could cut both area and delay), and narrow the y-pass accumulator widths (sums fit ~35 bits but case muxes still use 32-bit wiring).

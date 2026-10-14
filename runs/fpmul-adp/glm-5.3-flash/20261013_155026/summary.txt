@@ -1,0 +1,33 @@
+## Summary
+
+**Best result: `design_v15c.v` — PASS, cost 121,690** (area ≈ 90.4, delay ≈ 1347 @ target_delay 1300), vs. 145,429 for the starting point (~16% better).
+
+### 1. Approaches tried
+- **v1** (starting point copy): 22-bit LZC + bidirectional barrel shift + dual normal/subnormal paths → 145,429.
+- **v3**: per-operand normalization (see below) → 138,947.
+- **v8/v9**: one-hot leading-one decode + barrel shifter, prefix-AND rounding increments → 135,571 (v9's prefix-OR leading-one front end gave no gain).
+- **v10**: fused normalizer (AND-OR left-justify instead of barrel shift) → 137,819, a regression; reverted.
+- **v14**: truncated multiplier + adj-free subnormal shift → 132,040.
+- **v15c**: early adj-free exponent bookkeeping + late 2-select mux → 127,340; then **target_delay tuning 1500→1400→1300** → **121,690**.
+- **v16** (CSA + Kogge-Stone CPA, zero/inf folded into early exponent): fixes were applied but never verified — likely worth evaluating as-is next.
+
+### 2. Highest-impact optimizations
+1. **Per-operand normalization**: left-justify each significand's leading one to bit 10 (subnormals get exponent compensation), so the product always lies in [2²⁰, 2²²) — eliminates the 22-bit LZC and bidirectional shifter entirely; one unified exponent replaces two paths.
+2. **Truncated multiplier**: only `prod_hi = prod[21:10] = 1024 + (ta+tb) + TT[19:10]` plus `sticky_low = |TT[9:0]|` are computed.
+3. **Adj-free subnormal shift**: window anchored at `prod[10]` with `qn = 33−(EA+EB)` computed early; clamp shift ≥12→15 so "rounds to zero" needs no extra mux.
+4. **Early exponent bookkeeping**: precompute `E0, E0+1, E0+2` and threshold flags; the late path is only a 2-select mux by `adj` and the rounding carry.
+5. **target_delay sweep**: 1500→1300 alone cut ~4.5% with negligible area growth.
+
+### 3. What caused regressions/failures
+- Wrong shift direction/width in early normalizer versions (barrel shifter must be 11 bits — the subnormal's leading one IS its leading one, no hidden bit); wrong stage amounts (shift-3 instead of shift-8).
+- A `wire [9:0] y` name shadowing the output port → lint/synthesis failure.
+- Clamp condition `qn ≥ 12` mis-encoded (missed 16–19).
+- The subtle one: `le32/le33` (S ≤ 33 tests) didn't mask `S[6]` — S reaches 126, so large exponents were misclassified subnormal, producing spurious zeros on overflow cases.
+- v16's "optimized" top-bit increment (`frac[9] ^ carry`) is wrong; standard prefix increment (`frac[9] ^ (r & &frac[8:0])`) is required. Also: functions can't have non-constant loop bounds.
+
+### 4. Lessons learned
+- Write the value/exponent algebra derivation once, carefully, before coding — most failures were index/clamp mistakes, not architectural.
+- Range-check every comparison: widths of intermediate sums vary (S is 7 bits, not 6).
+- `edit_file` changes occasionally weren't reflected in evaluation; creating a fresh filename is the reliable path (also gives clean version history).
+- Structural wins (truncation, moving logic earlier) beat micro-optimizations (prefix-OR LZC, fused normalizer); a short target_delay sweep after the RTL is stable is cheap and effective.
+- Budget for debug: ~10 of 60 steps went to correctness bugs; keep each new variant a small delta over the last passing design.

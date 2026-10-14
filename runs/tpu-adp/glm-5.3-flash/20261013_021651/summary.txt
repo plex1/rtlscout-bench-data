@@ -1,0 +1,30 @@
+## Final Summary
+
+**Best design: `v11.v` @ target_delay=410 — 1,701,507 area_delay_product (PASS, 6782/6782 checks), 2.7× better than the starting point (4,624,409).**
+
+### 1. Approaches tried
+- **v2**: direct rewrite of the original systolic array with gated clocks + exact-width (19-bit) accumulators — correct, 2.94M.
+- **v3**: replaced the systolic array with a shared-weights pipelined dot-product tree — **failed**: vectors contain mid-drain weight reloads, so PE(i,j) must sample its *current* weight at cycle m+i+j; the per-PE systolic schedule is contractual.
+- **v4/v5**: kept the systolic schedule, converted per-PE accumulation to carry-save (S,C) form — 2.69M.
+- **v6**: eliminated the per-PE multiplier entirely — expressed the signed 8×8 product as a Baugh-Wooley partial-product array (`a*w = ARRAY − 2^15 + 2^8`) merged directly into the accumulator via a 5-level CSA chain — 2.12M.
+- **v7**: pipelined the output carry-propagate adder into the de-skew slack (speculative low/high split) + Kogge-Stone for the zero-delay column — 1.95M (1.83M @ target 400).
+- **v10**: shrank to 18-bit modular accumulation with a single extreme-pattern repair at the pins — 1.74M.
+- **v11** (winner): combined v10's 18-bit width with a 3-row accumulator (S,C,D) → only 4 CSA levels per PE.
+
+### 2. Most impactful optimizations
+1. **Baugh-Wooley PP array merged into the CSA tree** (no carry-propagate multiplier in any PE) — biggest single win (~570k).
+2. **Redundant (carry-save) accumulation end-to-end**, with the only CPA hidden in the output de-skew slack (~740k cumulative).
+3. **Exact-width modular arithmetic**: 18 bits suffice because a column sum ∈ [−130048, +131072]; only +131072 wraps, to the uniquely decodable pattern `18'h20000` (repaired with 2 gates/column) (~90k + smaller registers everywhere).
+4. **Gated clocks** (`clk & ~w_valid`) removing all enable muxes (~1.7M total from the baseline).
+5. **target_delay tuning** (500→410 ps) was worth ~3–5% each time.
+
+### 3. What didn't work / regressions
+- **v3** shared-weight tree: fundamentally incompatible with mid-stream weight reload semantics.
+- **v8** (3-row accumulator at 19-bit with the old output stage): worse than v7 — extra 19-bit register outweighed the saved CSA level; only paid off once widths were cut to 18 bits (v11).
+- Multiple bit-slicing bugs in the speculative output adders (wrong carry bit index, dropped top bits in concatenations) cost several eval steps — e.g. `{hi_c, lo_f[9:0]}` silently truncating `hi_c[8]`.
+
+### 4. Lessons learned
+- **Read the golden vectors early** — line-level diagnosis of failures (line 271: reload during drain; exact 0x400/0x40000 offsets: dropped carry bits) pinpointed bugs faster than re-reasoning from the spec.
+- **The mathematics of range analysis pays directly**: proving min/max of accumulated sums let me cut 32→19→18 bits and justify dropped carries (mod-2^k CSA correctness).
+- **Check what the synthesizer does with `$signed(*)`** — Yosys mapped it to a slow ripple chain; explicit PP generation was far better.
+- Next time: I'd combine the width reduction (v10) with the 3-row tree (v11) immediately instead of testing them serially, and I'd hand-verify concatenation widths in speculative adders before evaluating.

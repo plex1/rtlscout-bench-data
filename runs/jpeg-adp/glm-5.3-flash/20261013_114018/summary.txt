@@ -1,0 +1,29 @@
+## Summary
+
+**Final result:** PASS, cost **3.84M** area_delay_product (baseline: 9.50M → **2.5× better**). Best file: `design_v5.v`.
+
+### 1. Approaches tried
+- **Baseline eval** of `starting_point.v`: 9.50M (area 4274, delay 2222ps; critical path = 32-slot RAM read decode).
+- **design_v1/v2**: restructured with 8-wide passes + narrower RAMs, parameterized pass module. v2 passed at 9.51M.
+- **design_v3**: split each transpose RAM into two 16-slot banks → bank select after output register. Passed at **8.48M**.
+- **design_v4**: registered **one-hot** read select for the RAM (swap-halves/rotate instead of binary address decode) → read path becomes a fast AND-OR. Passed at **4.98M**.
+- **design_v5**: narrowed datapaths — 16-bit multiplier operands, 13-bit constants, 4 multipliers instead of 5 (DC term folded into beat-2 products, bit-exact), divider → shift+sign-correct, pipeline register between corner-turn and y-pass → **4.31M**, then 2-stage pipelined multiplier + 2-beat `*181/256` → **3.84M**.
+
+### 2. Most impactful optimizations
+1. **One-hot transpose RAM read** (8.48M → 4.98M): eliminated the decoded mux critical path entirely.
+2. **Pipeline register between corner-turn and y-pass** (4.75M → 4.31M): split bank-mux from y-input logic; stream tolerance allows free latency.
+3. **Multiplier operand narrowing + 2-stage pipelined multiplier** (4.31M → 3.84M): original 32×32 multipliers wasted enormous area/delay; true widths are ~22×13.
+4. **RAM bank splitting per buffer** (9.51M → 8.48M).
+
+### 3. What didn't work
+- **8-bit RAM datapath** (design_v1): x-pass outputs reach ~110k (DC block); needed XW=20. XW=19 failed 24 checks — the margin between 19 and 20 bits is real and tight.
+- Nested modules in Verilog-2001 → syntax/lint errors; submodules must be outside the top.
+- Undeclared wire outputs / assigning to module outputs from `always @*` without `reg` — small compile friction cost several steps.
+- First CSA multiplier attempt had carry vectors not shifted left (unbalanced 6/1 levels); fixed with `{maj[30:0],1'b0}` and a balanced 3+3 split (the final rebalance edit was not re-evaluated before session end — the carried-over file has this last edit applied but the recorded PASS was the pre-rebalance version).
+
+### 4. Lessons learned
+- Probe data ranges early (I confirmed coefficients are ±32768 and outputs are small) — this made bit-narrowing safe.
+- The critical path usually moves after each fix; re-check `worst_slack`/path endpoints after every eval to pick the next target.
+- The fixed 8-beat schedule has idle register slots — exploitable for free pipelining (2-stage multiplier, 2-beat divide) without changing behavior.
+- Bit-exactness constraints (32-bit wrap, truncating-toward-zero division) must be preserved exactly: replace `x/256` with `(x<0 ? (x+255)>>>8 : x>>>8)`, and fold algorithm steps only when provably congruent mod 2³².
+- Next time: verify each structural edit with an eval immediately; batch only compile fixes, never structural changes.

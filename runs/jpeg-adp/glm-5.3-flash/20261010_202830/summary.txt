@@ -1,0 +1,28 @@
+## Summary
+
+**Best result: 3.98M area_delay_product (design_v5.v), a 2.4× improvement over the original starting point (9.50M).**
+
+### 1. Approaches tried
+- **Baseline eval** of `starting_point.v` (verbatim core_jpeg) → 9.50M, delay 2222 ps, dominated by the transpose RAM read mux + ten 32×32 variable multipliers.
+- **design_v1**: constant multipliers (operand register per C1..C7 instead of a muxed 32×32 variable multiplier), `/256` → add+shift, `ptr_conv` 64-case → bit concat, 21-bit transpose RAMs. Correct, but still 9.5M — the RAM read mux was the real critical path.
+- **design_v3**: replaced the RAM read decode with a **two-level one-hot decode + AND-OR tree** (fanout ≤ 21 instead of ~130) inside the registered read. **2.13× win (4.46M)**.
+- **design_v5**: v3 + restructured operand capture (even/odd coefficient banks, unconditional `i0` sum computation, ×C4 operand loaded from registered sums) + **registered one-hot pipeline tags** replacing all 3-bit case decodes. **Best: 3.98M, delay 988 ps.**
+- **design_v8**: tried splitting the ×181/÷256 chain across beats 6/7 — passed but *slower* (4.65M) because it moved the adder into the multiply's operand path.
+
+### 2. Highest-impact optimizations
+1. **One-hot decoded RAM read** (v3): killed the ~1.4 µs high-fanout address-net + deep 32:1 mux path; delay 2222→1131 ps.
+2. **Constant multipliers** replacing ten 32×32 variable multipliers with seven narrow constant ones per pass: area 4274→3948.
+3. **Registered one-hot pipeline tags** (v5): eliminated 3→8 decode logic from every select path; delay 1131→988 ps.
+4. Behavioral cleanups (free): `ptr_conv` = `{ptr[2:0],ptr[5:3]}`, signed `/256` = conditional add+shift, duplicate beat-3/4 loads dropped.
+
+### 3. What didn't work
+- **Datapath width narrowing** (v2): my bounds analysis was too aggressive — 32-bit LHS context silently wraps in Verilog; e.g. `t0+t7` needs 31 bits, not 30. Cost multiple debug cycles; reverted.
+- **Early/pre-decoded read enables** (v4): the one-cycle-early decode chain had an off-by-one against the read schedule I couldn't nail within budget.
+- **Splitting ×181/÷256 across beats** (v6/v7/v8): all either broke correctness (missed `o_t3` write; divide landing after an inter-block gap) or made the path longer (v8: multiply operand now includes the t6±t5 adder).
+- `target_delay` sweeps: 1000 ps gave 4.26M vs 4.0M at default 500; 2200 ps didn't reduce area — Yosys just upsizes drivers. RTL structure, not the constraint, is the lever.
+
+### 4. Lessons learned
+- **Trace register-aliasing semantics cycle-by-cycle before rescheduling** — the original's same-cycle read-after-write aliases (e.g. `o_t0` at output beat 3) and gap-relative timing (last-row beat 7 → next beat 0 crosses the inter-block gap) are easy to break and hard to debug from TB errors alone.
+- **Attack fanout and decode depth first** — the biggest win wasn't arithmetic but how the RAM address reached 256 storage bits.
+- **Check LHS width contexts** when narrowing datapaths; truncation at assignment is not the same as 32-bit wrap.
+- Next time: build a small self-checking C/Python model of the schedule before restructuring pipeline stages, and try one experiment per evaluation rather than bundling risky changes.
