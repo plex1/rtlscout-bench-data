@@ -6,8 +6,8 @@
    "name": "GLM 5.2",
    "vendor": "Z.ai",
    "open_weights": true,
-   "price_per_mtok": {"input": 0.81, "output": 2.55},
-   "price_note": "via OpenRouter, no prompt caching"
+   "price_per_mtok": {"input": 1.4, "output": 4.4},
+   "price_note": "via OpenRouter, Z.AI endpoint (provider pin), list price on 2026-10-14, no prompt caching; the pre-v1 records (2026-07) carry the price of that time, 0.81/2.55"
   },
   "openrouter:moonshotai/kimi-k3": {
    "name": "Kimi K3",
@@ -29,6 +29,13 @@
    "open_weights": true,
    "price_per_mtok": {"input": 0.15, "output": 0.5},
    "price_note": "via OpenRouter, no prompt caching; list price on 2026-10-10"
+  },
+  "openrouter:deepseek/deepseek-v4.1-flash": {
+   "name": "DeepSeek V4.1 Flash",
+   "vendor": "DeepSeek",
+   "open_weights": true,
+   "price_per_mtok": {"input": 0.2, "output": 0.65},
+   "price_note": "via OpenRouter, CoreWeave endpoint (provider pin), list price on 2026-10-14, no prompt caching"
   }
  }
 }

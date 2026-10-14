@@ -64,7 +64,7 @@ Two runs belong in the same leaderboard row only if all of these fields and `sui
 | `entry` | string | entry id |
 | `model` | string | model spec as given to rtlscout, `<provider>:<model>` |
 | `open_weights` | bool or null | value of `models.json` for this model when the run was recorded |
-| `reasoning_effort` | string | `default` (the provider's default) or `low`, `medium`, `high` (`RTLSCOUT_REASONING_EFFORT`) |
+| `reasoning_effort` | string | `default` (the provider's default), `low`, `medium`, `high`, or `off` for thinking disabled (`RTLSCOUT_REASONING_EFFORT`) |
 | `reasoning_effort_source` | string | present only when the run directory itself does not record the effort: where it is known from |
 | `agent_backend` | string | `react`, rtlscout's built-in loop |
 | `max_steps` | int | step budget of the run |
