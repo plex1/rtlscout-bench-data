@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "task": "pdpu-adp",
- "title": "PDPU 16-lane posit dot product, pipelined",
+ "title": "PDPU posit dotp",
  "description": "The pipelined 16-lane posit dot-product-accumulate unit of PDPU (ISCAS 2023, Apache-2.0): sixteen posit(8,2) products summed into a posit(16,2) accumulator through radix-4 Booth multipliers, alignment with 14-bit truncation, a compressor tree and a final normalise-and-round, in five pipeline stages. The upstream SystemVerilog with N raised from 4 to 16 is the starting point; the 5-cycle latency is part of the contract.",
  "metric_label": "area × delay",
  "unit": "µm²·ps",
