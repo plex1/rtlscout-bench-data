@@ -11,9 +11,9 @@
    "cost": 9496575.05,
    "area": 4273.69,
    "delay": 2222.1,
-   "suite": "suite-v1",
-   "rtlscout": "0.2.0+git.f4152b6",
-   "campaign": "jpeg_baseline_20261010"
+   "suite": "suite-v2",
+   "rtlscout": "0.2.0+git.6c6eac7",
+   "campaign": "suite_v2_round2_20261014"
   }
  },
  "runs": {

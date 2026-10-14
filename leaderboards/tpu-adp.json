@@ -12,8 +12,8 @@
    "area": 4604.07,
    "delay": 1004.42,
    "suite": "suite-v2",
-   "rtlscout": "0.2.0+git.ce38834",
-   "campaign": "glm53_suite_v2_20261012"
+   "rtlscout": "0.2.0+git.6c6eac7",
+   "campaign": "suite_v2_round2_20261014"
   }
  },
  "runs": {
