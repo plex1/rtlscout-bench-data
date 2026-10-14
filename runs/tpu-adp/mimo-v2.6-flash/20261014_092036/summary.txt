@@ -1,0 +1,32 @@
+# Session Summary
+
+**Final: PASS (0/6782 errors), ADP = 2.936e6** (`design_best.sv` @ target_delay 691; area 3805, delay 772ps) vs baseline 4.624e6 — **−36.5%**.
+
+## 1. Approaches tried / what worked best
+
+- **`design.sv` (v1, broadcast):** input skew 7…14, activations broadcast per row, no de-skew registers, 19-bit accums. Failed from line 271 — diagnosed the **anti-diagonal stall boundary**: golden captures PE(i,j)'s product at edge `T+i+j`, so a mid-flight weight reload splits old/new weights along `i+j = const`. Broadcast splits by *row* → wrong. The canonical hop topology (skew i → hop j → de-skew 7−j) is **mandatory** and also flop-minimal.
+- **`design.sv` (v2, canonical + 19-bit):** first PASS, 3.186e6.
+- **`design_prw/prwm/best`:** per-row widths + explicit multiplier tree + row-0 specialization + dead column-7 hop removal → winner.
+- **`design_csa.sv`:** 9-term carry-save MAC — best raw delay (726ps) but +336 area → 2.999e6, lost on A×D.
+
+## 2. Biggest impact optimizations
+
+1. **Explicit gated-shift partial-product tree** in `tpu_pe` (−400 area units, ~−10%): `a*w = Σ_{k<7} w[k]·a·2^k − w[7]·a·2^7` (exact mod 2¹⁶). Yosys's default signed `$mul` techmap bloats the cone.
+2. **Exact accumulator widths:** a k-product sum fits `pw(k) = clog2(16384k+1)+1` bits → 16,17,17,18,18,18,18,19 (not 32), with a flat exact-width mesh vector (`COLW`/`rowoff` functions).
+3. **Dead logic:** row-0 PE skips its adder (constant-0 input), last column has no `a_east` register.
+4. **target_delay tuning:** abc maps in discrete bands; 691 was the sweet spot (default 500 also good at 2.971e6).
+
+## 3. What didn't work / regressions
+
+- **Prefix/Sklansky adder** (`design_pre.sv`): +70 area, +20 delay — abc re-canonicalizes equivalent functions.
+- **Unsigned mul + sign corrections** (`design_umul.sv`): worse on both (4092/860).
+- **Tree regrouping** (`design_alt.sv`): bit-identical netlist — equivalent shapes canonicalize; only *structurally distinct* formulations change the mapping.
+- **Per-row widths alone at target 500** (`design_prw`): area *rose* (+330) — abc shifted to a faster/bigger Pareto point; needed target re-tuning to pay off.
+- **Verilog gotcha (CSA bug):** `cond ? {Q{1'b0}} : $signed(x)` zero-extends the signed branch (mixed-signedness ternary) → errors of exactly +2^PNW per negative partial sum. Fixed with explicit `{{(Q-PNW){sign}}, x}`.
+
+## 4. Lessons
+
+- **Derive the exact cycle schedule first** — the equivalence constraint (product capture edges `T+i+j`) was forced by stall semantics; discovering it late cost ~6 steps. I should have hand-traced a mid-flight reload against the vectors before building architecture v1.
+- **RTL structure only matters when it changes what abc receives** (junk size / shallowness), not when it's a rearrangement of the same function — abc canonicalizes the rest.
+- **Area and delay often trade through abc's mapping**, not through RTL width reductions alone; A×D needs target sweeps *per structure* since bands are narrow and non-monotonic (691–695 good, 693/696/697 bad).
+- Keep a stable "best PASS" file (`design_best.sv`) and evaluate every variant in isolation so attribution stays clean.

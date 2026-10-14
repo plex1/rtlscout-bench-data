@@ -17,23 +17,93 @@
  "model": "openrouter:z-ai/glm-5.3-flash",
  "open_weights": true,
  "reasoning_effort": "default",
+ "reasoning_effort_default": "max",
  "agent_backend": "react",
  "max_steps": 60,
- "flags": ["--skip-cec"],
+ "flags": [
+  "--skip-cec"
+ ],
  "env": {},
  "started": "2026-10-10T20:33",
- "best": {"cost": 968044.66, "area": 1063.51, "delay": 910.24, "eval": 1, "step": 13, "file": "starting_point.v"},
+ "best": {
+  "cost": 968044.66,
+  "area": 1063.51,
+  "delay": 910.24,
+  "eval": 1,
+  "step": 13,
+  "file": "starting_point.v"
+ },
  "evals": [
-  {"e": 1, "s": 13, "ok": true, "c": 968044.66, "area": 1063.51, "delay": 910.24, "power": null, "td": 500.0, "ctx": 31824, "t_min": 18.5, "tok_in": 223411, "tok_out": 178224},
-  {"e": 2, "s": 15, "ok": true, "c": 2725328.07, "area": 774.04, "delay": 3520.92, "power": null, "td": 500.0, "ctx": 33904, "t_min": 32.8, "tok_in": 290725, "tok_out": 201268},
-  {"e": 3, "s": 29, "ok": false, "c": null, "area": null, "delay": null, "power": null, "td": null, "ctx": 49956, "t_min": 75.0, "tok_in": 904460, "tok_out": 636657},
-  {"e": 4, "s": 47, "ok": false, "c": null, "area": null, "delay": null, "power": null, "td": null, "ctx": 64226, "t_min": 88.6, "tok_in": 1955448, "tok_out": 753994}
+  {
+   "e": 1,
+   "s": 13,
+   "ok": true,
+   "c": 968044.66,
+   "area": 1063.51,
+   "delay": 910.24,
+   "power": null,
+   "td": 500.0,
+   "ctx": 31824,
+   "t_min": 18.5,
+   "tok_in": 223411,
+   "tok_out": 178224
+  },
+  {
+   "e": 2,
+   "s": 15,
+   "ok": true,
+   "c": 2725328.07,
+   "area": 774.04,
+   "delay": 3520.92,
+   "power": null,
+   "td": 500.0,
+   "ctx": 33904,
+   "t_min": 32.8,
+   "tok_in": 290725,
+   "tok_out": 201268
+  },
+  {
+   "e": 3,
+   "s": 29,
+   "ok": false,
+   "c": null,
+   "area": null,
+   "delay": null,
+   "power": null,
+   "td": null,
+   "ctx": 49956,
+   "t_min": 75.0,
+   "tok_in": 904460,
+   "tok_out": 636657
+  },
+  {
+   "e": 4,
+   "s": 47,
+   "ok": false,
+   "c": null,
+   "area": null,
+   "delay": null,
+   "power": null,
+   "td": null,
+   "ctx": 64226,
+   "t_min": 88.6,
+   "tok_in": 1955448,
+   "tok_out": 753994
+  }
  ],
  "n_evals": 4,
  "n_failed": 2,
  "steps_used": 60,
  "runtime_min": 92.8,
- "tokens": {"inp": 2922749, "out": 782558, "cache_w": 0, "cache_r": 0},
+ "tokens": {
+  "inp": 2922749,
+  "out": 782558,
+  "cache_w": 0,
+  "cache_r": 0
+ },
  "usd": 0.83,
- "price_per_mtok": [0.15, 0.5]
+ "price_per_mtok": [
+  0.15,
+  0.5
+ ]
 }

@@ -1,0 +1,2 @@
+// variant: 2comp moved from S2 into S3 (registered as magnitude + sign)
+`include "design.sv"

@@ -65,6 +65,7 @@ Two runs belong in the same leaderboard row only if all of these fields and `sui
 | `model` | string | model spec as given to rtlscout, `<provider>:<model>` |
 | `open_weights` | bool or null | value of `models.json` for this model when the run was recorded |
 | `reasoning_effort` | string | `default` (the provider's default), `low`, `medium`, `high`, or `off` for thinking disabled (`RTLSCOUT_REASONING_EFFORT`) |
+| `reasoning_effort_default` | string | present when `models.json` named the vendor's default effort for this model at recording time (e.g. `max`); what a `default` row ran, shown in brackets in the row label like an explicit setting |
 | `reasoning_effort_source` | string | present only when the run directory itself does not record the effort: where it is known from |
 | `agent_backend` | string | `react`, rtlscout's built-in loop |
 | `max_steps` | int | step budget of the run |
@@ -138,6 +139,7 @@ python -m rtlscout_bench.record --exclude <task>/<entry>/<run-id> --reason "why"
 | `name` | display name on the page |
 | `vendor` | who made the model |
 | `open_weights` | `true` only if the model's weights are openly available. Required for every model while the open-weights policy is on |
+| `default_reasoning_effort` | optional: the reasoning effort the vendor applies when none is requested (e.g. `max`, `high`, `on`), as documented and checked at the time; copied into every record of the model and shown in brackets on default rows. Leave it out when the default is not known or not borne out by the runs |
 | `price_per_mtok` | `input` and `output` list price in USD per million tokens; optional `cache_write` and `cache_read` (both default to the input price) |
 | `price_note` | where the price applies, as free text |
 

@@ -1,0 +1,39 @@
+## Summary
+
+### 1. Approaches Tried
+
+**Baseline (`design.v`)**: The starting point verbatim — correct at 145,429 area_delay_product. This remained the best throughout.
+
+**Priority-encoder LZ (`design2.v`, `design3.v`)**: Replaced the `for`-loop LZ with explicit `if-else` chain and pre-computed OR-reduction signals. Correct but slightly worse (147K) — Yosys already optimized the `for`-loop well, and the explicit chain added a MUX.
+
+**Pre-computed guard/sticky MUX (`design9.v`)**: Replaced `bit_at`/`below` variable indexing with explicit `case` statements selecting pre-computed prefix-ORs. Correct after fixing a `total_shift=22` boundary bug, but worse (151K) — the large MUX trees cost more than the `bit_at` function.
+
+**Casez-based LZ (`design5.v`)**: Attempted `casez` with `?` wildcards. **Failed lint** — X/Z literals and `casez` are explicitly banned.
+
+**Fast LZ for normals + full LZ (`design11.v`)**: Detected both-normal case (MSB at bit 20/21) for a fast 1-bit LZ, falling back to full LZ for subnormals. Correct but worse (148K) — the MUX between fast/full LZ paths added delay, and the full LZ was still computed.
+
+**Unified barrel shift + single rounding (`design12.v`)**: Tried to merge normal and subnormal shift+round into one path. **Failed correctness** — the normal path's rounding/mantissa became misaligned when using the subnormal shift amount, corrupting the `carry` → `underflow` chain.
+
+**Decomposed multiply (`design15.v`)**: Replaced 11×11 multiplier with 10×10 (`f_a*f_b`) + adders for cross terms and hidden-bit contribution. **Failed to compile** — Verilator rejected `{10'b0, cross} << 10` syntax. Abandoned.
+
+**Narrower exponent arithmetic (`design17.v`)**: Used 7-bit instead of 8-bit exponent arithmetic. Correct (after fixing a 6-bit overflow bug in `lim_o`), but slightly worse (146K) — Yosys already optimized the 8-bit version well.
+
+**Left-shift sticky computation (`design18.v`)**: Replaced the `below` prefix-OR array + `bit_at` with `prod << (22 - shift)` to bring lost bits to the top, then extract guard (bit 21) and sticky (OR of bits 20:0). Correct but much worse (163K) — the second barrel shifter + 21-bit OR-reduction was more expensive than the `below` array.
+
+### 2. Most Impactful Optimizations
+**None surpassed the baseline.** The original design is well-structured and Yosys optimizes it effectively. The `for`-loop LZ, `below` prefix-OR array, and `bit_at` function all synthesize to efficient logic. The 8-bit exponent arithmetic is already the right width.
+
+### 3. What Didn't Work / Caused Regressions
+- **Explicit priority encoders** added MUX delay vs. the `for`-loop
+- **Pre-computed guard/sticky MUXes** created large selection trees
+- **Unified barrel shift** broke the carry→underflow dependency chain
+- **Left-shift sticky** replaced a cheap prefix-OR array with a costly second barrel shifter + wide OR
+- **Narrower arithmetic** didn't help since Yosys trims unused bits anyway
+- **`casez`/`?`** is banned by the lint rules
+
+### 4. Lessons Learned
+- **Yosys is very good at optimizing the starting point** — micro-optimizations at the RTL level often make things worse by constraining the synthesizer
+- The `below[k] = |prod[k:0]` prefix-OR array with variable indexing via `bit_at` is surprisingly efficient after synthesis
+- Verilator has strict syntax limitations (no `casez`, no concatenation-with-shift in certain forms) — keep RTL simple and portable
+- The area-delay product is dominated by the 11×11 multiplier and the barrel shifter; the rounding/packing logic is secondary
+- **Next time**: focus on algorithmic changes (e.g., smaller multiplier decomposition, carry-save rounding) rather than re-expressing the same logic structurally, and validate compile early before investing in correctness testing

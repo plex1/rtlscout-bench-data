@@ -1,0 +1,30 @@
+## Final Summary
+
+**Best design: `design_v5.v` — PASS, cost 2.813M area_delay_product** (area 4311 µm², delay 652 ps), a **39% improvement** over the starting point (4.62M).
+
+### 1. Approaches tried and what worked best
+- **Starting point** (`starting_point.v`, original logikbench RTL): 4.62M baseline — 32-bit psum chain, full resets.
+- **`design_v1.v` — monolithic rewrite**: replaced the systolic mesh with per-column dot-product units + a 14-stage A-row delay line. **Failed** — the systolic structure is semantically required: mid-drain weight reloads produce results mixing old and new weights with per-row timing that a monolithic dot-product cannot reproduce. Lesson: preserve the PE-mesh architecture exactly; only optimize within it.
+- **`design_v2.v` — width narrowing**: all partial sums of ≤8 signed 8×8 products fit in 19 signed bits (not 32). Cost → 3.24M. First big win.
+- **`design_v3.v` — per-row minimal widths** (row i holds i+1 products → 16…19 bits): 3.20M. Marginal gain, but established the sign-extension-at-row-boundary technique.
+- **`design_v4.v` / `design_v5.v` — carry-save accumulation**: replace each PE's 19-bit ripple add with a single 3:2 compressor (`s'=s^c^p`, `c'=2·maj(s,c,p)`), resolving the pair with one final add per column. v4: 2.89M; **v5 (v4 + reset trimming + no-reset weights): 2.81M — best**.
+
+### 2. Most impactful optimizations
+1. **Carry-save accumulation** — cut the PE critical path from multiplier+19-bit-add to multiplier+one full-adder level (delay 1004→652 ps), ~20% of the total gain.
+2. **19-bit width bound** (sum of 8 signed 8×8 products ∈ [−2¹⁷, 2¹⁷]) — 32→19-bit adders/registers everywhere, ~30% of the gain. Exact bound matters: 18 bits overflowed on the extreme-value tile (8×(−128)×(−128) = +2¹⁷).
+3. **Reset trimming** — only the 15-bit valid pipe keeps its reset; weight registers are fully overwritten by the first 8-cycle load, and datapath garbage only corrupts unchecked rows. Small but free.
+
+### 3. What didn't work / regressed
+- Monolithic dot-product (v1) — broke mid-drain reload semantics.
+- **Latch-based integrated clock gating** (v9) — simulation mismatch; also flows seem to dislike gated-clock structures.
+- **Per-row narrowed carry-save widths** (v10) — carry-word sign-extension across row boundaries corrupts residues (carry MSB can exceed a narrow row's slot). Failed.
+- **Tap-chain activation distribution** (v6/v8) — saved ~64 flops but the added tap wiring cost more in area and delay (2.91M vs 2.81M).
+- **Removing the a_valid zero-injection mux** from v5 — provably safe functionally, yet synthesis got *worse* (2.88M); reverted.
+- **target_delay sweeps**: 700/820 raised delay more than they cut area; 350/400 changed nothing. Default 500 was optimal.
+
+### 4. Lessons learned
+- **Preserve the golden architecture; shrink the arithmetic inside it.** Cycle-accurate contracts (mid-stream reloads, stall semantics) make structural rewrites hazardous.
+- **Prove exact width bounds before using them** — recompute worst cases (−128 × −128) rather than guessing.
+- **Redundant arithmetic (carry-save) is a great delay lever** when each PE has one add per cycle and the final add is off the repeated path.
+- **Synthesis results are noisy w.r.t. small edits** — always A/B a "provably free" simplification; two functionally-identical versions differed by 2.5%.
+- Reset removal is a real but small lever; flop count dominates area (~4300 of which the majority is flops), so flop-width narrowing was the right area target.

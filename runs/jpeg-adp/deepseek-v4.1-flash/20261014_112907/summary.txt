@@ -1,0 +1,28 @@
+## Summary
+
+**Final status:** PASS, 100% correct (0/20672 check failures), cost **5.845e6 area_delay_product** — a **38% reduction** from the 9.497e6 starting point.
+
+### 1. What I tried, in order
+| # | Change | Result |
+|---|---|---|
+| 1 | Baseline eval of `starting_point.v` | 9.497e6 (delay 2222 ps, area 4274) |
+| 2 | Narrowed multiplier operand regs (`mul*_a/b` 32→17/23, `mul*_b`→13) and product regs | dispatched in `starting_point.v`, not separately measured |
+| 3 | Full rewrite into `design.sv`: 22-bit x-pass output (verified bound), 31-bit x-pass intermediates, 13-bit constants, y-pass `outport_idx_o = {ptr_q[2:0], ptr_q[5:3]}` | PASS, 9.50e6 |
+| 4 | **Banked transpose RAM** (two 16-entry banks, registered bank select) | PASS, 8.98e6 |
+| 5 | **Explicit one-hot decoder + AND-OR OR-tree read mux** in `jpeg_idct_transpose_ram` | PASS, **5.845e6** (delay 2222→1457 ps) |
+| 6 | `/256` → shift+conditional-increment function for `(x*181)/256` | see below |
+
+### 2. Biggest wins
+- **Step 5 was by far the most impactful (1.54×).** The 32-entry behavioral RAM's 32:1 read mux was the critical path *and* the dominant area cost. Expressing the read as `wire [31:0] sel_rd = 32'b1 << addr1_i;` plus an explicit balanced AND-OR reduction tree cut delay from 2209 ps → 1457 ps with near-identical area.
+- Step 4 (banking the RAM so the read address fans out to only 16 entries) gave a modest 5% but pointed the way to step 5.
+
+### 3. What regressed / cost steps
+- **Boxed arithmetic widths.** I initially assumed 30-bit intermediates were safe; three full-scale test blocks overflowed, producing exactly 24 errors. Correct answer: x-pass MACC chains need **31 bits**; the y-pass adder tree and `i0` must be **32 bits** because the original wraps there.
+- The `outport_idx_o` permutation: my first guess `{k[2:0],k[5:3]}` produced 24 errors that I misattributed to width overflow, so I reverted to `ptr_q` — which then failed everything. The permutation was right all along; the width was the real bug.
+- `(x*181)/256` rewrite: my first version used a 38-bit product and no wrap-to-32, giving constant ±256 errors. The correct form is `d = n*181` **truncated to 32 bits**, then `(d>>>8) + (|d[7:0])` — an exact equivalent of the Verilog `/` truncation. Both copies must be fixed (x-pass results ≤ 2^24 so the wrap is inert; y-pass can overflow so it is not).
+
+### 4. Lessons learned
+- **Isolate the file.** Running evaluation with `starting_point.v` as the filename meant the whole TB+design was rebuilt each time and I couldn't see per-change results. `design.sv` from step 18 onward was the right call, but I should have created it at step 1.
+- **Bug attribution.** When 24 errors appeared, I should have dumped the failing block's inputs before hypothesizing. Both regressions (width and permutation) were diagnosed only after two wasted evaluations.
+- **Target the real critical path.** Two evals of `target_delay` sweeping produced <0.1% change, while a structural change to the RAM read mux produced 38%. The report's critical-path listing is the highest-value signal; go straight there.
+- **Next steps I'd take:** the final failed-but-nearly-complete `scale_odd` change should be finished in `design.sv` (it removes a large combinational divider from the x-pass path — the new critical path after step 5). Then revisit making the transpose read latency 2 cycles so the entire 32:1 mux sits behind a register, which would likely drop delay another 2×.

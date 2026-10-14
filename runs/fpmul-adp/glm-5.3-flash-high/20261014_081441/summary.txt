@@ -1,0 +1,26 @@
+## Summary
+
+**Final result: PASS, cost 107,636** (`design5.v`), vs. starting point 145,429 (−26%).
+
+### 1. Approaches tried
+- **`starting_point.v`** (baseline, 145k): straightforward unpack → 22-bit CLZ → variable shift → round → pack.
+- **`design.v` (119,628)**: pre-normalize subnormal *inputs* with small 10-bit CLZ so the product always has its leading one at bit 20/21. Normal results then need only a **fixed** slice select (no shifter), and subnormal results need only an 11-bit barrel shifter + 5-level prefix-OR for sticky.
+- **`design2.v` (110,090)**: replaced the rounding ripple adder with a parallel-prefix conditional increment; folded zero inputs into the effective exponent (removed output muxes); split overflow into early (mux) + late (exponent-only) parts.
+- **`design5.v` (107,636, best)**: micro-optimizations on design2 — 4-stage (not 5) prefix-OR for sticky, 9-bit split `F_hi` slice, AND-gated increment instead of mux, 5-bit exponent increment.
+- **`design3/4/6.v`**: algebraic 10×10 product decomposition, 21-bit shifter, exponent-path restructure (carry-save adder, sign-bit subnormal test) — all failed or regressed; design6 was never evaluated (session ended).
+
+### 2. Highest-impact optimizations
+1. **Input pre-normalization** eliminating the 22-bit priority CLZ and both 22-bit barrel shifters (~−18%).
+2. **Single shared 22-bit shifter** producing fraction+guard+sticky at once, with per-stage sticky accumulation for bits shifted out entirely.
+3. **Conditional-increment rounding** (prefix-AND) and folding zero/inf handling into the exponent path, cutting late muxing.
+
+### 3. What didn't work
+- The **10×10 decomposition** (`ma = 2¹⁰ + fx`) — I repeatedly fumbled the constant/carry bookkeeping (lost the 2²⁰ term, wrong cross-term shift, subnormals have no hidden one) and the resulting serial adders made Yosys slower anyway.
+- **21-bit subnormal shifter** — wrong: the fraction genuinely needs product bits ≥ 21·2⁰; truncating broke guard/sticky alignment.
+- Multiple off-by-one slice bugs (`F_hi`, guard index) cost several evaluation cycles.
+
+### 4. Lessons
+- Hand-verify each arithmetic identity against a concrete test vector *before* running evaluation (I burned ~8 steps on avoidable off-by-ones).
+- Yosys maps `*` to a ripple array; restructuring to reduce *adds after* the multiplier matters more than shrinking the multiply itself.
+- Incremental edits to a passing file invite artifacts — create a fresh variant file per structural change and diff mentally against the known-good version.
+- Next time: evaluate design6's exponent-path restructure (carry-save adder + sign-bit `is_sub`) — it targets the current critical path and may compose with design5.

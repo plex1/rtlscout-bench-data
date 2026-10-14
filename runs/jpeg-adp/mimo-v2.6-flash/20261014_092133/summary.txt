@@ -1,0 +1,27 @@
+## Summary
+
+**Final: `design.sv` — PASS (20,672/20,672 checks), ADP 5,564,328 vs. baseline 9,496,575 (−41.4%)** (area 4090.0, delay 1360.5 ps).
+
+### 1. Approaches tried / what worked
+- **Restructured the transpose read path** (biggest win): replaced `rd_addr_q → 32:1 RAM mux` with a *registered one-hot decode of the next read address* (mirroring the rd_addr/block_rd next-state logic exactly) feeding a low fan-out AND-OR read. Same one-cycle latency, read-first semantics preserved.
+- **Provably-safe width narrowing** from range proofs over all 16-bit inputs: transpose storage 32→21 bits (|x-pass out| ≤ 709424128>>>11 = 346,350), y output buffer →17 bits (sum>>>15 ∈ [−65536, 65535]), cosine constants →12-bit registers, narrowed multiplier operands (sign-extend expression form, 32-bit product context kept for wrap semantics).
+- **Reformulated the critical `(x*181)/256` scaling** as `arithmetic shift right 8 + one-bit trunc-toward-zero correction` (`trunc_div256()` in design.sv) — bit-exact, −50 ps.
+- Extensive measurement: keep-probes to decompose area, target_delay sweeps, and A/B trials of every structural variant.
+
+### 2. Most impactful optimizations
+1. One-hot registered read: delay 2222 → 1412 ps alone (−39% ADP in one step).
+2. Scale-path re-expression: 1412 → 1360 ps.
+3. Width narrowing: −150 area units at zero delay cost.
+Multiplier formulation experiments confirmed the expression-level sign-extended form was already area-competitive.
+
+### 3. What didn't work / regressed
+- **hi/lo split of the ×181 scaling**: first attempt had a genuine bug (3 off-by-one failures) — `trunc(z−m) = trunc(z) − m` fails when the wrapped product crosses zero; fixed exactly via `adj = T[23] & (r≠0)`, but its double-serial-CPA structure mapped to 1644 ps → reverted.
+- Hand-written CSA trees for the scale (1485, 1600 ps) — abc's techmap of the plain `x * 181` expression mapped better (1360).
+- XW=20 storage: −102 area but deterministically +125 ps delay (twice) → net loss.
+- target_delay > 1200: progressively worse (1250→5.62M, 1350→5.79M, 1400→5.95M); targets ≤1200 are one identical plateau.
+- Unsigned-multiply + post-correction multiplier: no area gain (extension folding never materialized as hoped).
+
+### 4. Lessons
+- **Measure, don't assume**: keep-probes and A/B evals repeatedly falsified my mental model of area composition; mapping delay is deterministic per (code, target) but swings ±10% on small structural changes — treat every variant as a sample and always keep the running best.
+- The testbench is a strong bit-exact oracle — semantic-risky reformulations are cheap to validate, but proof-carrying bounds (my range arguments) let you narrow widths safely.
+- **Next time**: I'd instrument area composition (probes) *first*, and I'd attempt the scale-path fix (shift+correction) earlier since it sits on the critical path; I'd also explore folding the truncation correction into the constant-multiply's carry chain, which I identified but couldn't reach within the step budget.

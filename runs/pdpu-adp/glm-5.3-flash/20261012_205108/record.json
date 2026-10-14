@@ -17,28 +17,147 @@
  "model": "openrouter:z-ai/glm-5.3-flash",
  "open_weights": true,
  "reasoning_effort": "default",
+ "reasoning_effort_default": "max",
  "agent_backend": "react",
  "max_steps": 60,
- "flags": ["--skip-cec"],
- "env": {"RTLSCOUT_OPENROUTER_MAX_TOKENS": "65536", "RTLSCOUT_OPENROUTER_PROVIDERS": "z-ai"},
+ "flags": [
+  "--skip-cec"
+ ],
+ "env": {
+  "RTLSCOUT_OPENROUTER_MAX_TOKENS": "65536",
+  "RTLSCOUT_OPENROUTER_PROVIDERS": "z-ai"
+ },
  "started": "2026-10-12T20:51",
- "best": {"cost": 873823.66, "area": 984.54, "delay": 887.54, "eval": 5, "step": 34, "file": "design.v", "td": 500.0},
+ "best": {
+  "cost": 873823.66,
+  "area": 984.54,
+  "delay": 887.54,
+  "eval": 5,
+  "step": 34,
+  "file": "design.v",
+  "td": 500.0
+ },
  "evals": [
-  {"e": 1, "s": 6, "ok": true, "c": 968044.66, "area": 1063.51, "delay": 910.24, "power": null, "td": 500.0, "ctx": 20147, "t_min": 21.1, "tok_in": 80321, "tok_out": 65797},
-  {"e": 2, "s": 24, "ok": true, "c": 883970.9, "area": 1000.98, "delay": 883.11, "power": null, "td": 500.0, "ctx": 35454, "t_min": 277.5, "tok_in": 531314, "tok_out": 884243},
-  {"e": 3, "s": 29, "ok": false, "c": null, "area": null, "delay": null, "power": null, "td": null, "ctx": 39408, "t_min": 333.8, "tok_in": 721426, "tok_out": 1036648},
-  {"e": 4, "s": 32, "ok": true, "c": 997678.64, "area": 1025.31, "delay": 973.05, "power": null, "td": 500.0, "ctx": 41035, "t_min": 358.5, "tok_in": 843207, "tok_out": 1104761},
-  {"e": 5, "s": 34, "ok": true, "c": 873823.66, "area": 984.54, "delay": 887.54, "power": null, "td": 500.0, "ctx": 43455, "t_min": 362.9, "tok_in": 929301, "tok_out": 1110025},
-  {"e": 6, "s": 39, "ok": false, "c": null, "area": null, "delay": null, "power": null, "td": null, "ctx": 49261, "t_min": 406.7, "tok_in": 1163562, "tok_out": 1222675},
-  {"e": 7, "s": 53, "ok": false, "c": null, "area": null, "delay": null, "power": null, "td": null, "ctx": 56701, "t_min": 417.6, "tok_in": 1910037, "tok_out": 1246315}
+  {
+   "e": 1,
+   "s": 6,
+   "ok": true,
+   "c": 968044.66,
+   "area": 1063.51,
+   "delay": 910.24,
+   "power": null,
+   "td": 500.0,
+   "ctx": 20147,
+   "t_min": 21.1,
+   "tok_in": 80321,
+   "tok_out": 65797
+  },
+  {
+   "e": 2,
+   "s": 24,
+   "ok": true,
+   "c": 883970.9,
+   "area": 1000.98,
+   "delay": 883.11,
+   "power": null,
+   "td": 500.0,
+   "ctx": 35454,
+   "t_min": 277.5,
+   "tok_in": 531314,
+   "tok_out": 884243
+  },
+  {
+   "e": 3,
+   "s": 29,
+   "ok": false,
+   "c": null,
+   "area": null,
+   "delay": null,
+   "power": null,
+   "td": null,
+   "ctx": 39408,
+   "t_min": 333.8,
+   "tok_in": 721426,
+   "tok_out": 1036648
+  },
+  {
+   "e": 4,
+   "s": 32,
+   "ok": true,
+   "c": 997678.64,
+   "area": 1025.31,
+   "delay": 973.05,
+   "power": null,
+   "td": 500.0,
+   "ctx": 41035,
+   "t_min": 358.5,
+   "tok_in": 843207,
+   "tok_out": 1104761
+  },
+  {
+   "e": 5,
+   "s": 34,
+   "ok": true,
+   "c": 873823.66,
+   "area": 984.54,
+   "delay": 887.54,
+   "power": null,
+   "td": 500.0,
+   "ctx": 43455,
+   "t_min": 362.9,
+   "tok_in": 929301,
+   "tok_out": 1110025
+  },
+  {
+   "e": 6,
+   "s": 39,
+   "ok": false,
+   "c": null,
+   "area": null,
+   "delay": null,
+   "power": null,
+   "td": null,
+   "ctx": 49261,
+   "t_min": 406.7,
+   "tok_in": 1163562,
+   "tok_out": 1222675
+  },
+  {
+   "e": 7,
+   "s": 53,
+   "ok": false,
+   "c": null,
+   "area": null,
+   "delay": null,
+   "power": null,
+   "td": null,
+   "ctx": 56701,
+   "t_min": 417.6,
+   "tok_in": 1910037,
+   "tok_out": 1246315
+  }
  ],
  "n_evals": 7,
  "n_failed": 3,
  "steps_used": 60,
  "runtime_min": 421.6,
- "tokens": {"inp": 2377566, "out": 1257398, "cache_w": 0, "cache_r": 0},
+ "tokens": {
+  "inp": 2377566,
+  "out": 1257398,
+  "cache_w": 0,
+  "cache_r": 0
+ },
  "usd": 0.99,
- "price_per_mtok": [0.15, 0.5],
- "llm_providers": {"Z.AI": 61},
- "finish_reasons": {"tool_calls": 45, "length": 15, "stop": 1}
+ "price_per_mtok": [
+  0.15,
+  0.5
+ ],
+ "llm_providers": {
+  "Z.AI": 61
+ },
+ "finish_reasons": {
+  "tool_calls": 45,
+  "length": 15,
+  "stop": 1
+ }
 }

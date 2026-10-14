@@ -1,0 +1,27 @@
+## Summary
+
+**Final best: `design_v2.v` — 116,906 area_delay_product (area 92.7, delay 1260 ps), 19.6% better than the starting point (145,429).**
+
+### 1. Approaches tried
+- **`starting_point.v`** (baseline): 145,429 — classic unpack→multiply→22-bit LZ count→wide barrel shift→round→pack.
+- **`design.v`**: pre-normalize subnormal inputs so the product's leading one is always in bit 21/20, eliminating the LZ counter; separate normal/subnormal rounding paths. Correct but only 145,756 — the two rounding paths + barrel shift + priority-loop nlz ate the gains.
+- **`design_v2.v`** (best): unified **single alignment position** `S = clamp(max(26 − s_adj, 10 + p21), 10, 23)` covering normal (S∈{10,11}) and subnormal (S∈{12..23}) results. F, guard, sticky come from a one-hot AND-OR plane over early exponent compares; one shared RNE rounding; exponent = clamp(e_pre,0)+carry handles subnormal/zero/round-up-to-min-normal for free.
+- **`design_v3.sv`** / **`design_v4.sv`**: hand-built 11×11 Wallace CSA tree + Kogge-Stone CPA to replace Yosys's ripple array multiplier, and one-hot leading-one normalization to flatten the nlz+barrel head. v3 passed (120,185 — worse than v2, multiplier area grew); v4 (combining both ideas) was left unverified at session end.
+
+### 2. Most impactful optimizations
+- **Unified alignment/rounding path** (v2): one rounding step, no double-rounding correction logic, no 22-bit shifters — area 109.9 → 93.3.
+- **`carry = round & &F` computed in parallel** with the incrementer, plus `frac_pre = mant_rnd[9:0]` unconditionally (post-carry low bits are 0) — removed the incrementer→exponent and incrementer→fraction serial dependencies.
+- **4-level prefix-AND incrementer** replacing the 11-bit ripple increment (−4,600 cost).
+- Early one-hot codes from pure exponent compares → extraction plane is 2-level AND-OR off the multiplier.
+
+### 3. What didn't work / regressions
+- Plain prefix-**OR** "increment" (XOR trick) — mathematically wrong; must be prefix-**AND** mask.
+- Constant-function-generated Wallace schedule — Yosys rejected (`Unsupported language construct in constant function`).
+- Kogge-Stone bugs (typed `{p4[9:0],16'b0}` instead of `{g4[9:0],16'b0}`; wrong final sum; carry `k==25` vs `k==0`; forgetting to AND rows with `m_b[gi]`) — several debug cycles.
+- Hand multiplier: correct but area grew more than delay shrank → net regression vs. Yosys's synthesized `*`.
+
+### 4. Lessons learned
+- **Bugs cluster at boundaries and in hand-built datapaths**; each KS/CSA iteration cost 2+ steps. A quick local sanity sim before full evaluation would have saved ~5 steps.
+- Sign-extension and bit-slice off-by-ones in `{a, b}` concatenations were the recurring failure mode — verify widths/signedness first when a whole path fails.
+- Structural RTL changes (unified datapath) beat micro-optimizations; but Yosys's multiplier is hard to beat at this small size — flattening the *head* (nlz/shift) is the more promising untested lever (v4, unverified).
+- `casez` is lint-banned; loop-based priority encoders synthesize poorly — use prefix/one-hot logic.

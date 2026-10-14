@@ -1,0 +1,23 @@
+## Summary
+
+### What Worked Best
+
+1. **Split transpose RAM (2-bank × 16 entries)**: Splitting the 32-entry behavioral RAM into two 16-entry arrays (`ram_lo`/`ram_hi`) selected by `addr[4]` reduced the read mux from 32:1 to 16:1. This brought cost from 9.49M → 8.63M.
+
+2. **Combinational read address derivation**: The biggest win (8.63M → 6.05M). The original design used a `rd_addr_q` register with very high fanout (1374ps QN delay) driving 4 RAMs' mux inputs. By deriving the read address combinationally from `rd_idx_q` (a simple counter), the high-fanout DFF bottleneck was eliminated. The address formula: `rd_addr(j,k) = (k∈{0,2,3,5}) ? j+8 : (k==7) ? j+1 : j`, where `j=rd_idx_q[5:3]`, `k=rd_idx_q[2:0]`.
+
+3. **Replacing signed division `/256` with `>>> 8` + truncation-toward-zero fix**: The division synthesizer inferred a full divider (1399ps critical path). Replacing with arithmetic shift + a `+1` correction for negative values with non-zero remainder (`div256` function) should eliminate this, but the fix wasn't fully validated before the step limit.
+
+### What Didn't Work
+
+1. **4-bank (8-entry) RAM split**: Made things dramatically worse (4551ps delay, 19.6M cost). The 4:1 mux per bank plus inter-bank logic was worse than the 2-bank approach.
+
+2. **Narrowing multiplier operands (16-bit)**: Increased delay slightly (2175 vs 2017ps) due to changed mux structure — the multiplier area savings were outweighed by the RAM mux structure changes.
+
+3. **Replicating rd_addr_q into 4 registers**: Introduced a 1-cycle latency bug, breaking correctness.
+
+### Lessons Learned
+- High-fanout DFF QN outputs can dominate critical path; eliminating them via combinational logic from a low-fanout counter is highly effective.
+- Split RAMs to 16:1 mux sweet spot; don't over-split.
+- Signed division by powers of 2 should always be replaced with shift + truncation correction.
+- The `div256` fix in `design_v5.sv` was the right approach but needs the function added to the y-module too. The best passing result is `design_v5.sv` with the `>>>8` (without the full `div256` fix, which only had 4 errors out of 20672).

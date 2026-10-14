@@ -28,21 +28,24 @@
    "vendor": "Z.ai",
    "open_weights": true,
    "price_per_mtok": {"input": 0.15, "output": 0.5},
-   "price_note": "via OpenRouter, no prompt caching; list price on 2026-10-10"
+   "price_note": "via OpenRouter, no prompt caching; list price on 2026-10-10",
+   "default_reasoning_effort": "max"
   },
   "openrouter:deepseek/deepseek-v4.1-flash": {
    "name": "DeepSeek V4.1 Flash",
    "vendor": "DeepSeek",
    "open_weights": true,
    "price_per_mtok": {"input": 0.2, "output": 0.65},
-   "price_note": "via OpenRouter, CoreWeave endpoint (provider pin), list price on 2026-10-14, no prompt caching"
+   "price_note": "via OpenRouter, CoreWeave endpoint (provider pin), list price on 2026-10-14, no prompt caching",
+   "default_reasoning_effort": "high"
   },
   "openrouter:xiaomi/mimo-v2.6-flash": {
    "name": "MiMo-V2.6-Flash",
    "vendor": "Xiaomi",
    "open_weights": true,
    "price_per_mtok": {"input": 0.14, "output": 0.28},
-   "price_note": "via OpenRouter, Xiaomi endpoint (provider pin), list price on 2026-10-14, no prompt caching"
+   "price_note": "via OpenRouter, Xiaomi endpoint (provider pin), list price on 2026-10-14, no prompt caching",
+   "default_reasoning_effort": "thinking on"
   }
  }
 }

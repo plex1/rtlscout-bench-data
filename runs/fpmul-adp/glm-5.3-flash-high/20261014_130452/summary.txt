@@ -1,0 +1,25 @@
+## Session Summary
+
+**Final result: `design.v` — PASS (0/18,874,371 errors), area_delay_product = 138,410** (starting point: 145,429, area 108.7 → 93.6).
+
+### 1. Approaches tried
+- **Starting point** (11×11 multiply + 22-bit priority encoder/normalizer): baseline correct, cost 145,429.
+- **design.v (winner)**: pre-normalize both significands to a known leading-one position, use the `2^10+fa` product decomposition, and share one barrel shifter between the normal and subnormal paths.
+- **design2.v**: carry-free decomposition of the shifter into muxes + a 12-bit shift — passed functionally but cost 142,943 (worse).
+- **design3.v**: shallow leading-one trees, early exponent arithmetic, XOR-based rounding — never reached passing within budget (encoder bugs).
+
+### 2. Optimizations with most impact
+- **Pre-normalization + product decomposition**: with `ma_n = 2^10+fa`, `mb_n = 2^10+fb`, `prod = 2^20 + (fa+fb)<<10 + fa*fb`, so only a **10×10 multiplier** (plus one 20-bit add) is needed instead of 11×11, and no wide priority encoder (leading one is always at bit 21/20).
+- **Unified shifter**: shift `10+hi` (normal) vs `26-S` (subnormal) — guard/sticky come from one shifter + a shifted constant mask, shared by both paths.
+- **Shift clamp to 22** (final win, 140,683 → 138,410): when signed S ≤ 3 the result is zero, so shifting by 22 gives identical guard/sticky — shrinking shifter and mask to 5-bit control.
+
+### 3. What didn't work
+- Sticky-mask narrowing (using only `prod[10:0]`) — wrong when the product is a power of two; reverted.
+- design2/design3 carry-free shifter ideas — the decomposition edge cases (guard/sticky boundary, leading-one encoder encodings) cost many steps; each wrong mux-tree encoding (e.g. `idx` for bit 10, missing `m[1]` level) produced huge error counts that were hard to localize.
+- `target_delay` sweeps (900 ps etc.) — produced identical mapping, no gain.
+
+### 4. Lessons learned
+- **Hand-verify boundary cases before submitting**: the subnormal carry (`mant_r[10]` vs `[11]`), sign-extension widths, and sticky off-by-ones were all caught only by simulation — cheap to check by hand first, expensive in steps otherwise.
+- **Keep a known-good file intact** and iterate on copies (design2/design3 experiments never risked the passing design.v).
+- **Incremental, low-risk edits to a passing design pay off** — the shift clamp was a small change with a clean correctness argument and delivered the final improvement.
+- Next time: write a quick independent golden model locally to debug variants faster, and prefer proving edge-case correctness on paper over trial-and-error evaluation.

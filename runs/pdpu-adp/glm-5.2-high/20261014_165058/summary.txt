@@ -1,0 +1,26 @@
+## Summary
+
+### Best Design: `design.v` — cost 867,297 (down from baseline 968,045, ~10% improvement)
+
+### What Worked Best
+Three key optimizations from the starting point (`starting_point.v`):
+
+1. **Booth multiplier → simple `*` operator**: The 4-bit mantissa (MANT_WIDTH_I+1=4) was being multiplied by a full radix-4 Booth encoder + Wallace tree. Replacing with behavioral `a * b` let Yosys synthesize a tiny 4×4 multiplier optimally.
+
+2. **Barrel shifter → behavioral `>>`/`<<`**: The hand-built barrel shifter module (`barrel_shifter`) was replaced with behavioral shift operators throughout (posit_decoder, posit_encoder, mantissa_norm, alignment). Yosys synthesizes these into optimal shift trees.
+
+3. **LZC simplified**: The complex prefix-tree LZC module was replaced with a simple behavioral loop (no `break` for Yosys compatibility).
+
+### What Didn't Work / Caused Regressions
+- **End-around-carry sign correction** (designs v4, v7): Replacing `~x+1` per element with conditional invert + sign-count correction consistently shifted the critical path to pipe3→pipe4 (CSA + sign_count + carry add), making it worse (970k vs 867k).
+- **Behavioral max tree** (replacing `comp_tree`): Yosys synthesized a sequential chain instead of a tree, causing 2.5× delay increase (2.4M cost!).
+- **Behavioral sum tree** (replacing `csa_tree`): The CSA tree + final carry-propagate add was better than a direct behavioral sum of 17 operands (924k vs 867k).
+- **Pipeline rebalancing** (design v9): Moving alignment shift to pipe1→pipe2 made that stage too long (1.14M cost).
+- **Simpler 4:2 compressor** (design v8): Using two cascaded 3:2 compressors was slightly worse (886k).
+
+### Lessons Learned
+- The `comp_tree` and `csa_tree` hand-built structures were already well-optimized; Yosys couldn't beat them with behavioral equivalents.
+- The critical path (pipe2→pipe3: exp_max → exp_diff → shift >> → ~x+1) is fundamentally hard to optimize without adding pipeline stages.
+- End-around-carry trades one carry chain for another; without moving it across a pipeline boundary, it doesn't help.
+- For small word sizes (4-bit multiply), behavioral operators beat elaborate custom datapath logic.
+- `target_delay` had minimal effect — the RTL structure was the dominant lever.

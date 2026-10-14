@@ -1,0 +1,7 @@
+{
+  "eval_index": 6,
+  "step_index": 26,
+  "best_cost": 4454485.8343999125,
+  "cost_metric": "area_delay_product",
+  "design_file": "design.sv"
+}

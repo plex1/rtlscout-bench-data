@@ -1,0 +1,27 @@
+## Summary
+
+### Result
+Best passing design: **`design12.sv`** — `area_delay_product = 802342` (area 1024, delay 783 ps), 100% correctness (0/1,999,992 fails). Baseline for comparison: `starting_point.v` at 968,045 (−17%), `design.sv` at 942,402.
+
+### 1. Approaches tried
+All variants are self-contained files including `starting_point.v` (whose top module I renamed to `pdpu_top_pipelined_base` to avoid a duplicate-definition clash). Working, verified designs: `design.sv`, `design4/5/7/8/11/12/14/15/16/17/18`. The consistent recipe that worked was: keep the upstream stage cut points, then *shrink registered width* and *rebalance the exponent-max tree across stages*.
+
+### 2. Highest-impact optimizations
+- **Register the lane product (8b) instead of the booth sum/carry pair (2×8b)** at pipe2 — pure register count reduction.
+- **Compute exponent differences / shift amounts in stage 2** rather than carrying the 17×7-bit exponent vector through pipe2 — this removed a whole 119-flop register vector.
+- **One's complement + popcount correction** (`Σ ±x = Σ one's-comp(x) + #negatives`, exact mod 2^20) replaced 17 per-lane 20-bit two's-complement incrementers with one 5-bit adder tree. Big depth *and* area win.
+- **Balanced exponent-max tree** implemented as a `max_reduce` module used 3 levels/2 levels across stages 2/3 (design12) — this took the cost from 889k (design11) to 802k (design12).
+- Encoder left as the library `posit_encoder`.
+
+### 3. What regressed / didn't work
+- **`design6`/`design7`**: pushing the whole CSA tree + final adder into one stage to shrink pipe3 to 20 bits *reduced area to 903* but blew delay to 1257 → net worse. Register-area reduction is worthless if the combinational depth explodes; area×delay is a product.
+- **`design13` (narrow-datapath)**: the algebraic shortcut "every aligned lane fits in 8 bits, sticky is always 0" is *true*, but abandoning the 19-bit field breaks the `mantissa_norm` contract — normalization must stay relative to the `DECIMAL_POINT=7` location implied by the 19-bit field, otherwise the small/cancelling cases (expected `0x0008`, got `0x0000`) break. Correctly scoring those needs the reference's exact left-shift/truncate semantics, not just the max bit.
+- **`design15`/`design18`** (moving encoder/exp-adjust math off the output path): no real gain because the *actual* bottleneck is the stage-5 `mantissa_norm`/`lzc`, not the encoder. `design16` (splitting the normalizer across stages) also regressed because the `lzc`+barrel after the adder is inherently long.
+- **`design17`** (splitting the compression tree across stages 3/4) worked but cost more than design12.
+- **`target_delay` is inert** on this flow: 150, 250, and 300 ps all produced byte-identical Yosys output to the 500 ps run. Don't budget steps for it.
+- **`include`-based re-declaration bit me**: keeping the original `module pdpu_top_pipelined` in the included file made Verilator silently pick the old module; that's why the first `design.sv` x-attempts looked correct-by-construction.
+
+### 4. Lessons / next time
+- Bisect on a **known-good base**: when `design2` and `design7` both failed at ~368k/1.6M fails, rebuilding each change onto a passing design (`design4`, then `design8`, then `design11`) isolated the real causes immediately. Always change one axis at a time.
+- Decide the width contract **before** optimizing widths. The `mantissa_norm(WIDTH=19, DECIMAL_POINT=7)` reference contract is the thing that pins the sum width; provable extra headroom (ALIGN_WIDTH=14) can't be spent without rewriting the normalizer's relative-shift semantics.
+- The remaining 783 ps critical path in `design12` is the stage-4 add → `lzc` → stage-5 barrel shift → exp-adjust. `design12`'s lzc+barrel is the one real opt left: implement a **custom fused normalize** that computes the leading-zero count incrementally from the CSA sum/carry (Han-Carlson style) rather than a monolithic `lzc` after a full carry-propagate add. `design12.sv` plus the `exp_adjust = DPOINT-1-lzc` simplification already drafted in `design18.sv` (which is functionally correct in structure, just needs the Verilator `BLKANDNBLK` fix applied — see the `w_lzc_eff` intermediate I added at the end) is the right starting point.

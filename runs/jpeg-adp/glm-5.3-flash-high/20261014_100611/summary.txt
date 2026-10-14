@@ -1,0 +1,32 @@
+## Design Session Summary
+
+**Final result: PASS, cost 4.95M area_delay_product** (vs. 9.50M starting point, ~48% reduction), in `design2.v` (last edit to the constant-select decode is **not yet evaluated** — next agent must run it; note it currently decodes from `out_stg0_idx_q` which is misaligned by one cycle vs. the A registers, so it will likely FAIL — either revert to registered `mul_b` regs or decode from `out_stg0_idx_q` only if timing analysis confirms alignment).
+
+### 1. Approaches tried
+- **Baseline (starting_point.v)**: original core_jpeg composition — PASS @ 9.50M.
+- **design1.v**: width narrowing only (21-bit x-pass outputs/transpose, 17-bit y-pass outputs, narrowed multiplier operands) — PASS @ 13.78M, but critical path was the 32-entry RAM decode (3244ps).
+- **design2.v evolution**:
+  - Replaced 4× dual-port 32×32 RAMs with flat 64-entry register arrays indexed directly by coefficient index (no address counters, no 32:1 decode) — PASS @ 18.97M initially (read mux was combinational into y-pass adder).
+  - **Prefetched transpose reads** (register read one beat ahead, like the original RAM): PASS @ **6.32M**.
+  - Replaced `(x*181)/256` signed division with shift+sign-fixup function `dv256`: PASS @ **5.49M**.
+  - Narrowed multiplier B operands to 13 bits (constants ≤4017) and A operands to min widths (17-bit x, 22/23-bit y): PASS @ **4.95M**.
+
+### 2. Highest-impact optimizations
+1. **Prefetch-registering the transpose read** (removing the giant RAM decode + combinational read mux from the critical path): 19M → 6.3M.
+2. **Replacing signed division-by-256 with shift + correction**: 6.3M → 5.5M.
+3. **Narrowing multiplier operand widths** (13-bit constants instead of 16-bit): 5.5M → 4.95M.
+4. Width narrowing throughout (21-bit/17-bit intermediate datapaths) enabled everything else.
+
+### 3. Regressions / failures
+- Missing `.outport_ready_i` hookup on transpose (first design1 run: zero outputs).
+- Combinational transpose read mux feeding y-pass — worse than RAM version (18.97M).
+- 12-bit constant reg truncated 4017 (needs 13 signed bits) — mass test failures.
+- 12-bit B-operand attempt failed identically; the constant range is the binding constraint.
+- Multiple edit_file failures from ambiguous/duplicated code between the two identical 1-D passes — wasted steps.
+
+### 4. Lessons
+- **Narrow every datapath to provable bounds** — the eval flow's FFs/muxes scale directly with width.
+- **Register the memory read** (prefetch) — combinational reads into arithmetic are catastrophic for delay.
+- **Check constant ranges before narrowing** (4017 needs 13 bits signed, not 12).
+- The two 1-D passes have identical bodies; use unique surrounding context or apply diffs carefully to avoid ambiguity errors.
+- Un-verified pending edits: the last `out_stg0_idx_q` decode change is untested — evaluate before building on it.

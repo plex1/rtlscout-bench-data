@@ -1,0 +1,20 @@
+## Summary
+
+### 1. Approaches tried
+- **`ptr_conv` simplification**: Replaced the 64-entry case-table function in `jpeg_idct_y` with `{ptr_q[2:0], ptr_q[5:3]}` (just a 3-bit swap). Reduced area.
+- **Transpose RAM cleanup**: Removed the unused dual-port read structure from `jpeg_idct_transpose_ram`; merged the two clock domains (both use `clk`) into a single simplified module with one write port and one read port.
+- **Division→shift conversion**: Tried replacing `(x * 181) / 256` (signed division) with `(x*181 + (x[31]?255:0)) >>> 8`.
+- **Redundant write removal** in idx=4 of both IDCT passes (identical to idx=3).
+
+### 2. Most impactful optimizations
+The `ptr_conv` → bit-concatenation change was the cleanest area win. The RAM interface simplification removed dead logic.
+
+### 3. What didn't work / regressions
+- **Division replacement broke correctness**: 3 mismatches (off-by-one) because the signed-division truncation-toward-zero semantics weren't matched by my shift+correction formula. Reverted.
+- **RAM restructuring increased delay**: The original two-always-block RAM (separate read/write clocks) had delay ~2222 ps; merging into one always block or adding reset on `rd_q` pushed delay to ~2647–3139 ps. Keeping two separate always blocks (no reset on `rd_q`) recovered to ~2264 ps but still slightly worse than original.
+- **Removing `rd_q` reset** or moving logic worsened the synthesis-pessimistic mux decode on the critical path (`rd_addr_q` → `rd_q`).
+
+### 4. Lessons learned / next time
+- The synthesis tool is highly sensitive to coding style for register-array memories; the original dual-clock (even if identical clocks) structure produced better mux decode timing than a merged version. Keep the original RAM coding style.
+- Bit-width matters for signed division equivalence; a safer approach would be to precompute the correction as `(x + (x<0 ? divisor-1 : 0)) >>> log2(divisor)` and verify carefully, but Yosys likely already optimizes `/256` to a shift anyway — so it may not save area.
+- The final best design remained the original (cost 9.49M); my changes to `starting_point.v` landed at 9.65M. Next time I would focus on the multiply-accumulate chain (5 multipliers shared across x/y) and pipelining the address path into the RAM to break the critical path, rather than restructuring memory coding style.

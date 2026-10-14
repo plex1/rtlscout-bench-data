@@ -1,0 +1,37 @@
+## Summary
+
+### 1. Approaches Tried
+
+| Design | Cost | Delay (ps) | Area | Key idea |
+|--------|------|-----------|------|----------|
+| `design.sv` (baseline) | 4,624,408 | 1004 | 4604 | Original systolic array, 32-bit propagate-add psum chain |
+| `design_cs.sv` | 3,104,542 | 679 | 4568 | **Carry-save accumulation** through psum chain, final propagate add at column bottom |
+| `design_cs19.sv` | 2,893,914 | 667 | 4339 | CS + **19-bit truncated accumulator** (vs 32-bit), sign-extend at output |
+| `design_cs_reg.sv` ★best | 2,881,138 | 664 | 4338 | CS + 19-bit + **registered propagate add** as first deskew stage for cols 0–6, combinational for col 7 |
+| `design_prop19.sv` | 3,197,314 | 810 | 3944 | Propagate-add PE with 19-bit accumulator (no CS) — less area but much worse delay |
+
+### 2. Most Impactful Optimizations
+
+1. **Carry-save accumulation** (−33% cost): Replacing the per-PE propagate add with a 3:2 CSA eliminated the ripple-carry chain. The CSA is just XOR + MAJ gates (~70ps) vs a 32-bit propagate add (~300ps). Only one final propagate add per column at the bottom.
+
+2. **19-bit truncated accumulator** (−7% cost): The max accumulated value is 8×128×128 = 131072 = 2¹⁷, requiring 19-bit signed. Reducing from 32→19 bits saved register area (64×2×13 = 1664 fewer FF bits) and reduced CSA/propagate-add width.
+
+3. **Registered propagate add** (−0.4% cost): Moving the column-bottom propagate add into the first deskew register stage split the multiply+CSA+add path for columns 0–6.
+
+### 3. What Didn't Work / Regressions
+
+- **Booth radix-4 multiplier** (`design_booth.sv`): Sign handling bugs; abandoned. The partial product sign extension for the MSB group was wrong.
+- **Split multiply** (7-bit unsigned × 8-bit + conditional subtract, `design_bw.sv`): Two smaller multiplies + add was slower (753ps vs 664ps).
+- **18-bit carry-save** (`design_cs18.sv`): Carry-save values can't be independently sign-extended — the propagate add sign extension was wrong.
+- **19-bit deskew registers** (`design_cs19b.sv`, `design_cs_best.sv`): Yosys mapped the narrower 19-bit propagate add *slower* than the 32-bit version, increasing delay (680ps vs 664ps).
+- **Carry-save deskew** (`design_cs_full.sv`): Doubled deskew register count (2×19 vs 32 bits), increasing area.
+- **Bottom-PE registered propagate add** (`design_cs_bot.sv`): Added 1 extra cycle that couldn't be compensated for column N-1 (deskew=0), breaking cycle accuracy.
+
+### 4. Lessons Learned
+
+- **Carry-save is the single biggest win** for MAC-chain critical paths — it transforms N sequential additions into N parallel CSAs + 1 final propagate add.
+- **Yosys can't speed up an 8×8 multiply below ~420ps** regardless of target_delay — the multiply partial product tree is the floor.
+- **Sign extension of carry-save pairs is non-trivial** — `s` and `c` can't be independently sign-extended; both must be the same width and the propagate add must produce the correct sign.
+- **Column N-1 (deskew=0) is the fundamental constraint** — any extra registered stage can't be compensated since its deskew is already 0.
+- **Narrower adders aren't always faster in Yosys** — the 19-bit propagate add mapped slower than 32-bit, likely due to different cell selection.
+- Would try next: a correct Booth radix-4 implementation (halving partial products), or a precomputed weight LUT during load phase to replace the runtime multiplier.

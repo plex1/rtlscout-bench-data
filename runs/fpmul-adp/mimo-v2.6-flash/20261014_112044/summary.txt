@@ -1,0 +1,29 @@
+## Summary
+
+**Final: 113,515 area·delay (area 104.0, delay 1091 ps), 0/18.87M errors** — 21.9% better than the starting point (145,429). Best file: `design.sv` (= `design_v9.sv` = `design_v13.sv` = `design_v17.sv`, all identical mappings).
+
+### 1. Approaches tried
+- **v1** (`design.sv` initial): starting point, dual rounding paths with duplicated shifters/adders. Baseline.
+- **v2/v3** (`design_v2/3.sv`): unified single-shift datapath (`S = max(11−lz, 26−exp_sum, 0)`), one shifter/round/adder. Smaller (90 µm²) but *slower* (1377 ps).
+- **v5/v6** (`design_v5/6.sv`): dual **parallel** shift/round paths (normal: `sr=11−lz`; subnormal: `ts=26−exp_sum`), merged after rounding. Much faster (1189 ps), area 103.
+- **v7–v17**: structural/form refinements on v6. Winner: v9.
+- Rejected: split hi/lo multiplier (v4), unified path with various control forms (v10–v12, v14).
+
+### 2. Most impactful optimizations
+1. **Carry-free regime select**: `sub ⟺ (exp_sum − lz ≤ 14)`. Both paths agree on the E_raw=0 boundary, so neither path's rounding carry feeds the *selection* — this unlocked the fast dual-path structure (~5% ADP).
+2. **Dropping `need_right`** (v6): proved lz>11 only occurs when the normal path is dead (both operands subnormal ⇒ always subnormal result), removing a 22-bit mux + masks for free.
+3. **Balanced log-depth LZC** replacing 8-deep ternary priority chains; shared sticky prefix-OR tree.
+4. **Mapping-sensitive forms** (v7/v9, biggest single wins, −46 ps each): `prod = m_b * m_a` (operand swap) and `exp_sum` as a flat 4-term sum instead of mux-then-add. These are semantics-identical but changed ABC's mapping substantially — confirmed reproducible (v13/v17 map bit-identically to v9).
+
+### 3. What regressed
+- Unified single-shifter control (`max`/clamp forms): −13% area but +14–20% delay → worse ADP.
+- Split multiplier into parallel partial products + add (v4): serial CPA in series, delay +120 ps.
+- "Window all-ones via prefix-OR subtraction" (v3 first attempt): **functionally wrong** — prefix-ORs can't subtract; fixed by using the shifter output: `carry = guard & (&mant window)`.
+- Pack-mux reorder (v14), compare-form `sub` (v12), e_norm add-reorder + wide-NOR zero (v10), pair-structured CLZ (v16): all −3–8% each (pure mapping lottery).
+- `target_delay` sweeps: dead knob — mapping was identical at 300/500/800/1000 ps (design never meets timing; mapper is already greedy).
+
+### 4. Lessons
+- **Delay dominated the product** (~70% of the path), so cutting serial logic depth beat area trimming almost every time; the small-area unified design lost on ADP.
+- ABC/Yosys mapping is **chaotically sensitive to expression forms** — operand order, adder associativity, mux nesting. Cheap semantics-preserving "lotteries" paid off twice (−9% combined) but failed ~6 other times; keep each as a separate file and evaluate.
+- Prove edge-case equivalences on paper before synthesizing (e.g., lz>11 ⇒ sub regime; both paths agreeing at E_raw=0) — those proofs enabled the two biggest structural wins.
+- Next time: get the dual-path architecture right immediately (it's the sweet spot for this problem), then spend steps early on form-lottery around it, rather than exploring the unified datapath first.

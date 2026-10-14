@@ -1,0 +1,29 @@
+## Summary
+
+### Starting Point
+- `starting_point.v`: Baseline cost **968,045** (delay 910ps, area 1064). Critical path: pipe2→pipe3 (mantissa alignment + two's complement).
+
+### What Worked Best (Final cost: **775,210**, 19.9% reduction)
+
+1. **Two's complement → ones' complement + popcount carry-in** (biggest single win: 968K→936K→856K). Replaced `mantissa_comp = sign ? ~mant + 1 : mant` with `mant_comp = sign ? ~mant : mant` (ones' complement, no adder), then injected the `+1` carry-ins as `popcount(signs)` added to the final sum. Eliminated 17 full-width carry-propagate adders from the critical path.
+
+2. **Simplified comparator** (856K→817K): Replaced the case-based signed comparator with a direct `assign result_o = (a >= b) ? a : b`. Yosys maps this to far better logic.
+
+3. **Folded popcount into CSA tree** (817K→795K): Instead of `csa_sum + csa_carry + popcount` (3-operand add), fed popcount as an 18th operand into the CSA tree, leaving only a 2-operand final add.
+
+4. **Replaced recursive CSA tree with for-loop sum** (795K→775K): The recursive `csa_tree` module with 4:2 compressors had inefficient carry chains. A simple `always_comb` for-loop sum let Yosys optimize the adder tree directly.
+
+5. **Barrel shifter rewrite** (775K): Cleaned up the barrel shifter to use proper indexed stages instead of the ambiguous `temp_results` (no index on result_o).
+
+### What Didn't Work
+- **Truncating barrel shifter width** in posit_encoder (46→32 bits): broke correctness — upper bits of rg_exp_mant matter when shift is small.
+- **Flat always_comb for comp_tree**: Yosys synthesized a 2500ps sequential chain instead of a tree.
+- **Moving comp_tree to stage 0**: Made stage 0 path 1321ps (posit decode + exp add + max all combinational).
+- **target_delay sweep**: 750ps and 1500ps targets both increased delay; tool doesn't respond well.
+- **Simplifying comp_tree structure** (inlining comparators): slightly worse than original recursive.
+
+### Lessons Learned
+- **Ones' complement + deferred carry** is a powerful technique for signed accumulation — removes adders from critical paths.
+- **Letting Yosys build adder trees** (for-loop) can beat hand-structured CSA trees with complex compressor modules.
+- **Pipeline rebalancing** requires care: moving logic to an already-heavy stage (stage 0 with posit decoding) makes things worse, not better.
+- The remaining critical path is the 5-level comparator tree (pipe1→pipe2, 763ps); a faster max-finder or restructuring the exponent processing could help further.

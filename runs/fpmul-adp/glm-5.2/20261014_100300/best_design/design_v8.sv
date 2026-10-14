@@ -1,0 +1,178 @@
+// fp_mul_e5f10 -- optimized variant 8: mux-based guard/sticky, no below[] array
+module fp_mul_e5f10 (a, b, y);
+  input  [15:0] a;
+  input  [15:0] b;
+  output [15:0] y;
+
+  localparam BIAS         = 15;
+  localparam MAX_E        = 31;
+  localparam MAX_FINITE_E = 30;
+  localparam PROD_W       = 22;
+
+  wire       s_a = a[15];
+  wire       s_b = b[15];
+  wire [4:0] e_a = a[14:10];
+  wire [4:0] e_b = b[14:10];
+  wire [9:0] f_a = a[9:0];
+  wire [9:0] f_b = b[9:0];
+
+  wire e_a_zero = ~|e_a;
+  wire e_b_zero = ~|e_b;
+  wire e_a_ones = &e_a;
+  wire e_b_ones = &e_b;
+  wire f_a_nz   = |f_a;
+  wire f_b_nz   = |f_b;
+  wire zero_a   = e_a_zero & ~f_a_nz;
+  wire zero_b   = e_b_zero & ~f_b_nz;
+  wire nan_a    = e_a_ones & f_a_nz;
+  wire nan_b    = e_b_ones & f_b_nz;
+  wire inf_a    = e_a_ones & ~f_a_nz;
+  wire inf_b    = e_b_ones & ~f_b_nz;
+
+  wire nan_in  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);
+  wire inf_in  = inf_a | inf_b;
+  wire zero_in = zero_a | zero_b;
+  wire s_y     = s_a ^ s_b;
+
+  wire [10:0] m_a    = {~e_a_zero, f_a};
+  wire [10:0] m_b    = {~e_b_zero, f_b};
+  wire [4:0]  ea_eff = e_a_zero ? 5'd1 : e_a;
+  wire [4:0]  eb_eff = e_b_zero ? 5'd1 : e_b;
+
+  wire [PROD_W-1:0] prod = m_a * m_b;
+
+  reg [4:0] lz;
+  integer   i;
+  always @* begin
+    lz = 5'd0;
+    for (i = 0; i < PROD_W; i = i + 1)
+      if (prod[i]) lz = 5'd21 - i[4:0];
+  end
+
+  // normalise and round: leading one onto bit 10
+  wire              need_right = (lz <= 5'd11);
+  wire [4:0]        sr         = 5'd11 - lz;
+  wire [4:0]        sl         = lz - 5'd11;
+  wire [PROD_W-1:0] shifted    = need_right ? (prod >> sr) : (prod << sl);
+  wire [10:0]       mant_pre   = shifted[10:0];
+
+  // Guard and sticky via explicit mux - avoids 22-deep prefix-OR chain
+  // sr ranges 0..11 when need_right
+  // guard = prod[sr-1] (0 when sr=0)
+  // sticky = |prod[sr-2:0] (0 when sr<=1)
+  
+  // Pre-compute partial ORs for sticky (tree structure, shared)
+  wire or0  = prod[0];
+  wire or1  = prod[1] | or0;
+  wire or2  = prod[2] | or1;
+  wire or3  = prod[3] | or2;
+  wire or4  = prod[4] | or3;
+  wire or5  = prod[5] | or4;
+  wire or6  = prod[6] | or5;
+  wire or7  = prod[7] | or6;
+  wire or8  = prod[8] | or7;
+  wire or9  = prod[9] | or8;
+  wire or10 = prod[10] | or9;
+
+  // guard mux: select prod[sr-1] based on sr
+  reg guard;
+  always @* begin
+    case (sr)
+      5'd0:  guard = 1'b0;
+      5'd1:  guard = prod[0];
+      5'd2:  guard = prod[1];
+      5'd3:  guard = prod[2];
+      5'd4:  guard = prod[3];
+      5'd5:  guard = prod[4];
+      5'd6:  guard = prod[5];
+      5'd7:  guard = prod[6];
+      5'd8:  guard = prod[7];
+      5'd9:  guard = prod[8];
+      5'd10: guard = prod[9];
+      5'd11: guard = prod[10];
+      default: guard = 1'b0;
+    endcase
+  end
+
+  // sticky mux: select |prod[sr-2:0] based on sr
+  reg sticky;
+  always @* begin
+    case (sr)
+      5'd0, 5'd1: sticky = 1'b0;
+      5'd2:  sticky = or0;
+      5'd3:  sticky = or1;
+      5'd4:  sticky = or2;
+      5'd5:  sticky = or3;
+      5'd6:  sticky = or4;
+      5'd7:  sticky = or5;
+      5'd8:  sticky = or6;
+      5'd9:  sticky = or7;
+      5'd10: sticky = or8;
+      5'd11: sticky = or9;
+      default: sticky = 1'b0;
+    endcase
+  end
+
+  wire round_up = guard & (sticky | mant_pre[0]);
+
+  wire [11:0] mant_round = {1'b0, mant_pre} + {11'd0, round_up};
+  wire        carry      = mant_round[11];
+  wire [10:0] mant_post  = carry ? mant_round[11:1] : mant_round[10:0];
+  wire [9:0]  frac_norm  = mant_post[9:0];
+
+  // exponent - 7-bit
+  wire [6:0] exp_sum     = {2'd0, ea_eff} + {2'd0, eb_eff};
+  wire [6:0] lhs         = exp_sum + 7'd1 + {6'd0, carry};
+  wire [6:0] limit_under = 7'd15 + {2'd0, lz};
+  wire [6:0] limit_over  = 7'd45 + {2'd0, lz};
+  wire       underflow   = (lhs <= limit_under);
+  wire       overflow    = (lhs >  limit_over);
+  wire [6:0] e_norm      = lhs - limit_under;
+  wire [4:0] exp_norm    = e_norm[4:0];
+
+  // subnormal result - still uses below[] for wider range
+  wire [PROD_W-1:0] below;
+  genvar k;
+  generate
+    for (k = 0; k < PROD_W; k = k + 1) begin : g_below
+      assign below[k] = |prod[k:0];
+    end
+  endgenerate
+
+  function bit_at;
+    input [PROD_W-1:0] v;
+    input integer      idx;
+    begin
+      bit_at = (idx >= 0 && idx < PROD_W) ? v[idx] : 1'b0;
+    end
+  endfunction
+
+  integer           total_shift;
+  reg [PROD_W-1:0]  sub_shifted;
+  always @* begin
+    total_shift = (BIAS + 10 + 1) - $signed({1'b0, exp_sum});
+    sub_shifted = (total_shift >= 0 && total_shift < PROD_W) ? (prod >> total_shift) : {PROD_W{1'b0}};
+  end
+  wire [9:0]  frac_trunc = sub_shifted[9:0];
+  wire        guard_s    = bit_at(prod,  total_shift - 1);
+  wire        sticky_s   = bit_at(below, total_shift - 2);
+  wire        round_s    = guard_s & (sticky_s | frac_trunc[0]);
+  wire [10:0] frac_sum   = {1'b0, frac_trunc} + {10'd0, round_s};
+  wire        carry_s    = frac_sum[10];
+  wire [9:0]  frac_sub   = frac_sum[9:0];
+  wire [4:0]  exp_sub    = {4'd0, carry_s};
+
+  // pack
+  wire sub_is_zero = (exp_sub == 5'd0) & (frac_sub == 10'd0);
+  
+  wire [15:0] y_normal = overflow          ? {s_y, 5'd31, 10'd0} :
+                          (underflow & sub_is_zero) ? {s_y, 5'd0, 10'd0} :
+                          underflow        ? {s_y, exp_sub, frac_sub} :
+                                             {s_y, exp_norm, frac_norm};
+
+  assign y = nan_in  ? {1'b0, 5'd31, 10'h200} :
+             inf_in  ? {s_y, 5'd31, 10'd0} :
+             zero_in ? {s_y, 5'd0, 10'd0} :
+             y_normal;
+
+endmodule

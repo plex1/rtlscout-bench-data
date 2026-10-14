@@ -1,0 +1,27 @@
+## Summary
+
+**Final result:** `design.sv` — PASS, ADP **5.19e6** (area 4425, delay 1174ps) vs. baseline starting point 9.50e6 (area 4274, delay 2222ps) — a **45% ADP reduction**, bit-exact on all 20,672 checks.
+
+### 1. Approaches tried
+- **Restructured composition**: replaced the verbatim 1381-line original with a single parameterized `jpeg_idct_pass` module instantiated as x-pass and y-pass (deduplicated identical logic), plus the transpose. Behaviorally identical, verified against golden vectors.
+- **Width analysis by l1-norm/range bounds** of the AAN datapath to compress inter-pass storage (transpose RAM, block_out, multiplier operands).
+- **One-hot read-address reformulation** of the transpose corner-turn RAMs.
+- **Arithmetic retiming** of the `(x*181)/256` 1/√2 stage and **operand-split multipliers** (b split into 4/5-bit parts across the two existing pipeline registers).
+
+### 2. Most impactful optimizations (in order)
+1. **One-hot read address in the transpose** (biggest win, ~35% ADP): the read select became a 16:1 AND-OR mux and the +8/−8/hold/+1 address sequence became wiring permutations + a 3:1 mux. Delay 2263→1441ps. The old binary-address 32:1 mux had massive fanout (1.5ns DFF QN penalty).
+2. **Re-timing the ×181/256 stage**: register `(o_s7−o_s6)×181` at beat idx2 and `(o_t0−o_s5)×181` at beat idx5, combine with one adder at idx6 (valid because multiplication distributes over ± mod 2³²). Removed the 3-adder-deep + multiply + divide single-cycle path; the division became an explicit shift+correction.
+3. **Width narrowing**: transpose RAM 32→22 bits, block_out 32→22, mul_b 32→13, mul_a 32→22 (x-pass provably 17), all justified by range analysis (worst-case x-pass output ≈ ±528k needs 21–22 bits; 18-bit storage demonstrably failed).
+4. **3-way split multipliers**: `mul_a × b[4:0]/b[9:5]/b[12:10]` registered separately, final CPA in the next pipeline register — bit-exact via mod-2³² arithmetic.
+
+### 3. What didn't work / regressed
+- **16- and 18-bit inter-pass storage**: my first l1-norm estimate was wrong (I missed the AAN DC gain); hand-simulation showed row outputs like `√2·32767 ≈ 46335` — 16-bit failed 40% of checks, 18-bit failed 10%. 20-bit passed but was slower, so 22 bits is the sweet spot.
+- **2-way and 4-way multiplier splits**: both worse than 3-way (synthesis mapping sensitivity; 4-way doubled the fanout penalty on `mul_b`).
+- **target_delay sweeps**: area was nearly insensitive (4257→4252 from 500→1500ps); the ×181 path made 1500 the best of the swept values only transiently.
+- **A_W=17 for the x-pass**: saved nothing measurably and perturbed mapping badly — synthesis is noticeably non-deterministic (~±100ps run-to-run on this design), so identical RTL can score 6.13–6.56e6.
+
+### 4. Lessons
+- **Inferred "RAMs" dominate both area and delay here**; restructuring the *access pattern* (one-hot addressing) beats micro-optimizing data widths.
+- **Always verify range bounds by hand-simulation or empirically** — my analytic gain estimate was off by 4×, wasting ~8 steps.
+- **RTL restructuring that balances logic across existing pipeline registers** (split multiply, pre-multiplied halves) beat everything except the one-hot RAM; area increases from extra pipeline registers paid off handsomely in delay.
+- Next time: after the one-hot win, I'd immediately enumerate all single-cycle compound expressions (mul+div, add+mul) and check their slack before micro-tuning widths; and I'd budget for synthesis variance by evaluating promising configs twice.

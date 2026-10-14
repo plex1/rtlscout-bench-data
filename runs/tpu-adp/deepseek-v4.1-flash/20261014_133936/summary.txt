@@ -1,0 +1,26 @@
+## Summary
+
+### 1. Approaches tried
+- **`design.sv`** — exact copy of the starting point. PASS, cost 4.624M (area 4604, delay 1004 ps). Baseline.
+- **`design2.sv`** — same PE mesh but with a narrow internal accumulator (IW=20) sign-extended at the output. PASS, 3.408M. Showed accumulator width is a real lever.
+- **`design_b.sv`** — restructured: products and accumulation in **separate pipeline stages** (per-row activation skew + per-column delay chains so the product is still formed at the exact original systolic cycle n+i+j), 7-deep registered accumulator chain, output de-skew. PASS, **2.708M**.
+- **`design_l.sv`** — same semantics as design_b but replaces the 32 per-column activation-delay chains with a **shared systolic east chain** (identical values, 4× fewer flops) and uses **progressively sized accumulator stages** instead of one wide ACCW. PASS, **2.697M** — best result.
+- **`design_c.sv`** (east chain + product/acc pipeline), **`design_e/f/g/h/i/j/k/m.sv`** (aligned-activation variants): all explored but either broke exact cycle semantics or made synthesis time out.
+
+### 2. Most impactful optimizations
+1. **Register-boundary restructuring** (1004 → 626 ps): splitting the PE into a multiply stage and a separate accumulate stage cut the convolution+adder critical path.
+2. **Narrow accumulators** (32-bit → 16–19 bit internal): 4.6M → 3.4M.
+3. **Removing redundant storage** (design_l): shared east chain + tapered accumulator widths removed ~2000 flops at no delay cost → 2.697M. This confirms the design was **area-heavy, not delay-heavy** (delay plateaued ~630 ps regardless of target_delay; area was ~4300 in all good variants).
+
+### 3. What didn't work
+- **Combining the multiply and the 8-way adder tree combinationally** (`design_h`, `design_e`): Yosys PPA extraction **timed out (1800 s)** every time — never buffered product registers between multiplier and tree.
+- **Uniformly delayed activations** (`design_j`, `design_k`): changed the cycle at which each product samples its weight, breaking **mid-compute weight reload** semantics (the one test case that differentiates variants, around vector line 271).
+- **Removing `acc0`** in `design_l`: each accumulator stage must read the *registered* previous stage, not the same-cycle value.
+- **`target_delay` sweeps** (300, 400, 900, 2000, 3000 ps): no benefit; timing is RTL-structure-limited, not constraint-limited.
+
+### 4. Lessons / next time
+- The critical path is dominated by the **8×8 signed multiplier**; the highest-leverage next step is to break *that* (e.g. radix-4/Booth with registered partial products) while keeping the product register at the exact systolic cycle so reload semantics hold.
+- **Keep a product register between multiplier and adder tree** — combinl ganging makes ABC hang.
+- The exact cycle at which each multiplier samples its weight is a hard contract; any re-timing must preserve the (n+i+j) sample point.
+- Interplay to exploit: all designs that passed clustered at area ≈ 4270–4323, so **flop count reduction (shared chains, tapered widths)** is where the remaining gains are; delay is already near the multiplier floor.
+- Carry over `design_l.sv` (best, 2.697M) as the working reference.

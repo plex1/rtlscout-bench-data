@@ -1,0 +1,23 @@
+## Summary
+
+### 1. Approaches Tried
+- **Baseline** (`starting_point.v`): 968K cost, 910ps delay, critical path in pipe2→pipe3 (exp_diff→barrel_shift→two's_complement→register)
+- **Carry-in trick** (`design.sv`): Replace `~mantissa + 1` (full-width adder) with `~mantissa` (free inversion) + `popcount(signs)` added to final sum
+- **Simple multiplier**: Replace complex radix-4 Booth multiplier (with encoder, gen_prods, CSA tree) with `assign sum_o = a * b` for 5-bit mantissa operands
+
+### 2. Most Impactful Optimizations
+1. **Carry-in trick with registered popcount** (968K → 882K, -8.9%): Computing `popcount(signs)` from `pipe2_signs` and registering it into pipe3 kept it off the critical path. The `~mantissa` inversion is free, eliminating 17 full-width incrementers.
+2. **Simple `*` multiplier** (882K → 836K, -5.2%): The Booth multiplier infrastructure (encoder, partialMade products, CSA tree) was massive overkill for 5×5-bit multiplication. Yosys synthesizes `*` much more efficiently for tiny operands. Area dropped from 1034 to 974.
+
+### 3. What Didn't Work
+- **Popcount on critical path** (968K → 1046K): Computing popcount combinationally from pipe3_signs put it directly on the CSA critical path
+- **Moving abs/norm before pipe4 register** (882K → 993K/1478K): Shifting logic across pipeline boundaries redistributed delay poorly — encoder or CSA paths became critical
+- **3:2 CSA for final addition** (882K → 894K): Full-width compressor added more area than delay saved
+- **Injecting popcount into CSA carry** (882K → 885K): Marginal regression
+- **target_delay sweeps**: No meaningful improvement; RTL structure was the real lever
+
+### 4. Lessons Learned
+- **Register auxiliary signals early**: Popcount needed to be computed from pipe2 (one stage ahead) and registered, not computed on-demand in pipe3
+- **Match complexity to operand size**: Booth radix-4 was designed for 16-bit+ operands; for 5-bit mantissa, a simple `*` is far cheaper
+- **Pipeline rebalancing is risky**: Moving combinational logic across register boundaries often shifts the critical path elsewhere rather than reducing it
+- **Dead code matters**: Unused modules (booth_encoder, gen_prods, etc.) caused a duplicate-definition error when I tried to remove them at step 57 — should have removed all traces cleanly. The final `design.sv` still contains the old Booth module definitions that need cleanup.

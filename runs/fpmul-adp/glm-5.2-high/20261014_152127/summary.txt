@@ -1,0 +1,29 @@
+## Summary
+
+### Final Best Design
+`design_opt7.v` (= `design_opt13.v`), cost **132,014** (area=104.9, delay=1258ps), down from the baseline **145,429** (area=108.7, delay=1338ps) — a **9.3% improvement**.
+
+### What Worked Best
+
+1. **Left-shift normalization for the normal path** (biggest win): Instead of the original right-shift (`prod >> sr`) with variable-index `bit_at()` guard/sticky extraction, I left-shift `prod << lz` to place the leading 1 at the MSB (bit 21). This makes guard = bit 10, sticky = OR of bits [9:0] — simple fixed-position extraction with no function calls or variable indexing. This alone dropped cost from 145K to 139K.
+
+2. **Sticky right-shifter for subnormal path**: Replaced the `below` prefix-OR array (22-bit OR chain) + `bit_at()` function with a 5-stage barrel sticky right-shifter. Combined with the left-shift normal path, this eliminated all variable-index bit extraction. Cost dropped to 132K.
+
+3. **Classification simplification**: Using `|f_a` / `f_b_nz` instead of `(f_a != 10'd0)` and restructuring the zero/nan/inf detection saved a small amount of area.
+
+### What Didn't Work / Regressions
+
+- **Barrel left-shift for subnormal guard/sticky** (design_opt2): Increased area due to wide 22-bit barrel shifter + wrap-around logic. Worse than the sticky right-shifter.
+- **Case-statement guard/sticky** (design_opt1): Slightly worse — Yosys didn't map the casez as efficiently as the barrel shifter.
+- **7-bit exponent arithmetic** (design_opt10): Removing the 8-bit extensions actually increased cost slightly.
+- **Separate `shift_amt` and `total_shift`** (design_opt12): Computing two separate shift values added area. Keeping `shift_sub = total_shift - 1` was better.
+- **High target_delay** (2000–5000ps): Yosys relaxed to ~1515ps delay but only saved ~2 area units, netting worse ADP.
+- **Simplifying `no_shift` logic** (design_opt8): Restructuring the comparison logic into `ts_le_24`/`ts_ge_1` increased delay significantly.
+
+### Lessons Learned
+
+1. **Fixed-position extraction beats variable indexing**: The single most impactful change was eliminating all `bit_at(prod, variable_index)` patterns. Left-shifting to a known position and extracting guard/sticky from fixed bit positions is dramatically cheaper.
+2. **Sticky right-shifters are more efficient than prefix-OR arrays** for this width (22 bits), avoiding the 22-deep OR chain.
+3. **`target_delay` has diminishing returns** below the natural critical path — Yosys synthesizes the same netlist regardless. The RTL structure is the real lever.
+4. **Small coding style changes** (e.g., `|f_a` vs `f_a != 0`, width annotations on constants) can cause non-obvious synthesis differences — always verify.
+5. **Trying to merge normal and subnormal paths** is tempting but the shift amounts and output widths differ enough that separate paths are cheaper.

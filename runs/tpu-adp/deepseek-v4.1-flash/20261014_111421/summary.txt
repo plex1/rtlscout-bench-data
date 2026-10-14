@@ -1,0 +1,35 @@
+## Summary
+
+**Note:** The session hit the 60-step limit right after creating `design_p4.sv`, which was never evaluated. Best **verified** result: **`design_p3.sv`, 2.674e6 area_delay_product (PASS, 0/6782 fails, delay 574 ps, area 4654)**. Next agent should evaluate `design_p4.sv` first.
+
+### 1. Approaches tried
+| File | Idea | Result |
+|---|---|---|
+| `starting_point.v` | original systolic, 32-bit accums | ~3.24e6 baseline |
+| `design_sys.sv` | same, accumulator narrowed 32→19 bits | 3.236e6 PASS |
+| `design_ks.sv` | explicit Kogge-Stone prefix adder per PE | 3.33e6 (worse) |
+| `design_csa.sv`/`design_csa19.sv` | carry-save (3:2 compressor) accumulation | 2.96e6 / 2.87e6 |
+| `design_csa2.sv` | split multiply + CSA | 2.798e6 PASS (570 ps) |
+| `design_p2.sv` | **pipelined PE**: `preg<=a*w` and `psum<=psum+preg` in separate stages; bottom row's add made combinational to keep the 15-cycle latency | 2.775e6 PASS |
+| **`design_p3.sv`** | p2 + **split multiply** (`a = ah*16 + al`, two 4×8-class mults) | **2.674e6 PASS (best)** |
+| `design_booth.sv` | hand-written radix-4 Booth | 3.14e6 (worse than Yosys `*`) |
+| `design_flat2.sv` / `design.sv` | flat non-systolic windowed model | **FAIL 21/516** |
+| `design_p4.sv` | split multiply + CSA combined | not evaluated |
+
+### 2. Highest-impact optimizations
+1. **Registering the product inside the PE** (splitting multiply from accumulate into separate stages) — the 8×8 multiply alone is ~500 ps, so isolating it was the single biggest win. Latency was preserved for free by making the bottom row's final add combinational (the `psum_v[N]` net is already registered).
+2. **Splitting the 8×8 multiply into two 4×8 multiplies** (`a = ah*16 + al`; exact because `a*w = (ah*w)*16 + al*w`).
+3. **Narrowing accumulators 32→19 bits** (true max |Σ| = 8·128·128 = 131072 < 2¹⁸) — pure area win, bit-identical output.
+4. Carry-save accumulation — helps, but is second-order once the multiplier is pipelined.
+
+### 3. What didn't work
+- `design_flat2.sv`/`design.sv`: both flat models fail **identically at line 271** (21/516) in the mid-drain weight-reload region — hard evidence the flat `C[m][j]=Σ A[m][i]·W[k][j]` model is **not** bit-exact. The systolic PE mesh is *required*; don't retry a flat rewrite.
+- Hand-written Booth and Kogge-Stone were both **slower** than Yosys's own `*` / `+` mapping.
+- `target_delay` is a **dead knob** here: 200 and 3000 both produced essentially the same delay/area.
+- Several self-inflicted bugs from rewriting whole files: prefix carry misalignment (`{1'b0,g[W-2:0]}` vs `{g[W-2:0],1'b0}`), product width arithmetic (`DW/2+3` = 7 bits, not 12), delay-line depth off by one when adding an output register, and deleting the bottom row's `a_east` shift register.
+
+### 4. Lessons / next time
+- **Smallest correct change first.** Multiplier width, prefix encodings, and delay-line depths were the recurring bug sources; use `edit_file` on a passing file rather than `create_file` from scratch.
+- Keep the **systolic mesh**; it is load-bearing for bit-exactness. Optimize *inside* the PE and inside the skew/de-skew chains.
+- Don't hand-roll arithmetic operators — Yosys beats them.
+- Next steps worth trying: evaluate `design_p4.sv` (split-mult + CSA, expected ~<2.6e6, ~520 ps); then consider CSD/shift-add decomposition of the weights, or splitting the skew/de-skew shift registers into parallel banks.

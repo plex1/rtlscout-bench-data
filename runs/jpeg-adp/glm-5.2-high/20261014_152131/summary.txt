@@ -1,0 +1,24 @@
+## Summary
+
+### 1. Approaches Tried
+- **Baseline**: Copied the original `starting_point.v` (3 submodules: jpeg_idct_x, jpeg_idct_transpose, jpeg_idct_y). Initial cost: ~9.93M area_delay_product.
+- **Split transpose RAM**: Split each 32-entry dual-buffer RAM into two 16-entry sub-arrays (lo/hi) with a 2:1 buffer select. This reduced the read mux from 32:1 to 16:1+2:1. **Best result: ~9.09M** (8.4% improvement).
+- **ptr_conv simplification**: Replaced the 64-entry LUT function in jpeg_idct_y with `{ptr_q[2:0], ptr_q[5:3]}` bit manipulation. Counter-intuitively worsened cost to ~9.37M, reverted.
+- **4-bank 8-deep RAM**: Split RAM into four 8-entry banks. Cost exploded to ~20.3M due to massive 4:1 mux overhead. Reverted.
+- **max_fan attribute**: Added `(* max_fan = 4 *)` on `rd_addr_q` to reduce fanout. Slight regression to ~9.26M. Reverted.
+- **Narrowed x-pass multiplier operands** to 17-bit × 16-bit (was 32×32). Was mid-implementation when steps ran out — file `design.v` has this partially applied.
+
+### 2. Most Impactful Optimization
+Splitting the transpose RAM double buffer from a single 32-entry array into two 16-entry arrays (`ram_lo`/`ram_hi`) selected by the buffer bit. This reduced the critical mux depth, cutting delay from 2322ps → 2130ps while keeping area constant (~4266), yielding the best cost of 9,087,281.
+
+### 3. What Didn't Work / Regressions
+- **4-bank RAM**: 4:1 bank mux added more overhead than the 8:1 mux it replaced.
+- **ptr_conv → bit manipulation**: The LUT-based function synthesized better than the equivalent arithmetic expression (likely due to Yosys optimization patterns).
+- **max_fan attribute**: Forced register duplication but didn't reduce the critical path enough to offset area increase.
+
+### 4. Lessons Learned
+- The critical path was consistently the transpose RAM read mux (clock-to-Q ~1441ps + mux ~689ps), driven by `rd_addr_q` fanout to 4 RAMs.
+- Reducing mux depth is effective, but splitting into too many banks increases select logic overhead.
+- Yosys synthesis is deterministic; identical RTL produces identical results across runs.
+- **Next steps**: Complete the x-pass multiplier width narrowing (17×16 instead of 32×32) for area savings. Consider duplicating `rd_addr_q` per RAM to reduce fanout. Explore removing the extra `mul_q→mul` pipeline register. Try merging the transpose and y-pass to eliminate the RAM entirely.
+- The file `design.v` currently has the best passing design (split RAM, ~9.09M) but has a partially-applied x-pass multiplier width change that needs completion before use.

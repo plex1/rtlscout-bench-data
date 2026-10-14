@@ -1,0 +1,29 @@
+## Summary
+
+### Best Result
+**design.v** (CSA-based, target_delay=553): **2.826M** area_delay_product (area=4364, delay=647.5ps), down from 4.62M baseline (38.8% reduction).
+
+### Approaches Tried & Results
+
+1. **Narrowed accumulator (32→19 bits)**: Reduced internal accumulator from 32 to 19 bits (minimum needed for 8×8 signed products summed 8-way). This alone cut cost from 4.62M to 3.24M. The deskew registers were also narrowed, with sign-extension applied at output.
+
+2. **Carry-save accumulation (CSA)**: Replaced the carry-propagate adder in each PE with full-adder-based CSA (sum + carry in carry-save form), with a single CPA at the output. This broke the long adder chain in each PE, reducing delay from 820ps to 670ps. Cost: 3.24M → 2.93M.
+
+3. **target_delay sweep**: Found 553ps as the sweet spot for the CSA design, reducing cost to 2.826M. The synthesis is highly sensitive to small target_delay changes (e.g., 551→2.90M, 555→2.84M, 560→2.86M).
+
+### What Worked Best
+- **CSA + narrow accumulator** was the key breakthrough. The carry-save form eliminates the per-PE carry-propagate chain, trading extra carry registers (area +400) for much shorter delay (-170ps).
+- **target_delay tuning** gave additional 4% improvement on top of RTL changes.
+
+### What Didn't Work
+- **Unsigned multiply + sign correction**: Worse than native signed multiply (3.5M vs 3.24M).
+- **CPA after deskew** (design_csa3): Extra deskew registers for carry outweighed the delay benefit (3.04M).
+- **Hybrid CSA (16-bit CSA + 3-bit CPA)**: Failed correctness due to carry propagation issues between upper/lower boundary.
+- **3-input `+` as CSA**: Yosys synthesizes this as a carry-propagate adder, not a CSA—fundamentally wrong.
+- **Explicit upper-bit FA optimization**: Too complex to implement correctly within step budget.
+
+### Lessons Learned
+1. **Carry-save accumulation** is the most impactful RTL-level optimization for systolic MAC arrays—it breaks the critical adder chain without changing cycle behavior.
+2. **Minimum accumulator width** matters: 19 bits (not 32) suffices for 8×8×8 accumulation; verifying overflow cases (e.g., -128×-128×8=131072) is essential.
+3. **target_delay** is a secondary knob but can give 3-4% improvement at the right value; results are non-monotonic so targeted experiments are more productive than exhaustive sweeps.
+4. **Explicit FA-based CSA** (using XOR/MAJ logic) is necessary—Yosys cannot infer CSA from `+` operators.

@@ -1,0 +1,43 @@
+## Summary
+
+### 1. Approaches Tried
+
+Starting from `starting_point.v` (cost 145,429, area 108.7, delay 1338ps), I explored several optimization directions:
+
+- **Normal-path left-shift alignment** (`design_v4.v` → 139,293; `design_v6.v` → **131,196**, the best result): Replaced the bidirectional shifter + variable `bit_at()` indexing in the normal path with a single left-shift by `lz` to align the MSB at bit 21, then extracted mantissa/guard/sticky from **fixed positions**. This eliminated the most expensive variable-indexing operations.
+
+- **Merged subnormal path onto `prod_aligned`** (`design_v5.v`, 156,589): Tried routing both paths through the same left-shifted product. Correctness required careful handling of wrapping indices but added more logic than it saved.
+
+- **Narrower exponent arithmetic** (`design_v7.v`/`v8.v`, 139,558): Dropped `exp_sum` from 8-bit to 6-bit. Synthesis picked a worse critical path through the shrunken comparators.
+
+- **Explicit case-statement muxes** for guard/sticky (`design_v9.v`, 145,502): Replaced variable indexing with a 22-way `case`. Synthesis mapped it to a slower mux tree than the padded-index approach.
+
+- **Tree-structured prefix-OR** for `below` (`design_v11.v`, 137,250) and 23-bit padding (`design_v12.v`): Both made synthesis slightly worse than the simple generate-based 22-bit chain with 32-bit zero-extension used in `v6`.
+
+### 2. Most Impactful Optimizations
+
+The single biggest win came from `design_v6.v` combining two changes:
+
+1. **Normal path**: `prod_aligned = prod << lz` → fixed-position guard (`prod_aligned[10]`), sticky (`|prod_aligned[9:0]`), and mantissa (`prod_aligned[21:11]`). This removed the bidirectional barrel shifter, the `need_right`/`sr`/`sl` logic, and two `bit_at` function calls from the normal path.
+
+2. **Subnormal path**: Replaced the `bit_at()` function (which used `integer` parameters and range checks) with 32-bit zero-extended `prod_ext`/`below_ext` indexed by 5-bit `ts_m1`/`ts_m2`, gated by `ts_ge0` and `total_shift >=` conditions. This let Yosys map the variable indexing to a cleaner mux structure.
+
+Combined effect: area 108.7→106.2, delay 1338→1236ps, cost 145,429→**131,196** (a 10% improvement).
+
+### 3. What Didn't Work / Caused Regressions
+
+- **Unified `prod_aligned` for subnormal path** (`v5`): The extra `lz + total_shift` computation and a second prefix-OR (`below_a`) added more area than the sharing saved.
+- **6/7-bit exponent arithmetic** (`v7`/`v8`): Narrower comparators picked a longer synthesis path; the 8-bit version was actually better optimized.
+- **Case-statement guard/sticky mux** (`v9`): Synthesized to a deeper mux tree than the padded variable index.
+- **23-bit or tree-structured `below`** (`v11`/`v12`): Synthesis handled the 32-bit zero-extension in `v6` more efficiently than smaller or restructured versions.
+- **`target_delay` sweep** (300–2000ps): Had essentially no effect — the tool produced identical netlists across the range.
+
+### 4. Lessons Learned
+
+- **Function calls with `integer` parameters can inhibit synthesis**: Replacing `bit_at()` with explicit zero-padded wires + 5-bit indexing was a consistent win.
+- **Fixed-position extraction beats variable indexing**: Aligning data to a known position and reading from constant bit ranges is cheaper than dynamic indexing, even though it requires an extra shift.
+- **32-bit zero-extension is surprisingly efficient**: Yosys optimized the 32-bit padded wires better than 23-bit or clamped versions, likely because it can use the upper zero bits to simplify the mux logic.
+- **Don't over-merge**: Attempting to unify the two shift+round paths (normal and subnormal) consistently added more overhead than it saved, because the circular dependency between `carry` and `underflow` forces parallel computation anyway.
+- **RTL structure matters more than `target_delay`**: Sweeping the timing constraint had zero effect; the real lever was the structural description.
+
+The best design is **`design_v6.v`** with cost **131,196** (area 106.2, delay 1235.5ps), a 10% improvement over the starting point.

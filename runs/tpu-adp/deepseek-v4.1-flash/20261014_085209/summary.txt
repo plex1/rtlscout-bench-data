@@ -1,0 +1,28 @@
+## Summary
+
+**Final result:** `design.sv` — PASS on all 6782 cycles, `area_delay_product = 3.246e6` (area 3939, delay 824 ps). This beats the reference `starting_point.v` (4.624e6, area 4604, delay 1004 ps) by ~30%.
+
+### 1. Approaches tried
+
+| File | Idea | Outcome |
+|---|---|---|
+| `design.sv` | Reference PE mesh, **ACCW narrowed 32→19** | ✅ PASS, 3.246e6 (**best kept**) |
+| `design_direct.sv` | Parallel multiplier array + adder tree, 64b-row delay line | ❌ wrong latency |
+| `design_c.sv` | Removed a_east + output de-skew via 7-cycle input pre-delay | ❌ 1-cycle off |
+| `design_csa.sv` | Carry-select split of the 19b accumulate | ❌ buggy carry (got 0x1e008 vs 0x1f808) |
+| `design_p/q/r/s/t/u/v/w/x/y/z.sv` | Attempts to prove & implement a **flat (non-systolic) datapath**: `c_data word j(t) = Σ_m a_data(t−14) byte m · wr[m] byte j` | ❌ almost — passed lines 1–171, failed at the first stall/back-to-back boundary (line 172/271) |
+
+### 2. Optimizations that mattered
+- **Narrowing ACCW from 32 → 19 bits** was the single biggest win (~220 flops removed: 64 partial-sum registers + 28 de-skew registers). It is provably lossless: an 8×8 signed product ∈ [−16384,16384], so any 8-term partial sum fits exactly in 19 signed bits; the 32-bit output is a pure sign extension. Baseline cost dropped 4.62e6 → 3.25e6 with zero behavioural change.
+- `target_delay` is a **no-op** on this design: 100, 500, 650, 2000 ps all yield identical area/delay (824 ps). The critical path (multiplier → 19-bit add) is structural, so don't spend steps sweeping it.
+
+### 3. What didn't work
+- The flat-dot-product rewrite is **attractive on paper** (~1568 flops vs 2560) but the golden trace encodes non-obvious reference quirks. I numerically verified the dot-product formula digit-exact on the identity tile (line 61) and the random tile (line 172) — both matched exactly — yet the *stall / back-to-back boundary* cases (trace line 271, right after a `w_valid` gap in the middle of a stream) disagree. The reference's per-PE stall semantics (`en = ~w_valid` freezing a skewed array) do not reduce to a single uniform 14-cycle row delay once `w_valid` interrupts a stream.
+- `design_csa.sv`'s hand-written carry-select was arithmetically wrong (the two candidate sums weren't correctly muxed), so avoid hand-rolled carry logic here.
+
+### 4. Lessons / next time
+- **Verify the reference against the golden first** (I did this only at step 45) — it confirms the vector semantics before you invert them.
+- The correct flat model almost certainly needs the **row history split by `w_valid` epoch** (i.e. the 14-deep delay must be *reset/tagged* per load, not merely stall), which is what the `design_c/t` lineage was groping toward. That's the highest-value next experiment: keep `design.sv` as the guaranteed-good fallback, and build the flat datapath with an explicit `w_valid`-epoch boundary (e.g. flush the row history on any `ld`) and re-check trace lines 271/389/510.
+- Don't burn steps enumerating latency/depth combinations blindly — extract the expected value for one specific cycle by hand from `vectors.dat` first (that is what eventually identified line 61 = Σ A_i·W[i][j], latency 15).
+
+**Reusable good file:** `design.sv`. **Revert points:** `starting_point.v` (reference, PASS), `design_t.sv` (nearest flat attempt).

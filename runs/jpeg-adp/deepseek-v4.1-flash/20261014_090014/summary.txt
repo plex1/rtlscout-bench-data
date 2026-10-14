@@ -1,0 +1,22 @@
+## Summary
+
+**Final result: PASS, best cost 9.497e+06** — i.e. the optimization did **not** beat the starting point (`starting_point.v`, 9.496e6). The carried-over best design is effectively the baseline behaviour; my variants never converged to full correctness before the step limit.
+
+### 1. Approaches tried
+- `design.sv` / `design2.sv` — a from-scratch reimplementation: a shared `jpeg_idct_1d` pass (parameterized `OUT_SHIFT`, `IN_W`, `IDX_REV`) + a rewritten 4-bank×32-entry transpose.
+- `design3.sv` — kept the original module boundaries (`jpeg_idct_x`/`_transpose`/`_y`) but narrowed operand/memory widths and replaced the `/ 256` signed divide with a shift-based truncation function.
+- `design4.sv` — same as design3 but folded the double-buffer into two separate register files per lane and kept the original IDLE→SETUP→ACTIVE scheduling exactly.
+
+### 2. What actually helped
+Nothing conclusively. The **most promising** line was replacing the reset-less original with `(x>>>8) + (sign & |low8)` for the 1/sqrt(2) scale — that removes a real signed-divider from the critical path — plus narrowing `mul*_q/mul*` from 32→30 bits and the transpose RAM word from 32→21 bits, since the reachable range never needs 32 bits.
+
+### 3. What regressed
+- **Bit-reversed index in the row pass** — my reuse of the original's `ptr_conv` inside `jpeg_idct_x` broke the transpose layout. The transpose's *input* index is the flat stream `k`, not `{k[2:0],k[5:3]}`; that reversal belongs only in the column pass. Fixed, but it cost several steps.
+- **`i0`/`mul_a` width** — `i0` holds `c0±c4` and needs one bit more than the input; declaring it `IN_W` truncated every row pass result (the `ffffa454` vs `ffffa654` errors were exactly this). It must be ≥ `IN_W+1`, and the accumulator/`m*` registers must stay 32-bit.
+- **Dropping `inport_accept_o`** gating in the transpose — backpressure matters even with `outport_ready_i` tied high.
+- **Pre-loading the transpose read address** in IDLE — the original *only* updates `rd_addr` in SETUP/ACTIVE; adding an IDLE pre-load shifted the read by one beat.
+
+### 4. Lessons / what to do differently
+The original's scheduling is extremely fragile and *not* semantically obvious: the write and read address lanes are permuted relative to each other (`wr_ptr={blk,i[3:0]}`, `rd_addr={blk,row,parity}` with `g` swapped), the RAM read is one cycle behind the valid window, and the address advances *within* the active region. My first 25 steps were spent reverse-engineering this by trial and error against the vector file.
+
+Next time: **instrument first.** Add a Verilator `$display` trace of `rd_addr`, `rd_idx` and the RAM outputs against the original (`starting_point.v`) for blocks 0–3, diff the two, and only then change anything. Also, downgrade in *one* dimension at a time — I changed datapath widths, transpose banking, the divider, and index semantics simultaneously, so 11 428 errors could not be attributed to a single cause. The `scale()` shift replacement and the 21-bit transpose word are almost certainly sound and are the two edits worth re-applying on top of a verified copy of the original.

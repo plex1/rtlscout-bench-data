@@ -1,0 +1,28 @@
+## Summary
+
+### Final Result
+- **Best design**: `design.sv` (combinational read address version — last step was a failed experiment)
+- **Best passing cost**: **8,651,532** area_delay_product (achieved at step 3, with the simple version replacing `ptr_conv` LUT with bit-swap)
+- **Baseline (starting_point.v)**: 9,488,638 — so ~8.8% improvement
+
+### What Worked Best
+1. **Replacing the 64-entry `ptr_conv` function in `jpeg_idct_y`** with a simple bit-swap `{ptr_q[2:0], ptr_q[5:3]}` — saved the entire 64-entry case LUT. This was the single most effective optimization (~840K cost reduction, 9.49M→8.65M).
+
+### What Didn't Work / Caused Regressions
+1. **Splitting RAM into 16-entry banks** (32:1 → 16:1+2:1 mux) — Yosys synthesized the ternary mux poorly, increasing delay from 2029→2485ps.
+2. **Splitting 32-bit RAM into two 16-bit RAMs** (8 instances instead of 4) — increased address fanout, making FF QN delay worse (1340→1665ps).
+3. **Pipelining the read address** (extra register stage) — the pipelined FF had even higher fanout, QN delay exploded to 2667ps, making cost 15.6M.
+4. **Narrowing multiplier operands** (16-bit for x pass) — broke correctness when `i0` was truncated to 16 bits; even after fixing, Yosys had already optimized the constant multipliers, so no area savings and delay increased.
+5. **Removing `ram_read0_q`** (unused write-side read register) — changed the RAM mux synthesis, increasing delay from 2032→2610ps.
+6. **Combinational read address from `rd_idx_q`** (last attempt) — the address pattern derivation was incorrect, causing simulation failure (1272/20672 errors).
+
+### Key Lessons
+- The **critical path is structurally fixed**: `rd_addr_q FF (QN) → 32:1 mux → ram_read1_q FF`, with the FF QN delay (~1340ps) dominating due to high fanout driving 4 RAMs × 32 entries × 32 bits.
+- Any change that increases the number of RAM instances or adds pipeline stages makes the **FF fanout worse**, not better.
+- Yosys already heavily optimizes constant multipliers — explicitly narrowing operand widths doesn't help and can hurt.
+- The `ptr_conv` LUT replacement was the only high-impact, low-risk optimization found.
+
+### What I'd Do Differently
+- **Try merging x and y IDCT into a single time-shared module** — the 5 multipliers are the biggest non-RAM area cost, and both passes use identical datapaths. This would require careful scheduling but could save ~50% of multiplier area.
+- **Try a single 64-entry flat RAM** with a different transpose scheme to avoid the complex stride address, potentially simplifying the mux.
+- **Start with the combinational read address approach but verify the pattern more carefully** — it's the most promising path to cutting the critical path, but the address pattern derivation needs rigorous verification.

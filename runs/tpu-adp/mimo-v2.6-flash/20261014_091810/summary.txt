@@ -1,0 +1,29 @@
+## Summary
+
+**Final: `design_csa3nm0.v` — ADP 2,282,088 (area 4147 × delay 550 ps), 6782/6782 golden checks — 50.6% below the 4,624,409 starting point.**
+
+### 1. Approaches tried
+- **Flat redesign first** (`design_flat.v`): collapse the whole mesh into weight bank + A delay line + one adder tree. Failed — and the failure was the most valuable finding of the session.
+- **Faithful systolic, narrowed** (`design_narrow.v`, `design_noreset.v`): kept the anti-diagonal mesh, shrank datapaths to exact widths.
+- **Operand encodings**: Booth digits (`design_booth.v`), sign-magnitude (`design_smag.v`, `design_smagw.v`, `design_booth_smaga.v`), one-hot digits (`design_booth1h.v`), pre-decoded `(neg,mag2,mag1)` digits (`design_csa3nm*.v`).
+- **Accumulator structures**: plain add → 1-, 2-, 3-level carry-save (`design_csabo/csa2/csa3.v`), plus row-0 specialization (`design_csa3nm0.v`).
+- **What worked best**: pre-decoded Booth digits + full 6-operand 3-level CSA fold + specialized row-0 PE.
+
+### 2. Highest-impact optimizations
+1. **Exact-width datapaths** (−32%): sums of ≤8 products of 8×8 signed fit 16–19 bits provably (`pwidth()`), so 32→19-bit accumulators/deskew, sign-extension as pure wiring.
+2. **Booth-encode weights once at the load input** (−10%): encoding lives outside the critical cone, the shift chain carries 12-bit digits, all sign-correction logic leaves the multiply.
+3. **Carry-save accumulators** (−16% total, biggest delay cut 804→554 ps): storing redundant `(c,s)` partial sums removes carry propagation from the mul→ACC cone; folding all six addends (c, s, 4 shifted terms) into 3 parallel CSA levels was the single largest delay win.
+4. **Proven-forced structure kept**: anti-diagonal term timing `u = i+j`, skew/hops/deskew, all `en = ~w_valid` gating — preserving exact mid-drain weight-reload behavior.
+
+### 3. What didn't work / regressions
+- **Flat design** (`design_flat.v`): sim failed + synthesis timeout — golden mixes old/new weights per term across a mid-drain reload; a fully flat end-of-row computation can't reproduce it.
+- **Sign-magnitude encodings** (3.17M), **booth+smag-a** (3.25M), **one-hot digits** (2.84M), **raw weights + CSA** (analyzed): all slower/bigger — ABC maps them worse than expected.
+- **Higher `target_delay`**: monotonic loss (area barely moves, delay grows); infeasible targets gave byte-identical netlists.
+- **4-level/carry-propagate hybrids**: width growth (+1–3 bits/row, compounding to 40-bit components) cancels delay gains; a csa3 slot-width bug (components exceeding the 32-bit slots) broke lint until `SLOTW` was introduced.
+- **Last-minute bugs caught by testing**: encoder mapping digit −2 to `{neg,mag0}` (extreme tile → all zeros); row-0 width-init mismatch in `design_csa3nm0x.v` (fixed, never evaluated). Final micro-variants (unshifted-carry storage, `design_csa3nm0b.v`) landed within ±0.2% — noise.
+
+### 4. Lessons
+- **Read the golden trace before optimizing**: hand-verifying line 271's mixed-weight result redirected the whole campaign from "flat is optimal" to "the mesh is forced."
+- **Measure the cost model**: fitting flop-vs-logic cost from successive evals (f≈0.3, logic-dominated) overturned my initial "flops dominate" assumption and changed which experiments had positive EV.
+- **Synthesis is canonical**: different RTL associations of the same function produced byte-identical netlists — only *function* changes (what's in the registers) matter; don't spend steps on cosmetic rewrites.
+- **Next time**: I'd do the trace forensics and one encoding + one accumulator experiment *first* to calibrate the cost model, then walk the encoding × accumulator grid in order of expected impact, rather than evaluating several near-tied variants sequentially.

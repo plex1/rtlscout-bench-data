@@ -1,0 +1,32 @@
+## Summary
+
+### Best Design
+**`design_csa_pipe2.v`** — CSA accumulation with pipelined CPA in the first deskew stage. Cost: **2.798M** area_delay_product (638.7ps delay, 4380 area), down from 4.647M baseline (45% reduction).
+
+### What Worked Best (in order of impact)
+
+1. **Carry-save accumulation in PEs** (design_csa.v): Replaced the carry-propagate adder in each PE with a 3:2 compressor (XOR for sum, majority for carry). This eliminated the carry chain from the PE critical path. Delay dropped 818→663ps, cost 3.22M→2.91M.
+
+2. **Pipelined CPA at column bottom** (design_csa_pipe2.v): Moved the carry-propagate adder from the combinational output of the array into the first deskew register stage. This gave the CPA a full cycle to settle instead of being in the multiplier+CSA critical path. Delay 663→639ps, cost 2.91M→2.80M.
+
+3. **Narrowed accumulator width** (design_v2.v): Reduced internal accumulator from 32-bit to 19-bit (minimum to hold 8×8-bit signed products). Sign-extended to 32-bit only at output. Cost 4.65M→3.22M.
+
+### What Didn't Work / Regressions
+
+- **Variable-width accumulators per row** (design_v3.v): Made each PE row use a different accumulator width (16-23 bits). The sign-extension between rows added complexity and the synthesis didn't benefit — cost increased to 3.68M vs uniform 19-bit.
+
+- **Non-systolic parallel multiply** (design_v5.v, design_parallel2.v): Attempted 64 parallel multipliers with pipelined add tree. Failed correctness because the input skew means different rows' products arrive at different times, making the parallel add tree timing incompatible. The systolic architecture naturally handles this.
+
+- **16-bit and 18-bit CSA**: Overflow on extreme test vectors (all-max products). 19-bit is the minimum safe width.
+
+- **Merged ps+pc bus** (design_csa_pipe3.v): Routing a single 38-bit bus instead of two 19-bit buses slightly increased area (2.80M→2.80M).
+
+- **target_delay sweep**: Minimal impact — the design hits a structural delay floor (~639ps) regardless of target_delay. Slightly better at 550ps for the earlier CSA design (2.83M vs 2.91M).
+
+### Lessons Learned
+
+- **CSA is the single biggest lever** for systolic MAC arrays — removing carry propagation from the per-PE critical path is transformative.
+- **Pipelining the CPA separately** from the CSA chain further isolates the long carry-propagate path.
+- **The systolic architecture's skew/deskew** is essential for cycle-accurate behavior and cannot be easily replaced with parallel logic.
+- **Minimum accumulator width matters**: 19-bit is exact for 8×8-bit signed sums (max ±131072); shaving even one bit causes overflow.
+- **target_delay is a minor knob** when the RTL structure dominates the critical path.

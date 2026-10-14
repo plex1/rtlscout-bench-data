@@ -1,0 +1,26 @@
+## Summary
+
+**Final result: PASS — `area_delay_product` = 5.71e6** (vs. 9.50e6 for `starting_point.v`, a **40% reduction**). Best design is **`design_v6.sv`**.
+
+### 1. Approaches tried
+- **`design_v1/v2.sv`** — narrowed datapath widths only (multiplier operands 17×13 instead of 32×32, transpose memory 21 bits instead of 32, y-pass `*181` kept at full 35-bit product). Correct but *slower* than the original (10.7M) because the critical path was in the transpose mux, not the arithmetic.
+- **`design_v3/v4/v5.sv`** — transposer read restructured as banked 8:1-mux-then-4:1-mux with an extra pipeline stage. Correct (v5) but the address register's enormous fanout onto the mux made it *worse* (17.8M).
+- **`design_v6.sv` (WINNER)** — the key restructure: transpose read implemented as a **registered one-hot address decode + registered AND-OR select tree** over a 32×21 register file. This isolates the address register from the mux loads and halved the critical path. Combined with narrowed widths and the `*181`/256 replacement.
+
+### 2. Highest-impact optimizations
+1. **One-hot registered transpose read** (`jpeg_idct_transpose_lane` in `design_v6.sv`): 9.50M → 5.98M. Biggest single win; the original 32:1 address→mux path dominated everything.
+2. **Replacing signed `/256` with `(x >>> 8) + (sign & |low_bits)`**: 5.98M → 5.87M — removes the huge divider/multiply-subtract network.
+3. **`*181` as a balanced shift-add tree** (`x<<7 + x<<5 + x<<4 + x<<2 + x`): 5.87M → 5.71M.
+4. Datapath width narrowing (17×13 multipliers, 21-bit transpose/output) — modest area savings, ~4200 vs 4274 cells.
+
+### 3. What didn't work
+- **Multi-stage read pipelining with decoupled valid/idx** (v4/v5/v7) repeatedly broke correctness via off-by-one latency mismatches — the schedules are tightly coupled and every extra stage must be matched in *both* the valid stream and the accumulator timing.
+- **Bit-narrowing below the true range**: the y-pass `block_out` at 21 bits *and* assigning an unsigned wire to a wider signed wire caused zero-extension (not sign-extension) errors. Using `$signed()` and `{{n{x[msb]}}, x}` replication fixed it.
+- **`target_delay` sweeps were useless** — delay stayed ~2200-2500ps regardless, and higher target_delay made ADP worse. RTL structure was the only real lever.
+- `design_v7.sv` (full accumulator re-pipelining) is broken and can be discarded.
+
+### 4. Lessons learned
+- **The delay metric is combinational only** — pipeline latency is genuinely free (400-cycle TB flush). Splitting the transpose mux into a *registered* one-hot decode worked precisely because of this.
+- **Register-array fanout onto mux trees is the real cost** in this no-RAM flow, not the multipliers. Fanout-aware restructuring beats arithmetic optimization.
+- **Bit-exactness is fragile**: the specification's "32-bit signed wrap-around" means you must keep full intermediate widths at each *defined* boundary, and only narrow where the true range provably fits. I would next verify equivalence incrementally with a small directed test rather than only the full vector run, given how many steps were lost to off-by-one and sign-extension bugs.
+- What I'd do differently: build the one-hot transpose read *first*, before touching widths, since it accounted for ~2/3 of the total gain.

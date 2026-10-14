@@ -1,0 +1,24 @@
+## Summary
+
+### Best Result
+`design_v3.v` with `target_delay=3000`: **8,950,623** area_delay_product (down from starting point's 9,496,575). The last edit to `design_v3.v` broke correctness (attempted direct address computation), so the actual best passing version is `design_v3.v` before that edit (the version evaluated at step 44, reverted at step 55).
+
+### What Worked
+1. **`ptr_conv` → bit-swap**: The `jpeg_idct_y` module had a 64-entry case-statement function that was just `{ptr_q[2:0], ptr_q[5:3]}`. Replacing with the direct expression saved area and delay.
+2. **Inlining transpose RAM**: Removing the `jpeg_idct_transpose_ram` submodule wrapper and coding the 4 RAM arrays directly simplified the hierarchy.
+3. **`target_delay=3000`**: Marginal area reduction (4270→4261) with no delay change.
+
+### What Didn't Work (Regressions)
+1. **Removing `mul_q→mul` pipeline stage** (v2, v5): Broke timing alignment — the valid_q depth and transpose/y-pass pipeline stages are tightly coupled. Outputs shifted by 1 cycle, causing mismatches.
+2. **Splitting 32-entry RAMs into 16-entry halves** (v2): The 16:1 mux + 2:1 select was *worse* than a flat 32:1 mux (delay increased from 2100→2426ps).
+3. **Pre-registering read address** (v7): Added a pipeline register that drove all 4 RAMs, increasing fan-out and DFF delay to 2664ps (total delay 3680ps). Much worse.
+4. **Separate per-RAM address registers** (step 50): Same fan-out problem; the duplicated register had even higher load.
+5. **Direct address computation from `rd_idx_q`** (steps 57-59): Formula was incorrect and ran out of steps to debug.
+
+### Key Insight
+The critical path was always `rd_addr_q (DFF QN, ~1400ps) → 32:1 RAM mux → ram_read_q (DFF)`. The DFF QN delay was high due to driving 128 mux inputs across 4 RAMs. Every attempt to break this path (pipeline registers, fan-out reduction) made things worse because the new register had equal or higher fan-out. The synthesis tool produced an essentially fixed netlist regardless of `target_delay`.
+
+### What I'd Do Differently
+1. **Restructure the transpose fundamentally**: Use 8 banks of 8 entries (8:1 mux) instead of 4 banks of 32 (32:1 mux), halving mux depth. This requires understanding the exact write/read address mapping.
+2. **Merge transpose into y-pass**: Have the y-pass read the x-pass output buffer directly in transposed order, eliminating the separate transpose stage entirely.
+3. **Fix the direct address computation**: The approach of computing `rd_addr_q` from `rd_idx_q` directly (eliminating sequential dependency) is promising but needs careful tracing of the read/write address mapping.

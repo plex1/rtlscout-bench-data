@@ -1,0 +1,31 @@
+## Summary
+
+### What Worked Best
+
+The best design is **`design_v12.v`** (also saved as `design.sv`), achieving cost **3,027,016** (down from the baseline 4,624,409 — a 35% improvement). Key optimizations, in order of impact:
+
+1. **Carry-Save Accumulation (CSA) in PE** — biggest single win (3,177,840 → 3,027,016). Replaced the 19-bit ripple-carry add `psum_north + prod_ext` with a 3:2 compressor (`cs = a ^ b ^ c`, `cc = (a&b)|(a&c)|(b&c)`), with the carry shifted left and propagated to the next PE. Final carry-propagate add only at the column bottom. This cut critical-path delay from ~803ps to ~688ps because CSA logic is much shallower than a ripple adder.
+
+2. **Narrow Accumulator (32→19 bits)** — second biggest win (4,624,409 → 3,213,387 for non-CSA, 3,177,840 with async reset). Products are ±16384 (16-bit), and 8 of them sum to ±131072, needing only 19 bits signed. Narrowed both the PE psum registers and deskew shift registers, then sign-extended to 32 bits at the output. Also tried 18-bit (overflowed) and 20-bit (slightly worse).
+
+3. **Async Reset** — small but consistent improvement (3,213,387 → 3,177,840 for the non-CSA version). Changed `posedge clk` to `posedge clk or posedge rst`, which mapped to different (smaller) flip-flop types.
+
+4. **Target delay sweep** — 600ps gave the best cost for the CSA design (3,027,016 vs 3,069,081 at 500ps).
+
+### What Didn't Work / Caused Regressions
+
+- **Baugh-Wooley unsigned multiply + sign correction** — much worse (3,947,385). The extra correction logic added area and delay; Yosys's built-in `$signed(a*w)` multiplier is better optimized.
+- **Split multiply (two 4×8 partial products)** — much worse (4,375,492). Similar reasons.
+- **32-bit sign-extended multiply** — worse area (4,769 vs 4,624 baseline) because Yosys couldn't exploit the narrow product.
+- **Narrow carry register (18 bits)** — correctness failure or slight regression. Dropping carry MSB lost information; the area saving (64 FFs) didn't offset the delay impact.
+- **Moving final add past deskew (separate sum/carry deskew)** — worse (3,310,103). Extra deskew registers for the carry vector cost more than they saved.
+- **`$signed()` annotations on CSA operations** — slightly worse; the synthesizer already handled unsigned bit operations optimally.
+- **Synchronous reset** — slightly worse than async (3,105,844 vs 3,027,016).
+
+### Lessons Learned
+
+1. **Carry-save accumulation is the key lever for systolic MAC chains** — the per-PE ripple adder was the critical-path bottleneck, and replacing it with a 3:2 compressor (depth-1 XOR + majority gate per bit) dramatically cut delay at a modest area cost.
+2. **Narrowing datapaths to their true required width is extremely effective** — going from 32 to 19 bits saved area in both flip-flops and combinational logic, and reduced adder depth.
+3. **Let Yosys handle signed multiply** — manual decomposition (Booth, Baugh-Wooley, split partial products) consistently produced worse results than the native `$signed(a)*$signed(w)`.
+4. **Target delay is a minor knob** — the RTL structure (CSA vs ripple, accumulator width) was the real lever, with target_delay providing ~3% secondary tuning.
+5. **Always verify correctness after width changes** — 18-bit accumulator passed simulation briefly but overflowed on edge cases with large intermediate partial sums.

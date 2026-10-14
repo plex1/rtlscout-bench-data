@@ -1,0 +1,25 @@
+## Summary
+
+### 1. Approaches Tried
+- **Starting point** (`design.v`): Plain implementation with sequential exponent logic, cost 145429.
+- **Tree-based LZ counter** (`design_opt1.v`): Custom priority encoder for leading-zero count — worse (150616) and initially buggy.
+- **casez priority encoder** (`design_opt2.v`): Violated lint rules (no X/Z literals allowed).
+- **Barrel-shift guard/sticky** (`design_opt3.v`, `design_opt10.v`): Replace `bit_at` function with barrel shifter — slightly worse (147543, 144577).
+- **Parallel exponent comparison** (`design_opt5.v`): Pre-compute overflow/underflow for carry=0 and carry=1, select after — improvement to 142648.
+- **Simplified output mux** (`design_best.v`): Restructured priority mux in packing stage — best result **137220**.
+
+### 2. Most Impactful Optimizations
+- **Parallel exponent comparison** (carry=0/1 pre-computed, ~2.8% improvement): Moves the carry bit off the critical path of the exponent comparison logic.
+- **Simplified output mux** (~3.7% additional improvement): Combining `is_nan | is_inf` (both give exp=31) and `is_inf | is_zero` (both give frac=0) reduced mux depth from 4-level priority to 3-level with shared conditions.
+
+### 3. What Didn't Work
+- **Tree-based LZ counters**: Synthesized worse than the simple for-loop priority encoder, and were error-prone.
+- **Barrel-shift guard/sticky extraction**: Surprisingly synthesized to more area/delay than the `bit_at` function with variable indexing.
+- **Target delay sweeping**: Default 500ps was optimal; higher values increased delay more than they reduced area.
+- Adding `~overflow` to `is_sub` condition: Added cost without benefit.
+
+### 4. Lessons Learned
+- The `bit_at` function with variable index synthesizes surprisingly well (Yosys maps it efficiently).
+- Output mux structure matters significantly — reducing priority levels has measurable PPA impact.
+- Parallel pre-computation of carry-dependent values (dual-path for carry=0/1) is a reliable optimization technique.
+- Would try next: unified normal/subnormal rounding path, and exploring whether the 22-bit `below` OR-chain can be replaced with a tree structure to reduce area.

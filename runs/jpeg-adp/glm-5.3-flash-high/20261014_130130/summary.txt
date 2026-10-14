@@ -1,0 +1,26 @@
+## Summary
+
+**Final result:** `design7.v` — PASS, cost **3.87M** area_delay_product (baseline starting point: 9.50M, ~2.45× better).
+
+### 1. Approaches tried
+- **Baseline** (`design.v` = verbatim starting point): cost 9.50M (area 4274, delay 2222ps; critical path = transpose RAM read mux).
+- **Width reduction + RTL restructuring** (`design2`/`design3`): narrowed multipliers (17×13 / 22×13), 21-bit transpose datapath, removed a redundant pipeline stage, replaced the `ptr_conv` LUT mux with `{ptr[2:0], ptr[5:3]}`. Area improved, delay still dominated by the 32:1 RAM read mux.
+- **Banked corner turn** (`design4`, big win): derived the exact transpose read schedule algebraically — the y-pass at row r, beat j consumes x-output `x[r + 8·(2m+o)]` with `o = j[0]^j[2]` — and replaced four 32×32 dual-port RAMs with 8 banks of 16 entries plus a per-row wide latch. Read path became pure 2:1 muxes. Cost dropped to 4.69M.
+- **2-stage carry-save multipliers + 2-cycle *181/256** (`design6`, `design7`, final): biased-operand constant multipliers (AND rows → CSA tree → registered (sum,carry) → one wrap add), and the scale-by-181/truncate-division split across two schedule beats with the truncation increment folded into the final adder. Cost 4.26M → 3.87M.
+
+### 2. Highest-impact optimizations
+1. **Eliminating the 32:1 RAM read decode** via the algebraic read-schedule derivation (9.5M → 4.7M path). The delay win came from moving the read off the critical path entirely.
+2. **Width shrinking** (20-bit x-pass outputs proven from bound |t| < 2³⁰; 20-bit transpose words) — area.
+3. **Delay-splitting the multiply and *181/256 chains** using spare schedule beats — delay 992→896ps.
+4. Mod-2³² arithmetic tricks (biased operand, two's-complement correction row) that keep everything bit-exact against the original 32-bit wrap semantics.
+
+### 3. What didn't work / regressions
+- **Pipelined 6+6 and 8+5 split multipliers** (`design5` variants): delay didn't improve (~1120–1145ps) because each stage still contained a full 32-bit carry-propagate adder; slightly worse than design4.
+- **A 16-entry flat "RAM" aliasing trick** broke double-buffering (address aliasing mod 16) — correctness failure.
+- Two subtle bit-exactness bugs cost several eval cycles: a **doubled carry weight** in the CSA final add, and a **dropped row (s3) in the scale-181 tree**. Also a `[31:12]` vs `[31:11]` part-select slip. Every such bug produced confusing partial-failure patterns; one netlist-vs-RTL discrepancy was traced to a parameter-width part-select (`sum_w[31:0]` with sum_w only 30 bits → x-fill in RTL, zero-pad in Yosys) — always form sums in a fixed-width frame before part-selecting.
+
+### 4. Lessons learned
+- **Algebraically deriving what a block consumes** (instead of preserving its RAM structure) removes entire mux/decode trees — the single biggest lever in a no-RAM-macro flow.
+- **Arithmetic mod 2³² is a license to restructure**: CSA trees, biased operands, and correction rows all replicate wrap semantics exactly, but every step must be re-derived carefully — small sign/weight slips are silent in RTL sim until checked against golden vectors.
+- Build **isolated unit testbenches** for new arithmetic blocks before integrating; the harness compiles all workspace files, so keep scratch TBs inert (I learned to gut them to comments).
+- Don't trust that pipelining helps if each new stage still ends in a CPA — split at the carry-save boundary, not after it.

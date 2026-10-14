@@ -1,0 +1,3564 @@
+================================================================================
+BENCHMARK : jpeg_idct_2d_verilog
+MODEL     : xiaomi/mimo-v2.6-flash
+METRIC    : area_delay_product
+RESULT    : PASS  |  best cost: 4.454e+06 area_delay_product  (eval 6)
+STEPS: 60  |  duration: 5393.43s
+================================================================================
+
+[SYSTEM]
+You are an RTL (Register Transfer Level) design agent. Your task is to create a Verilog/SystemVerilog design that satisfies the given specification, is functionally correct, and has minimal cost (area_delay_product).
+
+**Cost metric `area_delay_product`:** area × achieved critical-path delay — the classic area-delay product. Does NOT include simulation cycle count (contrast with the 'area_runtime_product' metric). Cost is measured on your design alone. The testbench and everything it owns (checking logic, the external memories, etc.) is not synthesized and contributes nothing to area, delay, power, or energy.
+
+## Specification
+Full 8x8 2-D IDCT of a baseline JPEG decoder (ultraembedded/core_jpeg), module
+name `jpeg_idct_2d`: the row pass (jpeg_idct_x, OUT_SHIFT=11), a double-buffered
+corner-turn (jpeg_idct_transpose with four 32x32 dual-port RAMs), and the column
+pass (jpeg_idct_y, OUT_SHIFT=15), composed exactly as in the original decoder
+(downstream ready tied high; the row pass accepts no backpressure). Each 1-D
+pass is the factorized (AAN-style) algorithm with cosine constants scaled by
+4096 (C1..C7 = 4017, 3784, 3406, 2896, 2276, 1567, 799), time-sharing 5
+multipliers over an 8-beat schedule. ALL arithmetic is evaluated in 32-bit
+signed context with wrap-around; outputs of each pass are arithmetic-shifted
+right (11 then 15); the 1/sqrt(2) odd-part scaling is `(x * 181) / 256` where
+`*` wraps at 32 bits and `/` is SIGNED division truncating toward zero. This
+exact fixed-point behavior is what the golden vectors encode.
+
+Interface (clocked, sync active-high reset `rst`; no backpressure):
+  inputs : clk, rst, img_start_i (1-cycle pulse resets the output streamers),
+           img_end_i (unused), inport_valid_i, inport_idx_i[2:0],
+           inport_data0..3_i[15:0]
+  outputs: outport_valid_o, outport_data_o[31:0], outport_idx_o[5:0]
+
+Input protocol (the upstream block serializer's FIXED schedule, reproduced
+exactly by the testbench): per row of 8 coefficients c0..c7 (16-bit signed),
+8 back-to-back valid beats with idx = 0..7; the four data lanes carry the EVEN
+set (c0,c2,c4,c6) on beats idx in {0,2,5,7} and the ODD set (c1,c3,c5,c7) on
+beats idx in {1,3,4,6}. 8 rows back-to-back form a 64-beat block; between
+blocks there are >= 2 idle cycles (valid=0, idx=0, data=0). Pipeline registers
+advance every clock regardless of valid — designs must be robust to the gap
+pattern exactly as the original is.
+
+Output (fixed schedule): 64 values per block streamed on outport_valid_o; the
+k-th streamed value of a block carries outport_idx_o = {k[2:0], k[5:3]} (the
+column pass emits column-major; the idx label gives the ROW-MAJOR pixel
+position) and must match the expected output at that position. The stream of a
+block overlaps the next block's input beats (the transpose double-buffers one
+full block).
+
+A working starting point is provided: `starting_point.v` contains the
+ORIGINAL core_jpeg modules (Apache 2.0), unmodified, under a thin composition
+top. It passes all golden vectors (they were generated from it — the original
+RTL is the correctness oracle). Study it, then optimize while preserving its
+exact behavior. Sibling benchmark: `jpeg_idct_2d_spire` (identical tb.sv +
+vectors.dat, bit-exact SpireHDL starting point). The 1-D row pass alone is
+also available as the `jpeg_idct_x_*` benchmarks.
+
+NOTE on memories: the cost-evaluation synthesis flow targets a standard-cell
+library with no RAM macros, so every behavioral memory in this design (the
+transpose buffers, block_out, etc.) is inferred as a register array plus mux
+decode REGARDLESS of coding style. Optimizing that decode/mux logic is fair
+game; instantiating a hard RAM macro is not possible in this flow.
+
+## Tools
+- create_file: Create a new file in your working directory
+- replace_file: Replace the entire contents of an existing file
+- apply_diff: Apply a unified diff to modify a file
+- edit_file: Edit a file by replacing an exact string match with new content. Provide old_string (must match exactly once) and new_string.
+- ls: List files in your working directory
+- read_file: Read the contents of a file
+- run_evaluation(filename[, target_delay]): Run evaluation on the given design file. Returns correctness (Verilator simulation) + cost (Yosys area_delay_product). The filename must be your main design file (e.g. 'design.sv'). Optionally pass target_delay (ps) to override the synthesis timing constraint.
+
+## Strategy
+1. Lay out an action plan. Try to cover a diverse set of approaches in your plan to increase the chances of finding a good solution within the step limit. Also once you find a new best solution, explore close solutions. Trade off exploration with exploitation.
+2. First, create a simple, straightforward design that is functionally correct. Focus on getting 100% correctness first.
+3. Run evaluation to confirm correctness and get the initial cost (area_delay_product).
+4. ONLY after achieving 100% correctness, try to optimize the design to reduce the area_delay_product.
+5. After each optimization, run evaluation to verify correctness is maintained and check the new cost.
+6. If an optimization breaks correctness, revert and try a different approach.
+7. Keep iterating until you run out of steps — use every step to try improvements. The run ends automatically at the step limit; your best passing design is kept.
+
+In general, be creative and take risk. At least after you have a correct design, try bold optimizations to reduce area_delay_product, even if they might break correctness. You can always revert if it doesn't work.
+The best results you obtain which is 100% correctness counts.
+Try to beat at least the straightforward implementation.
+
+Running evaluation is crucial after every change to ensure correctness and track cost. Do not skip evaluations.
+
+You may do some 'thinking' alongside with your tool calling responses to explain your reasoning, but always remember to call a tool in every response.
+
+## Important
+- Always call a tool in every response.
+- You have a maximum of **60 steps** (LLM turns). Budget them wisely: get a correct design first, then optimise. You may batch tool calls in one response --- at most 8, and only one `run_evaluation`.
+- The best result is the one with lowest cost among designs that pass 100% of testbench checks.
+- Use different filenames for different design variants so you can retrieve them later.
+- If context files (e.g. component source files) are in your workspace, you can modify them directly using edit_file or replace_file to optimize the design. Make targeted, incremental changes rather than rewriting files from scratch — small edits are less likely to introduce bugs.
+- Write clean, synthesizable RTL code.
+- You can pass `target_delay` (ps) to `run_evaluation` to try different synthesis timing constraints; experimenting with this may improve PPA results (lower target delay may reduce delay, higher target delay may reduce area/transistor count). target_delay must be > 0.
+- Do not spend too many steps sweeping `target_delay` — basically if you want to minimize delay choose a low value,if you want to minimize area/transistor count choose a high value. That's it.A few targeted experiments are more productive than an exhaustive sweep.
+
+## Delay Optimization Tips
+- `target_delay` trades area against delay (a lower value pressures toward faster logic, a higher value lets Yosys re-map to smaller cells). Do not overly iterate on different target delays; often the RTL structure is the real lever, target_delay is only a minor secondary knob.
+- After getting a correct design, try different accumulation orderings (sequential vs. tree) and compare results — Yosys synthesis can produce noticeably different delays (~10 ps) from structurally similar descriptions.
+- For designs dominated by a multiply-accumulate chain, the critical path is the multiplier followed by the adder tree. Reducing the adder depth or splitting into parallel partial sums can help.
+
+## Reference Implementations
+The following are reference implementations for inspiration. Study them for patterns and techniques, but do not copy them directly — adapt ideas to your specific design.
+
+### Parallel-prefix adder (ripple-carry / carry-lookahead) (Add.sv)
+```systemverilog
+// Copyright 2024 ETH Zurich and University of Bologna.
+// Solderpad Hardware License, Version 0.51, see LICENSE for details.
+// SPDX-License-Identifier: SHL-0.51
+//
+// Based on the work by Reto Zimmermann 1998 - ETH Zürich
+// Originally written in VHDL, available under: 
+// https://iis-people.ee.ethz.ch/~zimmi/arith_lib.html#library
+//
+// Authors:
+// - Thomas Benz <tbenz@iis.ee.ethz.ch>
+// - Philippe Sauter <phsauter@iis.ee.ethz.ch>
+// - Paul Scheffler <paulsc@iis.ee.ethz.ch>
+//
+// Description :
+// Binary adder using ripple-carry or parallel-prefix carry-lookahead logic.
+// S = A+B
+
+module Add #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] A,  // operands
+	input  logic [width-1:0] B,
+	output logic [width-1:0] S   // sum
+);
+
+	// Function: Binary adder using parallel-prefix carry-lookahead logic.
+
+	logic [width-1:0] GI, PI;  // prefix gen./prop. in
+	logic [width-1:0] GO, PO;  // prefix gen./prop. out
+	logic [width-1:0] PT;  // adder propagate temp
+
+	// Internal signals for unsigned operands
+	logic [width-1:0] Auns, Buns, Suns;
+
+	// default ripple-carry adder as slow implementation
+	if (speed == lau_pkg::SLOW) begin
+		// type conversion: std_logic_vector -> unsigned
+		assign Auns = A;
+		assign Buns = B;
+
+		// addition
+		assign Suns = Auns + Buns;
+
+		// type conversion: unsigned -> std_logic_vector
+		assign S = Suns;
+	end else begin
+		// parallel-prefix adders as medium and fast implementations
+
+		// calculate prefix input generate/propagate signals
+		assign GI = A & B;
+		assign PI = A | B;
+		// calculate adder propagate signals (PT = A xor B)
+		assign PT = ~GI & PI;
+
+		// calculate prefix output generate/propagate signals
+		PrefixAndOr #(
+			.width(width),
+			.speed(speed)
+		) prefix (
+			.GI(GI),
+			.PI(PI),
+			.GO(GO),
+			.PO(PO)
+		);
+
+		// calculate sum bits
+		assign S = PT ^ {GO[width-2:0], 1'b0};
+	end
+endmodule
+
+
+
+module behavioural_Add #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] A,  // operands
+	input  logic [width-1:0] B,
+	output logic [width-1:0] S   // sum
+);
+	assign S = A + B;
+endmodule
+```
+
+### Prefix AND-OR structures (Sklansky, Brent-Kung, serial) (PrefixAndOr.sv)
+```systemverilog
+// Copyright 2024 ETH Zurich and University of Bologna.
+// Solderpad Hardware License, Version 0.51, see LICENSE for details.
+// SPDX-License-Identifier: SHL-0.51
+//
+// Based on the work by Reto Zimmermann 1998 - ETH Zürich
+// Originally written in VHDL, available under: 
+// https://iis-people.ee.ethz.ch/~zimmi/arith_lib.html#library
+//
+// Authors:
+// - Thomas Benz <tbenz@iis.ee.ethz.ch>
+// - Philippe Sauter <phsauter@iis.ee.ethz.ch>
+// - Paul Scheffler <paulsc@iis.ee.ethz.ch>
+//
+// Description :
+// Prefix structures of different depth (i.e. speed) for carry calculation
+// in binary adders. Compute in m levels new generate/propagate signal pairs
+// for always larger groups of bits. Generate signals of the last level correspond
+// to carries in binary addition. Basic logic operations: AND-OR for generate
+// signals, AND for propagate signals.
+
+module PrefixAndOr #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] GI,  // gen./prop. in
+	input  logic [width-1:0] PI,  // gen./prop. in
+	output logic [width-1:0] GO,  // gen./prop. out
+	output logic [width-1:0] PO   // gen./prop. out
+);
+
+	// Constants
+	localparam int n = width;  // prefix structure width
+	localparam int m = $clog2(width);  // prefix structure depth
+
+	// Sklansky parallel-prefix carry-lookahead structure
+	if (speed == lau_pkg::FAST) begin : fastPrefix
+		logic [(m+1)*n-1:0] GT, PT;  // gen./prop. temp
+			assign GT[n-1:0] = GI;
+			assign PT[n-1:0] = PI;
+			for (genvar l = 1; l <= m; l++) begin : levels
+				for (genvar k = 0; k < 2 ** (m - l); k++) begin : groups
+					for (genvar i = 0; i < 2 ** (l - 1); i++) begin : bits
+						// pass prop and gen to following nodes
+						if ((k * 2 ** l + i) < n) begin : white
+							assign GT[l*n+k*2**l+i] = GT[(l-1)*n+k*2**l+i];
+							assign PT[l*n+k*2**l+i] = PT[(l-1)*n+k*2**l+i];
+						end
+						// calculate new propagate and generate
+						if ((k * 2 ** l + 2 ** (l - 1) + i) < n) begin : black
+							assign GT[l*n + k*2**l + 2**(l-1) + i] = 
+												GT[(l-1)*n + k*2**l + 2**(l-1) + i]
+											  | (  PT[(l-1)*n + k*2**l + 2**(l-1) + i]
+												 & GT[(l-1)*n + k*2**l + 2**(l-1) - 1] );
+							assign PT[l*n + k*2**l + 2**(l-1) + i] = 
+													PT[(l-1)*n + k*2**l + 2**(l-1) + i]
+												  & PT[(l-1)*n + k*2**l + 2**(l-1) - 1];
+						end
+					end
+				end
+			end
+			assign GO = GT[(m+1)*n-1 : m*n];
+			assign PO = PT[(m+1)*n-1 : m*n];
+	end
+
+	// Brent-Kung parallel-prefix carry-lookahead structure
+	if (speed == lau_pkg::MEDIUM) begin : mediumPrefix
+		logic [(2*m)*n -1:0] GT, PT;  // gen./prop. temp
+		assign GT[n-1:0] = GI;
+		assign PT[n-1:0] = PI;
+
+		for (genvar l = 1; l <= m; l++) begin : levels1
+			for (genvar k = 0; k < 2**(m-l); k++) begin : groups
+				for (genvar i = 0; i < 2**l -1; i++) begin : bits
+					if ((k* 2**l +i) < n) begin : white
+						assign GT[l*n + k* 2**l +i] = GT[(l-1)*n + k* 2**l +i];
+						assign PT[l*n + k* 2**l +i] = PT[(l-1)*n + k* 2**l +i];
+					end // white
+				end // bits
+				if ((k* 2**l + 2**l -1) < n) begin : black
+					assign GT[l*n + k* 2**l + 2**l -1] =
+								GT[(l-1)*n + k* 2**l + 2**l - 1] |
+							  | (  PT[(l-1)*n + k* 2**l + 2**l     -1] 
+							     & GT[(l-1)*n + k* 2**l + 2**(l-1) -1]);
+					assign PT[l*n + k* 2**l + 2**l -1] =
+								PT[(l-1)*n + k*2**l + 2**l     -1] 
+							  & PT[(l-1)*n + k*2**l + 2**(l-1) -1];
+				end // black
+			end
+		end // level1
+		for (genvar l = m +1; l < 2*m; l++) begin : levels2
+			for (genvar i = 0; i < 2**(2*m -l); i++) begin : bits
+				if (i < n) begin : white
+					assign GT[l*n +i] = GT[(l-1)*n +i];
+					assign PT[l*n +i] = PT[(l-1)*n +i];
+				end // white
+			end // bits
+			for (genvar k = 1; k < 2**(l-m); k++) begin : groups
+				if (l < 2*m -1) begin : empty
+					for (genvar i = 0; i < 2**(2*m -l -1) -1; i++) begin : bits
+						if ((k* 2**(2*m -l) +i) < n) begin : white
+							assign GT[l*n + k* 2**(2*m -l) +i] = GT[(l-1)*n + k* 2**(2*m -l) +i];
+							assign PT[l*n + k* 2**(2*m -l) +i] = PT[(l-1)*n + k* 2**(2*m -l) +i];
+						end // white
+					end
+				end // empty
+				if ((k* 2**(2*m -l) + 2**(2*m -l -1) -1) < n) begin : black
+					assign GT[l*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1] = 
+								GT[(l-1)*n + k* 2**(2*m-l) + 2**(2*m -l-1) -1]
+							  | (  PT[(l-1)*n + k* 2**(2*m-l) + 2**(2*m-l-1) -1] 
+								 & GT[(l-1)*n + k* 2**(2*m-l) -1] );
+					assign PT[l*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1] = 
+								PT[(l-1)*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1]
+							  & PT[(l-1)*n + k* 2**(2*m -l) -1];
+				end // black
+				for (genvar i = 2**(2*m -l-1); i < 2**(2*m -l); i++) begin : bits
+					if ((k* 2**(2*m -l) +i) < n) begin : white
+						assign GT[l*n + k* 2**(2*m -l) +i] = GT[(l-1)*n + k* 2**(2*m -l) +i];
+						assign PT[l*n + k* 2**(2*m -l) +i] = PT[(l-1)*n + k* 2**(2*m -l) +i];
+					end // white
+				end
+			end
+		end // level2
+		assign GO = GT[2*m*n -1 : (2*m -1) * n];
+		assign PO = PT[2*m*n -1 : (2*m -1) * n];
+	end  // Serial-prefix carry-lookahead structure
+	else if (speed == lau_pkg::SLOW) begin : slowPrefix
+		logic [n-1:0] GT, PT;  // gen./prop. temp
+		assign GT[0] = GI[0];
+		assign PT[0] = PI[0];
+		
+		for (genvar i = 1; i < n; i++) begin : bits
+			assign GT[i] = GI[i] | (PI[i] & GT[i-1]);
+			assign PT[i] = PI[i] & PT[i-1];
+		end
+		assign GO = GT;
+		assign PO = PT;
+	end
+
+endmodule
+
+```
+
+
+[USER]
+Please create the design according to the specification. Start with a simple correct implementation, evaluate it, then optimize.
+
+[ASSISTANT]
+  -> ls()
+
+[TOOL RESULT]
+[Step 1/60]
+Files:
+starting_point.v
+tb.sv
+vectors.dat
+
+[ASSISTANT]
+  -> read_file(filename='starting_point.v')
+  -> read_file(filename='tb.sv')
+
+[TOOL RESULT]
+[Step 2/60]
+//-----------------------------------------------------------------
+// jpeg_idct_2d — full 8x8 2-D IDCT of the baseline JPEG decoder
+// (ultraembedded/core_jpeg, Apache 2.0): the verbatim composition of
+// jpeg_idct_x -> jpeg_idct_transpose (double-buffered corner-turn RAMs)
+// -> jpeg_idct_y, exactly as instantiated in the original jpeg_idct.v
+// (downstream ready tied high; the x-pass accepts no backpressure).
+// The submodules below are the ORIGINAL core_jpeg sources, unmodified.
+//-----------------------------------------------------------------
+module jpeg_idct_2d
+(
+     input           clk
+    ,input           rst
+    ,input           img_start_i
+    ,input           img_end_i
+    ,input           inport_valid_i
+    ,input  [ 15:0]  inport_data0_i
+    ,input  [ 15:0]  inport_data1_i
+    ,input  [ 15:0]  inport_data2_i
+    ,input  [ 15:0]  inport_data3_i
+    ,input  [  2:0]  inport_idx_i
+    ,output          outport_valid_o
+    ,output [ 31:0]  outport_data_o
+    ,output [  5:0]  outport_idx_o
+);
+
+wire          idct_x_valid_w;
+wire [ 31:0]  idct_x_data_w;
+wire [  5:0]  idct_x_idx_w;
+wire          idct_x_accept_w;
+
+jpeg_idct_x
+u_idct_x
+(
+     .clk(clk)
+    ,.rst(rst)
+    ,.img_start_i(img_start_i)
+    ,.img_end_i(img_end_i)
+    ,.inport_valid_i(inport_valid_i)
+    ,.inport_data0_i(inport_data0_i)
+    ,.inport_data1_i(inport_data1_i)
+    ,.inport_data2_i(inport_data2_i)
+    ,.inport_data3_i(inport_data3_i)
+    ,.inport_idx_i(inport_idx_i)
+    ,.outport_valid_o(idct_x_valid_w)
+    ,.outport_data_o(idct_x_data_w)
+    ,.outport_idx_o(idct_x_idx_w)
+);
+
+wire          transpose_valid_w;
+wire [ 31:0]  transpose_data0_w;
+wire [ 31:0]  transpose_data1_w;
+wire [ 31:0]  transpose_data2_w;
+wire [ 31:0]  transpose_data3_w;
+wire [  2:0]  transpose_idx_w;
+wire          transpose_ready_w = 1'b1;
+
+jpeg_idct_transpose
+u_transpose
+(
+     .clk(clk)
+    ,.rst(rst)
+    ,.img_start_i(img_start_i)
+    ,.img_end_i(img_end_i)
+    ,.inport_valid_i(idct_x_valid_w)
+    ,.inport_data_i(idct_x_data_w)
+    ,.inport_idx_i(idct_x_idx_w)
+    ,.inport_accept_o(idct_x_accept_w)
+    ,.outport_valid_o(transpose_valid_w)
+    ,.outport_data0_o(transpose_data0_w)
+    ,.outport_data1_o(transpose_data1_w)
+    ,.outport_data2_o(transpose_data2_w)
+    ,.outport_data3_o(transpose_data3_w)
+    ,.outport_idx_o(transpose_idx_w)
+    ,.outport_ready_i(transpose_ready_w)
+);
+
+jpeg_idct_y
+u_idct_y
+(
+     .clk(clk)
+    ,.rst(rst)
+    ,.img_start_i(img_start_i)
+    ,.img_end_i(img_end_i)
+    ,.inport_valid_i(transpose_valid_w)
+    ,.inport_data0_i(transpose_data0_w)
+    ,.inport_data1_i(transpose_data1_w)
+    ,.inport_data2_i(transpose_data2_w)
+    ,.inport_data3_i(transpose_data3_w)
+    ,.inport_idx_i(transpose_idx_w)
+    ,.outport_valid_o(outport_valid_o)
+    ,.outport_data_o(outport_data_o)
+    ,.outport_idx_o(outport_idx_o)
+);
+
+endmodule
+//-----------------------------------------------------------------
+//                      Baseline JPEG Decoder
+//                             V0.1
+//                       Ultra-Embedded.com
+//                        Copyright 2020
+//
+//                   admin@ultra-embedded.com
+//-----------------------------------------------------------------
+//                      License: Apache 2.0
+// This IP can be freely used in commercial projects, however you may
+// want access to unreleased materials such as verification environments,
+// or test vectors, as well as changes to the IP for integration purposes.
+// If this is the case, contact the above address.
+// I am interested to hear how and where this IP is used, so please get
+// in touch!
+//-----------------------------------------------------------------
+// Copyright 2020 Ultra-Embedded.com
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//-----------------------------------------------------------------
+
+module jpeg_idct_x
+//-----------------------------------------------------------------
+// Params
+//-----------------------------------------------------------------
+#(
+     parameter OUT_SHIFT        = 11
+    ,parameter INPUT_WIDTH      = 16
+)
+//-----------------------------------------------------------------
+// Ports
+//-----------------------------------------------------------------
+(
+    // Inputs
+     input           clk
+    ,input           rst
+    ,input           img_start_i
+    ,input           img_end_i
+    ,input           inport_valid_i
+    ,input  [ 15:0]  inport_data0_i
+    ,input  [ 15:0]  inport_data1_i
+    ,input  [ 15:0]  inport_data2_i
+
+... (showing lines 1-147 of 1381; use offset/limit for more)
+
+[TOOL RESULT]
+[Step 2/60]
+// Self-checking testbench for jpeg_idct_2d — the full 8x8 2-D IDCT
+// (x-pass -> transpose -> y-pass) of ultraembedded/core_jpeg.
+// Reads vectors.dat: one line per 8x8 block = 64 input coefficients (16-bit
+// signed, 4 hex digits, row-major c[row][col]) followed by 64 expected outputs
+// (32-bit, 8 hex digits, in ROW-MAJOR pixel order — outputs are matched via
+// outport_idx_o, which labels each streamed value with its row-major position).
+//
+// Drive protocol: identical to the jpeg_idct_x benchmark (the upstream block
+// serializer's fixed schedule): per row 8 back-to-back valid beats idx=0..7,
+// EVEN coefficient set (c0,c2,c4,c6) at idx in {0,2,5,7}, ODD set (c1,c3,c5,c7)
+// at idx in {1,3,4,6}; 8 rows back-to-back per 64-beat block; >= 2 idle cycles
+// between blocks (valid=0, idx=0, data=0).
+//
+// Output contract (fixed schedule): 64 values per block streamed on
+// outport_valid_o; the k-th value of a block carries
+// outport_idx_o == {k[2:0], k[5:3]} (the y-pass un-transpose permutation) and
+// must equal the expected output at that row-major position. Comparison is
+// EXACT (integer outputs).
+module tb;
+  int total_checks;
+  int total_errors;
+
+  logic        clk;
+  logic        rst;
+  logic        img_start;
+  logic        inport_valid;
+  logic [15:0] inport_data0, inport_data1, inport_data2, inport_data3;
+  logic [2:0]  inport_idx;
+  logic        outport_valid;
+  logic [31:0] outport_data;
+  logic [5:0]  outport_idx;
+
+  jpeg_idct_2d dut (
+    .clk(clk), .rst(rst),
+    .img_start_i(img_start), .img_end_i(1'b0),
+    .inport_valid_i(inport_valid),
+    .inport_data0_i(inport_data0), .inport_data1_i(inport_data1),
+    .inport_data2_i(inport_data2), .inport_data3_i(inport_data3),
+    .inport_idx_i(inport_idx),
+    .outport_valid_o(outport_valid),
+    .outport_data_o(outport_data),
+    .outport_idx_o(outport_idx)
+  );
+
+  initial clk = 1'b0;
+  always #5 clk = ~clk;
+
+  // ---- load vectors.dat: flat token stream, 128 tokens per block ----------
+  localparam MAX_BLOCKS = 1024;
+  logic [15:0] coeffs [0:MAX_BLOCKS*64-1];
+  logic [31:0] expy   [0:MAX_BLOCKS*64-1];
+  int num_blocks;
+
+  task automatic load_vectors;
+    int fd, rc, n;
+    logic [31:0] tok;
+    logic [31:0] flat [0:MAX_BLOCKS*128-1];
+    fd = $fopen("vectors.dat", "r");
+    if (fd == 0) begin
+      $display("ERROR: cannot open vectors.dat");
+      $fatal(1);
+    end
+    n = 0;
+    while (!$feof(fd)) begin
+      rc = $fscanf(fd, "%h", tok);
+      if (rc == 1) begin
+        flat[n] = tok;
+        n = n + 1;
+      end
+    end
+    $fclose(fd);
+    num_blocks = n / 128;
+    if (num_blocks * 128 != n)
+      $display("WARNING: %0d trailing tokens ignored", n - num_blocks * 128);
+    for (int b = 0; b < num_blocks; b++)
+      for (int i = 0; i < 64; i++) begin
+        coeffs[b*64+i] = flat[b*128+i][15:0];
+        expy[b*64+i]   = flat[b*128+64+i];
+      end
+  endtask
+
+  // ---- output checker -------------------------------------------------------
+  int out_cnt;
+  bit checking;
+  logic [5:0] k;
+
+  always @(posedge clk) begin
+    #1;
+    if (checking && outport_valid) begin
+      total_checks = total_checks + 1;
+      k = out_cnt % 64;
+      if (outport_idx !== {k[2:0], k[5:3]}) begin
+        $display("TB_ERROR block=%0d out=%0d idx=%0d expected_idx=%0d",
+                 out_cnt / 64, out_cnt % 64, outport_idx, {k[2:0], k[5:3]});
+        total_errors = total_errors + 1;
+      end
+      if (outport_data !== expy[(out_cnt / 64) * 64 + outport_idx]) begin
+        $display("TB_ERROR block=%0d pos=%0d expected_y=%08x actual_y=%08x",
+                 out_cnt / 64, outport_idx, expy[(out_cnt / 64) * 64 + outport_idx],
+                 outport_data);
+        total_errors = total_errors + 1;
+      end
+`ifdef DUMP_Y
+      $display("Y %02x %08x", outport_idx, outport_data);
+`endif
+      out_cnt = out_cnt + 1;
+    end
+  end
+
+  // ---- driver ----------------------------------------------------------------
+  task automatic drive_beat(input logic valid, input logic [2:0] kk,
+                            input logic [15:0] d0, d1, d2, d3);
+    @(negedge clk);
+    inport_valid = valid;
+    inport_idx   = kk;
+    inport_data0 = d0;
+    inport_data1 = d1;
+    inport_data2 = d2;
+    inport_data3 = d3;
+  endtask
+
+  initial begin
+    total_checks = 0;
+    total_errors = 0;
+    out_cnt = 0;
+    checking = 0;
+    rst = 1;
+    img_start = 0;
+    inport_valid = 0;
+    inport_idx = 0;
+    inport_data0 = 0; inport_data1 = 0; inport_data2 = 0; inport_data3 = 0;
+
+    load_vectors();
+
+    repeat (4) @(negedge clk);
+    rst = 0;
+    @(negedge clk);
+    img_start = 1;             // one-cycle image-start pulse
+    @(negedge clk);
+    img_start = 0;
+    checking = 1;
+
+    for (int b = 0; b < num_blocks; b++) begin
+      for (int r = 0; r < 8; r++) begin
+        for (int kb = 0; kb < 8; kb++) begin
+          if (kb == 0 || kb == 2 || kb == 5 || kb == 7)
+            drive_beat(1'b1, kb[2:0], coeffs[b*64+r*8+0], coeffs[b*64+r*8+2],
+
+... (showing lines 1-147 of 169; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='starting_point.v', offset=148, limit=650)
+  -> read_file(filename='tb.sv', offset=148)
+
+[TOOL RESULT]
+[Step 3/60]
+    ,input  [ 15:0]  inport_data3_i
+    ,input  [  2:0]  inport_idx_i
+
+    // Outputs
+    ,output          outport_valid_o
+    ,output [ 31:0]  outport_data_o
+    ,output [  5:0]  outport_idx_o
+);
+
+
+
+
+localparam [15:0] C1_16 = 4017; // cos( pi/16) x4096
+localparam [15:0] C2_16 = 3784; // cos(2pi/16) x4096
+localparam [15:0] C3_16 = 3406; // cos(3pi/16) x4096
+localparam [15:0] C4_16 = 2896; // cos(4pi/16) x4096
+localparam [15:0] C5_16 = 2276; // cos(5pi/16) x4096
+localparam [15:0] C6_16 = 1567; // cos(6pi/16) x4096
+localparam [15:0] C7_16 = 799;  // cos(7pi/16) x4096
+
+wire signed [31:0] block_in_0_1 = {{16{inport_data0_i[15]}}, inport_data0_i};
+wire signed [31:0] block_in_2_3 = {{16{inport_data1_i[15]}}, inport_data1_i};
+wire signed [31:0] block_in_4_5 = {{16{inport_data2_i[15]}}, inport_data2_i};
+wire signed [31:0] block_in_6_7 = {{16{inport_data3_i[15]}}, inport_data3_i};
+
+//-----------------------------------------------------------------
+// IDCT
+//-----------------------------------------------------------------
+reg signed [31:0] i0;
+reg signed [31:0] mul0_a;
+reg signed [31:0] mul0_b;
+reg signed [31:0] mul1_a;
+reg signed [31:0] mul1_b;
+reg signed [31:0] mul2_a;
+reg signed [31:0] mul2_b;
+reg signed [31:0] mul3_a;
+reg signed [31:0] mul3_b;
+reg signed [31:0] mul4_a;
+reg signed [31:0] mul4_b;
+
+always @ (posedge clk )
+if (rst)
+begin
+    i0     <= 32'b0;
+    mul0_a <= 32'b0;
+    mul0_b <= 32'b0;
+    mul1_a <= 32'b0;
+    mul1_b <= 32'b0;
+    mul2_a <= 32'b0;
+    mul2_b <= 32'b0;
+    mul3_a <= 32'b0;
+    mul3_b <= 32'b0;
+    mul4_a <= 32'b0;
+    mul4_b <= 32'b0;
+end
+else
+begin
+    /* verilator lint_off WIDTH */
+    case (inport_idx_i)
+    3'd0:
+    begin
+        i0     <= block_in_0_1 + block_in_4_5;
+        mul0_a <= block_in_2_3;
+        mul0_b <= C2_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C6_16;
+    end
+    3'd1:
+    begin
+        mul0_a <= block_in_0_1;
+        mul0_b <= C1_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C7_16;
+        mul2_a <= block_in_4_5;
+        mul2_b <= C5_16;
+        mul3_a <= block_in_2_3;
+        mul3_b <= C3_16;
+        mul4_a <= i0;
+        mul4_b <= C4_16;
+    end
+    3'd2:
+    begin
+        i0     <= block_in_0_1 - block_in_4_5;
+    end
+    3'd3:
+    begin
+        mul0_a <= block_in_0_1;
+        mul0_b <= C7_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C1_16;
+        mul2_a <= block_in_4_5;
+        mul2_b <= C3_16;
+        mul3_a <= block_in_2_3;
+        mul3_b <= C5_16;
+    end
+    3'd4:
+    begin
+        mul0_a <= block_in_0_1;
+        mul0_b <= C7_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C1_16;
+        mul2_a <= block_in_4_5;
+        mul2_b <= C3_16;
+        mul3_a <= block_in_2_3;
+        mul3_b <= C5_16;
+    end
+    3'd5:
+    begin
+        mul0_a <= block_in_2_3;
+        mul0_b <= C6_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C2_16;
+        mul4_a <= i0;
+        mul4_b <= C4_16;
+    end
+    default:
+        ;
+    endcase
+    /* verilator lint_on WIDTH */
+end
+
+reg signed [31:0] mul0_q;
+reg signed [31:0] mul1_q;
+reg signed [31:0] mul2_q;
+reg signed [31:0] mul3_q;
+reg signed [31:0] mul4_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    mul0_q <= 32'b0;
+    mul1_q <= 32'b0;
+    mul2_q <= 32'b0;
+    mul3_q <= 32'b0;
+    mul4_q <= 32'b0;
+end
+else
+begin
+    mul0_q <= mul0_a * mul0_b;
+    mul1_q <= mul1_a * mul1_b;
+    mul2_q <= mul2_a * mul2_b;
+    mul3_q <= mul3_a * mul3_b;
+    mul4_q <= mul4_a * mul4_b;
+end
+
+reg signed [31:0] mul0;
+reg signed [31:0] mul1;
+reg signed [31:0] mul2;
+reg signed [31:0] mul3;
+reg signed [31:0] mul4;
+
+always @ (posedge clk )
+if (rst)
+begin
+    mul0 <= 32'b0;
+    mul1 <= 32'b0;
+    mul2 <= 32'b0;
+    mul3 <= 32'b0;
+    mul4 <= 32'b0;
+end
+else
+begin
+    mul0 <= mul0_q;
+    mul1 <= mul1_q;
+    mul2 <= mul2_q;
+    mul3 <= mul3_q;
+    mul4 <= mul4_q;
+end
+
+reg        out_stg0_valid_q;
+reg [2:0]  out_stg0_idx_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    out_stg0_valid_q <= 1'b0;
+    out_stg0_idx_q   <= 3'b0;
+end
+else
+begin
+    out_stg0_valid_q <= inport_valid_i;
+    out_stg0_idx_q   <= inport_idx_i;
+end
+
+reg        out_stg1_valid_q;
+reg [2:0]  out_stg1_idx_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    out_stg1_valid_q <= 1'b0;
+    out_stg1_idx_q   <= 3'b0;
+end
+else
+begin
+    out_stg1_valid_q <= out_stg0_valid_q;
+    out_stg1_idx_q   <= out_stg0_idx_q;
+end
+
+reg        out_stg2_valid_q;
+reg [2:0]  out_stg2_idx_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    out_stg2_valid_q <= 1'b0;
+    out_stg2_idx_q   <= 3'b0;
+end
+else
+begin
+    out_stg2_valid_q <= out_stg1_valid_q;
+    out_stg2_idx_q   <= out_stg1_idx_q;
+end
+
+reg signed [31:0] o_s5;
+reg signed [31:0] o_s6;
+reg signed [31:0] o_s7;
+reg signed [31:0] o_t0;
+reg signed [31:0] o_t1;
+reg signed [31:0] o_t2;
+reg signed [31:0] o_t3;
+reg signed [31:0] o_t4;
+reg signed [31:0] o_t5;
+reg signed [31:0] o_t6;
+reg signed [31:0] o_t7;
+reg signed [31:0] o_t6_5;
+reg signed [31:0] o_t5_6;
+
+always @ (posedge clk )
+if (rst)
+begin
+    o_s5   <= 32'b0;
+    o_s6   <= 32'b0;
+    o_s7   <= 32'b0;
+    o_t0   <= 32'b0;
+    o_t1   <= 32'b0;
+    o_t2   <= 32'b0;
+    o_t3   <= 32'b0;
+    o_t4   <= 32'b0;
+    o_t5   <= 32'b0;
+    o_t6   <= 32'b0;
+    o_t7   <= 32'b0;
+    o_t6_5 <= 32'b0;
+    o_t5_6 <= 32'b0;
+end
+else
+begin
+    case (out_stg2_idx_q)
+    3'd0:
+    begin
+        o_t3 <= mul0 + mul1; // s3
+    end
+    3'd1:
+    begin
+        o_s7 <= mul0 + mul1;
+        o_s6 <= mul2 + mul3;
+        o_t0 <= mul4;        // s0
+    end
+    3'd2:
+    begin
+        o_t0 <= o_t0 + o_t3; // t0
+        o_t3 <= o_t0 - o_t3; // t3
+        o_t7 <= o_s6 + o_s7;
+    end
+    3'd3:
+    begin
+        o_t4 <= (mul0 - mul1) + (mul2 - mul3);
+    end
+    3'd4:
+    begin
+        o_t0 <= mul0 - mul1; // s4
+        o_s5 <= mul2 - mul3;    
+    end
+    3'd5:
+    begin
+        o_t3 <= mul0 - mul1; // s2
+        o_t4 <= mul4; // s1
+        o_t5 <= o_t0 - o_s5;
+        o_t6 <= o_s7 - o_s6;
+    end
+    3'd6:
+    begin
+        o_t1 <= o_t4 + o_t3;
+        o_t2 <= o_t4 - o_t3;
+        o_t6_5 <= o_t6 - o_t5;
+        o_t5_6 <= o_t5 + o_t6;
+    end
+    default:
+    begin
+        o_s5 <= (o_t6_5 * 181) / 256; // 1/sqrt(2)
+        o_s6 <= (o_t5_6 * 181) / 256; // 1/sqrt(2)
+    end
+    endcase
+end
+
+reg        out_stg3_valid_q;
+reg [2:0]  out_stg3_idx_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    out_stg3_valid_q <= 1'b0;
+    out_stg3_idx_q   <= 3'b0;
+end
+else
+begin
+    out_stg3_valid_q <= out_stg2_valid_q;
+    out_stg3_idx_q   <= out_stg2_idx_q;
+end
+
+reg signed [31:0] block_out[0:7];
+reg signed [31:0] block_out_tmp;
+
+always @ (posedge clk )
+if (rst)
+begin
+    block_out[0] <= 32'b0;
+    block_out[1] <= 32'b0;
+    block_out[2] <= 32'b0;
+    block_out[3] <= 32'b0;
+    block_out[4] <= 32'b0;
+    block_out[5] <= 32'b0;
+    block_out[6] <= 32'b0;
+    block_out[7] <= 32'b0;
+    block_out_tmp <= 32'b0;
+end
+else if (out_stg3_valid_q)
+begin
+    if (out_stg3_idx_q == 3'd3)
+    begin
+        block_out[0] <= ((o_t0 + o_t7) >>> OUT_SHIFT);
+        block_out_tmp <= ((o_t0 - o_t7) >>> OUT_SHIFT); // block_out[7]
+        block_out[3] <= ((o_t3 + o_t4) >>> OUT_SHIFT);
+        block_out[4] <= ((o_t3 - o_t4) >>> OUT_SHIFT);
+    end
+
+    if (out_stg3_idx_q == 3'd6)
+        block_out[7] <= block_out_tmp;
+
+    if (out_stg3_idx_q == 3'd7)
+    begin
+        block_out[2] <= ((o_t2 + o_s5) >>> OUT_SHIFT);
+        block_out[5] <= ((o_t2 - o_s5) >>> OUT_SHIFT);
+        block_out[1] <= ((o_t1 + o_s6) >>> OUT_SHIFT);
+        block_out[6] <= ((o_t1 - o_s6) >>> OUT_SHIFT);
+    end
+end
+
+reg [7:0] valid_q;
+
+always @ (posedge clk )
+if (rst)
+    valid_q  <= 8'b0;
+else if (img_start_i)
+    valid_q  <= 8'b0;
+else
+    valid_q <= {valid_q[6:0], out_stg3_valid_q};
+
+reg [5:0] ptr_q;
+
+always @ (posedge clk )
+if (rst)
+    ptr_q <= 6'd0;
+else if (img_start_i)
+    ptr_q <= 6'd0;
+else if (outport_valid_o)
+    ptr_q <= ptr_q + 6'd1;
+
+assign outport_valid_o = valid_q[6];
+assign outport_data_o  = block_out[ptr_q[2:0]];
+
+assign outport_idx_o   = ptr_q;
+
+
+
+endmodule
+//-----------------------------------------------------------------
+//                      Baseline JPEG Decoder
+//                             V0.1
+//                       Ultra-Embedded.com
+//                        Copyright 2020
+//
+//                   admin@ultra-embedded.com
+//-----------------------------------------------------------------
+//                      License: Apache 2.0
+// This IP can be freely used in commercial projects, however you may
+// want access to unreleased materials such as verification environments,
+// or test vectors, as well as changes to the IP for integration purposes.
+// If this is the case, contact the above address.
+// I am interested to hear how and where this IP is used, so please get
+// in touch!
+//-----------------------------------------------------------------
+// Copyright 2020 Ultra-Embedded.com
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//-----------------------------------------------------------------
+
+module jpeg_idct_transpose
+(
+    // Inputs
+     input           clk
+    ,input           rst
+    ,input           img_start_i
+    ,input           img_end_i
+    ,input           inport_valid_i
+    ,input  [ 31:0]  inport_data_i
+    ,input  [  5:0]  inport_idx_i
+    ,input           outport_ready_i
+
+    // Outputs
+    ,output          inport_accept_o
+    ,output          outport_valid_o
+    ,output [ 31:0]  outport_data0_o
+    ,output [ 31:0]  outport_data1_o
+    ,output [ 31:0]  outport_data2_o
+    ,output [ 31:0]  outport_data3_o
+    ,output [  2:0]  outport_idx_o
+);
+
+
+
+reg         block_wr_q;
+reg         block_rd_q;
+reg [5:0]   rd_idx_q;
+reg [3:0]   rd_addr_q;
+
+wire [4:0]  wr_ptr_w = {block_wr_q, inport_idx_i[3:0]};
+
+wire [31:0] outport_data0_w;
+wire [31:0] outport_data1_w;
+wire [31:0] outport_data2_w;
+wire [31:0] outport_data3_w;
+
+wire wr0_w = inport_valid_i && inport_accept_o && (inport_idx_i[5:4] == 2'd0);
+wire wr1_w = inport_valid_i && inport_accept_o && (inport_idx_i[5:4] == 2'd1);
+wire wr2_w = inport_valid_i && inport_accept_o && (inport_idx_i[5:4] == 2'd2);
+wire wr3_w = inport_valid_i && inport_accept_o && (inport_idx_i[5:4] == 2'd3);
+
+jpeg_idct_transpose_ram
+u_ram0
+(
+     .clk0_i(clk)
+    ,.rst0_i(rst)
+    ,.clk1_i(clk)
+    ,.rst1_i(rst)
+
+    ,.addr0_i(wr_ptr_w)
+    ,.data0_i(inport_data_i)
+    ,.wr0_i(wr0_w)
+    ,.data0_o()
+
+    ,.addr1_i({block_rd_q, rd_addr_q})
+    ,.data1_i(32'b0)
+    ,.wr1_i(1'b0)
+    ,.data1_o(outport_data0_w)
+);
+
+jpeg_idct_transpose_ram
+u_ram1
+(
+     .clk0_i(clk)
+    ,.rst0_i(rst)
+    ,.clk1_i(clk)
+    ,.rst1_i(rst)
+
+    ,.addr0_i(wr_ptr_w)
+    ,.data0_i(inport_data_i)
+    ,.wr0_i(wr1_w)
+    ,.data0_o()
+
+    ,.addr1_i({block_rd_q, rd_addr_q})
+    ,.data1_i(32'b0)
+    ,.wr1_i(1'b0)
+    ,.data1_o(outport_data1_w)
+);
+
+jpeg_idct_transpose_ram
+u_ram2
+(
+     .clk0_i(clk)
+    ,.rst0_i(rst)
+    ,.clk1_i(clk)
+    ,.rst1_i(rst)
+
+    ,.addr0_i(wr_ptr_w)
+    ,.data0_i(inport_data_i)
+    ,.wr0_i(wr2_w)
+    ,.data0_o()
+
+    ,.addr1_i({block_rd_q, rd_addr_q})
+    ,.data1_i(32'b0)
+    ,.wr1_i(1'b0)
+    ,.data1_o(outport_data2_w)
+);
+
+jpeg_idct_transpose_ram
+u_ram3
+(
+     .clk0_i(clk)
+    ,.rst0_i(rst)
+    ,.clk1_i(clk)
+    ,.rst1_i(rst)
+
+    ,.addr0_i(wr_ptr_w)
+    ,.data0_i(inport_data_i)
+    ,.wr0_i(wr3_w)
+    ,.data0_o()
+
+    ,.addr1_i({block_rd_q, rd_addr_q})
+    ,.data1_i(32'b0)
+    ,.wr1_i(1'b0)
+    ,.data1_o(outport_data3_w)
+);
+
+//-----------------------------------------------------------------
+// Input Buffer
+//-----------------------------------------------------------------
+reg [1:0] block_ready_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    block_ready_q     <= 2'b0;
+    block_wr_q        <= 1'b0;
+    block_rd_q        <= 1'b0;
+end
+else if (img_start_i)
+begin
+    block_ready_q     <= 2'b0;
+    block_wr_q        <= 1'b0;
+    block_rd_q        <= 1'b0;
+end
+else
+begin
+    if (inport_valid_i && inport_idx_i == 6'd63 && inport_accept_o)
+    begin
+        block_ready_q[block_wr_q] <= 1'b1;
+        block_wr_q                <= ~block_wr_q;
+    end
+
+    if (outport_valid_o && rd_idx_q[5:0] == 6'd63)
+    begin
+        block_ready_q[block_rd_q] <= 1'b0;
+        block_rd_q <= ~block_rd_q;
+    end
+end
+
+assign inport_accept_o = ~block_ready_q[block_wr_q];
+
+//-----------------------------------------------------------------
+// FSM
+//-----------------------------------------------------------------
+localparam STATE_W           = 2;
+localparam STATE_IDLE        = 2'd0;
+localparam STATE_SETUP       = 2'd1;
+localparam STATE_ACTIVE      = 2'd2;
+
+reg [STATE_W-1:0] state_q;
+reg [STATE_W-1:0] next_state_r;
+
+always @ *
+begin
+    next_state_r = state_q;
+
+    case (state_q)
+    STATE_IDLE:
+    begin
+        if (block_ready_q[block_rd_q] && outport_ready_i)
+            next_state_r = STATE_SETUP;
+    end
+    STATE_SETUP:
+    begin
+        next_state_r = STATE_ACTIVE;
+    end
+    STATE_ACTIVE:
+    begin
+        if (outport_valid_o && rd_idx_q == 6'd63)
+            next_state_r = STATE_IDLE;
+    end
+    default: ;
+    endcase
+
+    if (img_start_i)
+        next_state_r = STATE_IDLE;
+end
+
+always @ (posedge clk )
+if (rst)
+    state_q <= STATE_IDLE;
+else
+    state_q <= next_state_r;
+
+always @ (posedge clk )
+if (rst)
+    rd_idx_q <= 6'b0;
+else if (img_start_i)
+    rd_idx_q <= 6'b0;
+else if (state_q == STATE_ACTIVE)
+    rd_idx_q <= rd_idx_q + 6'd1;
+
+always @ (posedge clk )
+if (rst)
+    rd_addr_q <= 4'b0;
+else if (state_q == STATE_IDLE)
+    rd_addr_q <= 4'b0;
+else if (state_q == STATE_SETUP)
+    rd_addr_q <= 4'd8;
+else if (state_q == STATE_ACTIVE)
+begin
+    case (rd_idx_q[2:0])
+    3'd0: rd_addr_q <= rd_addr_q - 4'd8;
+    3'd1: rd_addr_q <= rd_addr_q + 4'd8;
+    3'd2: ;
+    3'd3: rd_addr_q <= rd_addr_q - 4'd8;
+    3'd4: rd_addr_q <= rd_addr_q + 4'd8;
+    3'd5: rd_addr_q <= rd_addr_q - 4'd8;
+    3'd6: rd_addr_q <= rd_addr_q + 4'd1;
+    3'd7: rd_addr_q <= rd_addr_q + 4'd8;
+    endcase
+end
+
+assign outport_valid_o = (state_q == STATE_ACTIVE);
+assign outport_idx_o   = rd_idx_q[2:0];
+assign outport_data0_o = outport_data0_w;
+assign outport_data1_o = outport_data1_w;
+assign outport_data2_o = outport_data2_w;
+assign outport_data3_o = outport_data3_w;
+
+
+endmodule
+//-----------------------------------------------------------------
+//                      Baseline JPEG Decoder
+//                             V0.1
+//                       Ultra-Embedded.com
+//                        Copyright 2020
+//
+//                   admin@ultra-embedded.com
+//-----------------------------------------------------------------
+//                      License: Apache 2.0
+// This IP can be freely used in commercial projects, however you may
+
+... (showing lines 148-797 of 1381; use offset/limit for more)
+
+[TOOL RESULT]
+[Step 3/60]
+                                      coeffs[b*64+r*8+4], coeffs[b*64+r*8+6]);
+          else
+            drive_beat(1'b1, kb[2:0], coeffs[b*64+r*8+1], coeffs[b*64+r*8+3],
+                                      coeffs[b*64+r*8+5], coeffs[b*64+r*8+7]);
+        end
+      end
+      // inter-block gap: >= 2 idle cycles (serializer IDLE+SETUP), varied a bit
+      repeat (2 + (b % 3)) drive_beat(1'b0, 3'd0, 16'd0, 16'd0, 16'd0, 16'd0);
+    end
+    drive_beat(1'b0, 3'd0, 16'd0, 16'd0, 16'd0, 16'd0);
+    repeat (400) @(negedge clk);  // flush x + transpose + y pipeline
+
+    if (out_cnt != num_blocks * 64) begin
+      $display("TB_ERROR missing outputs: got %0d, expected %0d", out_cnt, num_blocks * 64);
+      total_errors = total_errors + 1;
+    end
+    $display("TB_SUMMARY total=%0d errors=%0d", total_checks, total_errors);
+    if (total_errors != 0) $fatal(1, "FAIL");
+    $display("PASS");
+    $finish;
+  end
+endmodule
+
+... (showing lines 148-169 of 169; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='starting_point.v', offset=798)
+
+[TOOL RESULT]
+[Step 4/60]
+// want access to unreleased materials such as verification environments,
+// or test vectors, as well as changes to the IP for integration purposes.
+// If this is the case, contact the above address.
+// I am interested to hear how and where this IP is used, so please get
+// in touch!
+//-----------------------------------------------------------------
+// Copyright 2020 Ultra-Embedded.com
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//-----------------------------------------------------------------
+
+module jpeg_idct_transpose_ram
+(
+    // Inputs
+     input           clk0_i
+    ,input           rst0_i
+    ,input  [  4:0]  addr0_i
+    ,input  [ 31:0]  data0_i
+    ,input           wr0_i
+    ,input           clk1_i
+    ,input           rst1_i
+    ,input  [  4:0]  addr1_i
+    ,input  [ 31:0]  data1_i
+    ,input           wr1_i
+
+    // Outputs
+    ,output [ 31:0]  data0_o
+    ,output [ 31:0]  data1_o
+);
+
+
+
+//-----------------------------------------------------------------
+// Dual Port RAM
+// Mode: Read First
+//-----------------------------------------------------------------
+/* verilator lint_off MULTIDRIVEN */
+reg [31:0]   ram [31:0] /*verilator public*/;
+/* verilator lint_on MULTIDRIVEN */
+
+reg [31:0] ram_read0_q;
+reg [31:0] ram_read1_q;
+
+
+// Synchronous write
+always @ (posedge clk0_i)
+begin
+    if (wr0_i)
+        ram[addr0_i][31:0] <= data0_i[31:0];
+
+    ram_read0_q <= ram[addr0_i];
+end
+
+always @ (posedge clk1_i)
+begin
+    if (wr1_i)
+        ram[addr1_i][31:0] <= data1_i[31:0];
+
+    ram_read1_q <= ram[addr1_i];
+end
+
+
+assign data0_o = ram_read0_q;
+assign data1_o = ram_read1_q;
+
+
+
+endmodule
+//-----------------------------------------------------------------
+//                      Baseline JPEG Decoder
+//                             V0.1
+//                       Ultra-Embedded.com
+//                        Copyright 2020
+//
+//                   admin@ultra-embedded.com
+//-----------------------------------------------------------------
+//                      License: Apache 2.0
+// This IP can be freely used in commercial projects, however you may
+// want access to unreleased materials such as verification environments,
+// or test vectors, as well as changes to the IP for integration purposes.
+// If this is the case, contact the above address.
+// I am interested to hear how and where this IP is used, so please get
+// in touch!
+//-----------------------------------------------------------------
+// Copyright 2020 Ultra-Embedded.com
+// 
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// 
+//     http://www.apache.org/licenses/LICENSE-2.0
+// 
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//-----------------------------------------------------------------
+
+module jpeg_idct_y
+//-----------------------------------------------------------------
+// Params
+//-----------------------------------------------------------------
+#(
+     parameter OUT_SHIFT        = 15
+    ,parameter INPUT_WIDTH      = 32
+)
+//-----------------------------------------------------------------
+// Ports
+//-----------------------------------------------------------------
+(
+    // Inputs
+     input           clk
+    ,input           rst
+    ,input           img_start_i
+    ,input           img_end_i
+    ,input           inport_valid_i
+    ,input  [ 31:0]  inport_data0_i
+    ,input  [ 31:0]  inport_data1_i
+    ,input  [ 31:0]  inport_data2_i
+    ,input  [ 31:0]  inport_data3_i
+    ,input  [  2:0]  inport_idx_i
+
+    // Outputs
+    ,output          outport_valid_o
+    ,output [ 31:0]  outport_data_o
+    ,output [  5:0]  outport_idx_o
+);
+
+
+
+
+localparam [15:0] C1_16 = 4017; // cos( pi/16) x4096
+localparam [15:0] C2_16 = 3784; // cos(2pi/16) x4096
+localparam [15:0] C3_16 = 3406; // cos(3pi/16) x4096
+localparam [15:0] C4_16 = 2896; // cos(4pi/16) x4096
+localparam [15:0] C5_16 = 2276; // cos(5pi/16) x4096
+localparam [15:0] C6_16 = 1567; // cos(6pi/16) x4096
+localparam [15:0] C7_16 = 799;  // cos(7pi/16) x4096
+
+wire signed [31:0] block_in_0_1 = inport_data0_i;
+wire signed [31:0] block_in_2_3 = inport_data1_i;
+wire signed [31:0] block_in_4_5 = inport_data2_i;
+wire signed [31:0] block_in_6_7 = inport_data3_i;
+
+//-----------------------------------------------------------------
+// IDCT
+//-----------------------------------------------------------------
+reg signed [31:0] i0;
+reg signed [31:0] mul0_a;
+reg signed [31:0] mul0_b;
+reg signed [31:0] mul1_a;
+reg signed [31:0] mul1_b;
+reg signed [31:0] mul2_a;
+reg signed [31:0] mul2_b;
+reg signed [31:0] mul3_a;
+reg signed [31:0] mul3_b;
+reg signed [31:0] mul4_a;
+reg signed [31:0] mul4_b;
+
+always @ (posedge clk )
+if (rst)
+begin
+    i0     <= 32'b0;
+    mul0_a <= 32'b0;
+    mul0_b <= 32'b0;
+    mul1_a <= 32'b0;
+    mul1_b <= 32'b0;
+    mul2_a <= 32'b0;
+    mul2_b <= 32'b0;
+    mul3_a <= 32'b0;
+    mul3_b <= 32'b0;
+    mul4_a <= 32'b0;
+    mul4_b <= 32'b0;
+end
+else
+begin
+    /* verilator lint_off WIDTH */
+    case (inport_idx_i)
+    3'd0:
+    begin
+        i0     <= block_in_0_1 + block_in_4_5;
+        mul0_a <= block_in_2_3;
+        mul0_b <= C2_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C6_16;
+    end
+    3'd1:
+    begin
+        mul0_a <= block_in_0_1;
+        mul0_b <= C1_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C7_16;
+        mul2_a <= block_in_4_5;
+        mul2_b <= C5_16;
+        mul3_a <= block_in_2_3;
+        mul3_b <= C3_16;
+        mul4_a <= i0;
+        mul4_b <= C4_16;
+    end
+    3'd2:
+    begin
+        i0     <= block_in_0_1 - block_in_4_5;
+    end
+    3'd3:
+    begin
+        mul0_a <= block_in_0_1;
+        mul0_b <= C7_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C1_16;
+        mul2_a <= block_in_4_5;
+        mul2_b <= C3_16;
+        mul3_a <= block_in_2_3;
+        mul3_b <= C5_16;
+    end
+    3'd4:
+    begin
+        mul0_a <= block_in_0_1;
+        mul0_b <= C7_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C1_16;
+        mul2_a <= block_in_4_5;
+        mul2_b <= C3_16;
+        mul3_a <= block_in_2_3;
+        mul3_b <= C5_16;
+    end
+    3'd5:
+    begin
+        mul0_a <= block_in_2_3;
+        mul0_b <= C6_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C2_16;
+        mul4_a <= i0;
+        mul4_b <= C4_16;
+    end
+    default:
+        ;
+    endcase
+    /* verilator lint_on WIDTH */
+end
+
+reg signed [31:0] mul0_q;
+reg signed [31:0] mul1_q;
+reg signed [31:0] mul2_q;
+reg signed [31:0] mul3_q;
+reg signed [31:0] mul4_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    mul0_q <= 32'b0;
+    mul1_q <= 32'b0;
+    mul2_q <= 32'b0;
+    mul3_q <= 32'b0;
+    mul4_q <= 32'b0;
+end
+else
+begin
+    mul0_q <= mul0_a * mul0_b;
+    mul1_q <= mul1_a * mul1_b;
+    mul2_q <= mul2_a * mul2_b;
+    mul3_q <= mul3_a * mul3_b;
+    mul4_q <= mul4_a * mul4_b;
+end
+
+reg signed [31:0] mul0;
+reg signed [31:0] mul1;
+reg signed [31:0] mul2;
+reg signed [31:0] mul3;
+reg signed [31:0] mul4;
+
+always @ (posedge clk )
+if (rst)
+begin
+    mul0 <= 32'b0;
+    mul1 <= 32'b0;
+    mul2 <= 32'b0;
+    mul3 <= 32'b0;
+    mul4 <= 32'b0;
+end
+else
+begin
+    mul0 <= mul0_q;
+    mul1 <= mul1_q;
+    mul2 <= mul2_q;
+    mul3 <= mul3_q;
+    mul4 <= mul4_q;
+end
+
+reg        out_stg0_valid_q;
+reg [2:0]  out_stg0_idx_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    out_stg0_valid_q <= 1'b0;
+    out_stg0_idx_q   <= 3'b0;
+end
+else
+begin
+    out_stg0_valid_q <= inport_valid_i;
+    out_stg0_idx_q   <= inport_idx_i;
+end
+
+reg        out_stg1_valid_q;
+reg [2:0]  out_stg1_idx_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    out_stg1_valid_q <= 1'b0;
+    out_stg1_idx_q   <= 3'b0;
+end
+else
+begin
+    out_stg1_valid_q <= out_stg0_valid_q;
+    out_stg1_idx_q   <= out_stg0_idx_q;
+end
+
+reg        out_stg2_valid_q;
+reg [2:0]  out_stg2_idx_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    out_stg2_valid_q <= 1'b0;
+    out_stg2_idx_q   <= 3'b0;
+end
+else
+begin
+    out_stg2_valid_q <= out_stg1_valid_q;
+    out_stg2_idx_q   <= out_stg1_idx_q;
+end
+
+reg signed [31:0] o_s5;
+reg signed [31:0] o_s6;
+reg signed [31:0] o_s7;
+reg signed [31:0] o_t0;
+reg signed [31:0] o_t1;
+reg signed [31:0] o_t2;
+reg signed [31:0] o_t3;
+reg signed [31:0] o_t4;
+reg signed [31:0] o_t5;
+reg signed [31:0] o_t6;
+reg signed [31:0] o_t7;
+reg signed [31:0] o_t6_5;
+reg signed [31:0] o_t5_6;
+
+always @ (posedge clk )
+if (rst)
+begin
+    o_s5   <= 32'b0;
+    o_s6   <= 32'b0;
+    o_s7   <= 32'b0;
+    o_t0   <= 32'b0;
+    o_t1   <= 32'b0;
+    o_t2   <= 32'b0;
+    o_t3   <= 32'b0;
+    o_t4   <= 32'b0;
+    o_t5   <= 32'b0;
+    o_t6   <= 32'b0;
+    o_t7   <= 32'b0;
+    o_t6_5 <= 32'b0;
+    o_t5_6 <= 32'b0;
+end
+else
+begin
+    case (out_stg2_idx_q)
+    3'd0:
+    begin
+        o_t3 <= mul0 + mul1; // s3
+    end
+    3'd1:
+    begin
+        o_s7 <= mul0 + mul1;
+        o_s6 <= mul2 + mul3;
+        o_t0 <= mul4;        // s0
+    end
+    3'd2:
+    begin
+        o_t0 <= o_t0 + o_t3; // t0
+        o_t3 <= o_t0 - o_t3; // t3
+        o_t7 <= o_s6 + o_s7;
+    end
+    3'd3:
+    begin
+        o_t4 <= (mul0 - mul1) + (mul2 - mul3);
+    end
+    3'd4:
+    begin
+        o_t0 <= mul0 - mul1; // s4
+        o_s5 <= mul2 - mul3;    
+    end
+    3'd5:
+    begin
+        o_t3 <= mul0 - mul1; // s2
+        o_t4 <= mul4; // s1
+        o_t5 <= o_t0 - o_s5;
+        o_t6 <= o_s7 - o_s6;
+    end
+    3'd6:
+    begin
+        o_t1 <= o_t4 + o_t3;
+        o_t2 <= o_t4 - o_t3;
+        o_t6_5 <= o_t6 - o_t5;
+        o_t5_6 <= o_t5 + o_t6;
+    end
+    default:
+    begin
+        o_s5 <= (o_t6_5 * 181) / 256; // 1/sqrt(2)
+        o_s6 <= (o_t5_6 * 181) / 256; // 1/sqrt(2)
+    end
+    endcase
+end
+
+reg        out_stg3_valid_q;
+reg [2:0]  out_stg3_idx_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    out_stg3_valid_q <= 1'b0;
+    out_stg3_idx_q   <= 3'b0;
+end
+else
+begin
+    out_stg3_valid_q <= out_stg2_valid_q;
+    out_stg3_idx_q   <= out_stg2_idx_q;
+end
+
+reg signed [31:0] block_out[0:7];
+reg signed [31:0] block_out_tmp;
+
+always @ (posedge clk )
+if (rst)
+begin
+    block_out[0] <= 32'b0;
+    block_out[1] <= 32'b0;
+    block_out[2] <= 32'b0;
+    block_out[3] <= 32'b0;
+    block_out[4] <= 32'b0;
+    block_out[5] <= 32'b0;
+    block_out[6] <= 32'b0;
+    block_out[7] <= 32'b0;
+    block_out_tmp <= 32'b0;
+end
+else if (out_stg3_valid_q)
+begin
+    if (out_stg3_idx_q == 3'd3)
+    begin
+        block_out[0] <= ((o_t0 + o_t7) >>> OUT_SHIFT);
+        block_out_tmp <= ((o_t0 - o_t7) >>> OUT_SHIFT); // block_out[7]
+        block_out[3] <= ((o_t3 + o_t4) >>> OUT_SHIFT);
+        block_out[4] <= ((o_t3 - o_t4) >>> OUT_SHIFT);
+    end
+
+    if (out_stg3_idx_q == 3'd6)
+        block_out[7] <= block_out_tmp;
+
+    if (out_stg3_idx_q == 3'd7)
+    begin
+        block_out[2] <= ((o_t2 + o_s5) >>> OUT_SHIFT);
+        block_out[5] <= ((o_t2 - o_s5) >>> OUT_SHIFT);
+        block_out[1] <= ((o_t1 + o_s6) >>> OUT_SHIFT);
+        block_out[6] <= ((o_t1 - o_s6) >>> OUT_SHIFT);
+    end
+end
+
+reg [7:0] valid_q;
+
+always @ (posedge clk )
+if (rst)
+    valid_q  <= 8'b0;
+else if (img_start_i)
+    valid_q  <= 8'b0;
+else
+    valid_q <= {valid_q[6:0], out_stg3_valid_q};
+
+reg [5:0] ptr_q;
+
+always @ (posedge clk )
+if (rst)
+    ptr_q <= 6'd0;
+else if (img_start_i)
+    ptr_q <= 6'd0;
+else if (outport_valid_o)
+    ptr_q <= ptr_q + 6'd1;
+
+assign outport_valid_o = valid_q[6];
+assign outport_data_o  = block_out[ptr_q[2:0]];
+
+
+
+function [5:0] ptr_conv;
+    input [5:0] idx;
+    reg [5:0] out_idx;
+begin
+    case (idx)
+    6'd0:  out_idx = 6'd0;
+    6'd1:  out_idx = 6'd8;
+    6'd2:  out_idx = 6'd16;
+    6'd3:  out_idx = 6'd24;
+    6'd4:  out_idx = 6'd32;
+    6'd5:  out_idx = 6'd40;
+    6'd6:  out_idx = 6'd48;
+    6'd7:  out_idx = 6'd56;
+    6'd8:  out_idx = 6'd1;
+    6'd9:  out_idx = 6'd9;
+    6'd10:  out_idx = 6'd17;
+    6'd11:  out_idx = 6'd25;
+    6'd12:  out_idx = 6'd33;
+    6'd13:  out_idx = 6'd41;
+    6'd14:  out_idx = 6'd49;
+    6'd15:  out_idx = 6'd57;
+    6'd16:  out_idx = 6'd2;
+    6'd17:  out_idx = 6'd10;
+    6'd18:  out_idx = 6'd18;
+    6'd19:  out_idx = 6'd26;
+    6'd20:  out_idx = 6'd34;
+    6'd21:  out_idx = 6'd42;
+    6'd22:  out_idx = 6'd50;
+    6'd23:  out_idx = 6'd58;
+    6'd24:  out_idx = 6'd3;
+    6'd25:  out_idx = 6'd11;
+    6'd26:  out_idx = 6'd19;
+    6'd27:  out_idx = 6'd27;
+    6'd28:  out_idx = 6'd35;
+    6'd29:  out_idx = 6'd43;
+    6'd30:  out_idx = 6'd51;
+    6'd31:  out_idx = 6'd59;
+    6'd32:  out_idx = 6'd4;
+    6'd33:  out_idx = 6'd12;
+    6'd34:  out_idx = 6'd20;
+    6'd35:  out_idx = 6'd28;
+    6'd36:  out_idx = 6'd36;
+    6'd37:  out_idx = 6'd44;
+    6'd38:  out_idx = 6'd52;
+    6'd39:  out_idx = 6'd60;
+    6'd40:  out_idx = 6'd5;
+    6'd41:  out_idx = 6'd13;
+    6'd42:  out_idx = 6'd21;
+    6'd43:  out_idx = 6'd29;
+    6'd44:  out_idx = 6'd37;
+    6'd45:  out_idx = 6'd45;
+    6'd46:  out_idx = 6'd53;
+    6'd47:  out_idx = 6'd61;
+    6'd48:  out_idx = 6'd6;
+    6'd49:  out_idx = 6'd14;
+    6'd50:  out_idx = 6'd22;
+    6'd51:  out_idx = 6'd30;
+    6'd52:  out_idx = 6'd38;
+    6'd53:  out_idx = 6'd46;
+    6'd54:  out_idx = 6'd54;
+    6'd55:  out_idx = 6'd62;
+    6'd56:  out_idx = 6'd7;
+    6'd57:  out_idx = 6'd15;
+    6'd58:  out_idx = 6'd23;
+    6'd59:  out_idx = 6'd31;
+    6'd60:  out_idx = 6'd39;
+    6'd61:  out_idx = 6'd47;
+    6'd62:  out_idx = 6'd55;
+    default:  out_idx = 6'd63;
+    endcase
+
+    ptr_conv = out_idx;
+end
+endfunction
+
+
+assign outport_idx_o   = ptr_conv(ptr_q);
+
+
+
+endmodule
+
+... (showing lines 798-1381 of 1381; use offset/limit for more)
+
+[ASSISTANT]
+I have the full picture now. Let me analyze the key cost drivers before writing code:
+
+1. **10 multipliers of 32×32** — but operands are provably narrow (row pass: 17-bit lanes × 13-bit constants; col pass: ≤21-bit lanes × 13-bit constants). This is the dominant area.
+2. **Transpose RAMs**: 4×32 words × 32 bits — but row-pass outputs provably fit in 20 signed bits (max 346,424 for *any* 16-bit input, since no intermediate can wrap: max intermediate 688,217,344 < 2³¹).
+3. **`/256` signed division** — replace with shift + toward-zero correction; the `×181` must still wrap at 32 bits.
+4. Row-pass intermediates provably fit 31 bits; col-pass must keep 32-bit wrap semantics (sums can exceed 2³¹).
+
+Let me create the optimized design and simultaneously get the baseline cost:
+  -> create_file('{"filename": "design.sv", "content": "//-----------------------------------------------------------------\\n// jpeg_idct_2d — optimized, bit-exact re-implementation of the\\n// core_jpeg (ultraembedded, Apache 2.0) 8x8 2-D IDCT composition:\\n//   row pass (OUT_SHIFT=11) -> double-buffered transpose -> col pass (15)\\n//\\n// Bit-exactness notes:\\n//  * All arithmetic that can wrap in the original (32-bit wrap-around)\\n//    is kept at 32-bit context.  Registers are narrowed ONLY where the\\n//    original values are provably inside range for any input:\\n//      - row pass: 16-bit inputs => intermediates <= 688,217,344 < 2^30\\n//        (except the deliberate (x*181) 32-bit wrap), products <= 1.9e8.\\n//      - row outputs after >>>11 fit in 20 signed bits (max 346,424),\\n//        so the transpose stores 20 bits (sign-extended on read).\\n//      - col pass inputs are those row outputs, so mul lanes fit 20 bits\\n//        (i0 fits 21); col pass sums CAN wrap => kept 32-bit; col\\n//        outputs after >>>15 fit 18 signed bits.\\n//  * (x*181)/256: multiply kept at 32-bit (wraps), division replaced by\\n//    an exact truncation-toward-zero shift network.\\n//  * Pipeline structure, latency, FSMs and streaming schedule are\\n//    identical to the original.\\n//-----------------------------------------------------------------\\n\\nmodule jpeg_idct_1d\\n#(\\n     parameter LANE_W    = 17\\n    ,parameter MULQ_W    = 29\\n    ,parameter O_W       = 31\\n    ,parameter OUT_W     = 20\\n    ,parameter OUT_SHIFT = 11\\n    ,parameter IDX_SWAP  = 1\'b0\\n)\\n(\\n     input             clk\\n    ,input             rst\\n    ,input             img_start_i\\n    ,input             inport_valid_i\\n    ,input      [31:0] inport_data0_i\\n    ,input      [31:0] inport_data1_i\\n    ,input      [31:0] inport_data2_i\\n    ,input      [31:0] inport_data3_i\\n    ,input      [ 2:0')
+
+[TOOL RESULT]
+[Step 5/60]
+Error executing tool create_file: 'filename'
+
+[ASSISTANT]
+The content was too long. I'll build the file in chunks — create the first part, then append with `apply_diff`:
+  -> create_file(filename='design.sv', content="//-----------------------------------------------------------------\n// jpeg_idct_2d — optimized, bit-exact re-implementation of the\n// core_jpeg (ultraembedded, Apache 2.0) 8x8 2-D IDCT composition:\n//   row pass (OUT_SHIFT=11) -> double-buffered transpose -> col pass (15)\n//\n// Bit-exactness notes:\n//  * Arithmetic that can wrap in the original (32-bit wrap-around) is\n//    kept in a 32-bit context.  Registers are narrowed ONLY where the\n//    original values are provably inside range for ANY input:\n//      - row pass: 16-bit inputs => intermediates <= 688,217,344 < 2^30\n//        (except the deliberate (x*181) 32-bit wrap); products <= 1.9e8.\n//      - row outputs after >>>11 fit in 20 signed bits (max 346,424),\n//        so the transpose stores 20 bits (sign-extended on read).\n//      - col pass lanes are those row outputs => mul lanes fit 20 bits\n//        (i0 fits 21); col pass sums CAN wrap => kept 32-bit; col\n//        outputs after >>>15 fit 18 signed bits.\n//  * (x*181)/256: multiply kept at 32-bit (wraps), division replaced\n//    by an exact truncation-toward-zero shift network.\n//  * Pipeline structure, latency, FSMs and streaming schedule are\n//    identical to the original.\n//-----------------------------------------------------------------\n\nmodule jpeg_idct_1d\n#(\n     parameter LANE_W    = 17\n    ,parameter MULQ_W    = 29\n    ,parameter O_W       = 31\n    ,parameter OUT_W     = 20\n    ,parameter OUT_SHIFT = 11\n    ,parameter IDX_SWAP  = 1'b0\n)\n(\n     input             clk\n    ,input             rst\n    ,input             img_start_i\n    ,input             inport_valid_i\n    ,input      [31:0] inport_data0_i\n    ,input      [31:0] inport_data1_i\n    ,input      [31:0] inport_data2_i\n    ,input      [31:0] inport_data3_i\n    ,input      [ 2:0] inport_idx_i\n    ,output            outport_valid_o\n    ,output     [31:0] outport_data_o\n    ,output     [ 5:0] outport_idx_o\n);\n/* verilator lint_off WIDTH */\n\nlocalparam [12:0] C1_16 = 13'd4017; // cos( pi/16) x4096\nlocalparam [12:0] C2_16 = 13'd3784; // cos(2pi/16) x4096\nlocalparam [12:0] C3_16 = 13'd3406; // cos(3pi/16) x4096\nlocalparam [12:0] C4_16 = 13'd2896; // cos(4pi/16) x4096\nlocalparam [12:0] C5_16 = 13'd2276; // cos(5pi/16) x4096\nlocalparam [12:0] C6_16 = 13'd1567; // cos(6pi/16) x4096\nlocalparam [12:0] C7_16 = 13'd799;  // cos(7pi/16) x4096\n\nwire signed [LANE_W-1:0] block_in_0_1 = inport_data0_i[LANE_W-1:0];\nwire signed [LANE_W-1:0] block_in_2_3 = inport_data1_i[LANE_W-1:0];\nwire signed [LANE_W-1:0] block_in_4_5 = inport_data2_i[LANE_W-1:0];\nwire signed [LANE_W-1:0] block_in_6_7 = inport_data3_i[LANE_W-1:0];\n\n//-----------------------------------------------------------------\n// IDCT input stage (schedule: even beats {0,2,5,7}, odd {1,3,4,6})\n//-----------------------------------------------------------------\nreg signed [LANE_W-1:0] i0;\nreg signed [LANE_W-1:0] mul0_a;\nreg signed [12:0]       mul0_b;\nreg signed [LANE_W-1:0] mul1_a;\nreg signed [12:0]       mul1_b;\nreg signed [LANE_W-1:0] mul2_a;\nreg signed [12:0]       mul2_b;\nreg signed [LANE_W-1:0] mul3_a;\nreg signed [12:0]       mul3_b;\nreg signed [LANE_W-1:0] mul4_a;\nreg signed [12:0]       mul4_b;\n\nalways @ (posedge clk )\nif (rst)\nbegin\n    i0     <= {LANE_W{1'b0}};\n    mul0_a <= {LANE_W{1'b0}};\n    mul0_b <= 13'b0;\n    mul1_a <= {LANE_W{1'b0}};\n    mul1_b <= 13'b0;\n    mul2_a <= {LANE_W{1'b0}};\n    mul2_b <= 13'b0;\n    mul3_a <= {LANE_W{1'b0}};\n    mul3_b <= 13'b0;\n    mul4_a <= {LANE_W{1'b0}};\n    mul4_b <= 13'b0;\nend\nelse\nbegin\n    case (inport_idx_i)\n    3'd0:\n    begin\n        i0     <= block_in_0_1 + block_in_4_5;\n        mul0_a <= block_in_2_3;\n        mul0_b <= C2_16;\n        mul1_a <= block_in_6_7;\n        mul1_b <= C6_16;\n    end\n    3'd1:\n    begin\n        mul0_a <= block_in_0_1;\n        mul0_b <= C1_16;\n        mul1_a <= block_in_6_7;\n        mul1_b <= C7_16;\n        mul2_a <= block_in_4_5;\n        mul2_b <= C5_16;\n        mul3_a <= block_in_2_3;\n        mul3_b <= C3_16;\n        mul4_a <= i0;\n        mul4_b <= C4_16;\n    end\n    3'd2:\n    begin\n        i0     <= block_in_0_1 - block_in_4_5;\n    end\n    3'd3:\n    begin\n        mul0_a <= block_in_0_1;\n        mul0_b <= C7_16;\n        mul1_a <= block_in_6_7;\n        mul1_b <= C1_16;\n        mul2_a <= block_in_4_5;\n        mul2_b <= C3_16;\n        mul3_a <= block_in_2_3;\n        mul3_b <= C5_16;\n    end\n    3'd4:\n    begin\n        mul0_a <= block_in_0_1;\n        mul0_b <= C7_16;\n        mul1_a <= block_in_6_7;\n        mul1_b <= C1_16;\n        mul2_a <= block_in_4_5;\n        mul2_b <= C3_16;\n        mul3_a <= block_in_2_3;\n        mul3_b <= C5_16;\n    end\n    3'd5:\n    begin\n        mul0_a <= block_in_2_3;\n        mul0_b <= C6_16;\n        mul1_a <= block_in_6_7;\n        mul1_b <= C2_16;\n        mul4_a <= i0;\n        mul4_b <= C4_16;\n    end\n    default:\n        ;\n    endcase\nend\n")
+
+[TOOL RESULT]
+[Step 6/60]
+Created file: design.sv
+
+[ASSISTANT]
+  -> apply_diff(filename='design.sv', diff='@@ -1,3 +1,4 @@\n+PLACEHOLDER\n //-----------------------------------------------------------------\n')
+
+[TOOL RESULT]
+[Step 7/60]
+Applied diff to: design.sv
+
+[ASSISTANT]
+I made a mistake adding a placeholder. Let me fix it and append the next section of the design (two edits, executed in order):
+  -> edit_file(filename='design.sv', old_string='PLACEHOLDER\n//-----------------------------------------------------------------', new_string='//-----------------------------------------------------------------')
+
+[TOOL RESULT]
+[Step 8/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> edit_file(filename='design.sv', new_string='    default:\n        ;\n    endcase\nend\n\nreg signed [MULQ_W-1:0] mul0_q;\nreg signed [MULQ_W-1:0] mul1_q;\nreg signed [MULQ_W-1:0] mul2_q;\nreg signed [MULQ_W-1:0] mul3_q;\nreg signed [MULQ_W-1:0] mul4_q;\n\nalways @ (posedge clk )\nif (rst)\nbegin\n    mul0_q <= {MULQ_W{1\'b0}};\n    mul1_q <= {MULQ_W{1\'b0}};\n    mul2_q <= {MULQ_W{1\'b0}};\n    mul3_q <= {MULQ_W{1\'b0}};\n    mul4_q <= {MULQ_W{1\'b0}};\nend\nelse\nbegin\n    mul0_q <= mul0_a * mul0_b;\n    mul1_q <= mul1_a * mul1_b;\n    mul2_q <= mul2_a * mul2_b;\n    mul3_q <= mul3_a * mul3_b;\n    mul4_q <= mul4_a * mul4_b;\nend\n\nreg signed [MULQ_W-1:0] mul0;\nreg signed [MULQ_W-1:0] mul1;\nreg signed [MULQ_W-1:0] mul2;\nreg signed [MULQ_W-1:0] mul3;\nreg signed [MULQ_W-1:0] mul4;\n\nalways @ (posedge clk )\nif (rst)\nbegin\n    mul0 <= {MULQ_W{1\'b0}};\n    mul1 <= {MULQ_W{1\'b0}};\n    mul2 <= {MULQ_W{1\'b0}};\n    mul3 <= {MULQ_W{1\'b0}};\n    mul4 <= {MULQ_W{1\'b0}};\nend\nelse\nbegin\n    mul0 <= mul0_q;\n    mul1 <= mul1_q;\n    mul2 <= mul2_q;\n    mul3 <= mul3_q;\n    mul4 <= mul4_q;\nend\n\nreg        out_stg0_valid_q;\nreg [2:0]  out_stg0_idx_q;\n\nalways @ (posedge clk )\nif (rst)\nbegin\n    out_stg0_valid_q <= 1\'b0;\n    out_stg0_idx_q   <= 3\'b0;\nend\nelse\nbegin\n    out_stg0_valid_q <= inport_valid_i;\n    out_stg0_idx_q   <= inport_idx_i;\nend\n\nreg        out_stg1_valid_q;\nreg [2:0]  out_stg1_idx_q;\n\nalways @ (posedge clk )\nif (rst)\nbegin\n    out_stg1_valid_q <= 1\'b0;\n    out_stg1_idx_q   <= 3\'b0;\nend\nelse\nbegin\n    out_stg1_valid_q <= out_stg0_valid_q;\n    out_stg1_idx_q   <= out_stg0_idx_q;\nend\n\nreg        out_stg2_valid_q;\nreg [2:0]  out_stg2_idx_q;\n\nalways @ (posedge clk )\nif (rst)\nbegin\n    out_stg2_valid_q <= 1\'b0;\n    out_stg2_idx_q   <= 3\'b0;\nend\nelse\nbegin\n    out_stg2_valid_q <= out_stg1_valid_q;\n    out_stg2_idx_q   <= out_stg1_idx_q;\nend\n\n//-----------------------------------------------------------------\n// (x*181)/256 : multiply wraps at 32 bits (as in the original),\n// divide truncates toward zero (as Verilog signed "/" does).\n//-----------------------------------------------------------------\nwire signed [31:0] t6_5_ext = o_t6_5;\nwire signed [31:0] t5_6_ext = o_t5_6;\nwire signed [31:0] prod65   = t6_5_ext * 32\'sd181;\nwire signed [31:0] prod56   = t5_6_ext * 32\'sd181;\nwire signed [31:0] div65    = prod65[31] ? ((prod65 + 32\'sd255) >>> 8) : (prod65 >>> 8);\nwire signed [31:0] div56    = prod56[31] ? ((prod56 + 32\'sd255) >>> 8) : (prod56 >>> 8);\n\nreg signed [O_W-1:0] o_s5;\nreg signed [O_W-1:0] o_s6;\nreg signed [O_W-1:0] o_s7;\nreg signed [O_W-1:0] o_t0;\nreg signed [O_W-1:0] o_t1;\nreg signed [O_W-1:0] o_t2;\nreg signed [O_W-1:0] o_t3;\nreg signed [O_W-1:0] o_t4;\nreg signed [O_W-1:0] o_t5;\nreg signed [O_W-1:0] o_t6;\nreg signed [O_W-1:0] o_t7;\nreg signed [O_W-1:0] o_t6_5;\nreg signed [O_W-1:0] o_t5_6;\n\nalways @ (posedge clk )\nif (rst)\nbegin\n    o_s5   <= {O_W{1\'b0}};\n    o_s6   <= {O_W{1\'b0}};\n    o_s7   <= {O_W{1\'b0}};\n    o_t0   <= {O_W{1\'b0}};\n    o_t1   <= {O_W{1\'b0}};\n    o_t2   <= {O_W{1\'b0}};\n    o_t3   <= {O_W{1\'b0}};\n    o_t4   <= {O_W{1\'b0}};\n    o_t5   <= {O_W{1\'b0}};\n    o_t6   <= {O_W{1\'b0}};\n    o_t7   <= {O_W{1\'b0}};\n    o_t6_5 <= {O_W{1\'b0}};\n    o_t5_6 <= {O_W{1\'b0}};\nend\nelse\nbegin\n    case (out_stg2_idx_q)\n    3\'d0:\n    begin\n        o_t3 <= mul0 + mul1; // s3\n    end\n    3\'d1:\n    begin\n        o_s7 <= mul0 + mul1;\n        o_s6 <= mul2 + mul3;\n        o_t0 <= mul4;        // s0\n    end\n    3\'d2:\n    begin\n        o_t0 <= o_t0 + o_t3; // t0\n        o_t3 <= o_t0 - o_t3; // t3\n        o_t7 <= o_s6 + o_s7;\n    end\n    3\'d3:\n    begin\n        o_t4 <= (mul0 - mul1) + (mul2 - mul3);\n    end\n    3\'d4:\n    begin\n        o_t0 <= mul0 - mul1; // s4\n        o_s5 <= mul2 - mul3;\n    end\n    3\'d5:\n    begin\n        o_t3 <= mul0 - mul1; // s2\n        o_t4 <= mul4;        // s1\n        o_t5 <= o_t0 - o_s5;\n        o_t6 <= o_s7 - o_s6;\n    end\n    3\'d6:\n    begin\n        o_t1 <= o_t4 + o_t3;\n        o_t2 <= o_t4 - o_t3;\n        o_t6_5 <= o_t6 - o_t5;\n        o_t5_6 <= o_t5 + o_t6;\n    end\n    default:\n    begin\n        o_s5 <= div65; // 1/sqrt(2)\n        o_s6 <= div56; // 1/sqrt(2)\n    end\n    endcase\nend\n\nreg        out_stg3_valid_q;\nreg [2:0]  out_stg3_idx_q;\n\nalways @ (posedge clk )\nif (rst)\nbegin\n    out_stg3_valid_q <= 1\'b0;\n    out_stg3_idx_q   <= 3\'b0;\nend\nelse\nbegin\n    out_stg3_valid_q <= out_stg2_valid_q;\n    out_stg3_idx_q   <= out_stg2_idx_q;\nend\n\nreg signed [OUT_W-1:0] block_out[0:7];\nreg signed [OUT_W-1:0] block_out_tmp;\n\nalways @ (posedge clk )\nif (rst)\nbegin\n    block_out[0] <= {OUT_W{1\'b0}};\n    block_out[1] <= {OUT_W{1\'b0}};\n    block_out[2] <= {OUT_W{1\'b0}};\n    block_out[3] <= {OUT_W{1\'b0}};\n    block_out[4] <= {OUT_W{1\'b0}};\n    block_out[5] <= {OUT_W{1\'b0}};\n    block_out[6] <= {OUT_W{1\'b0}};\n    block_out[7] <= {OUT_W{1\'b0}};\n    block_out_tmp <= {OUT_W{1\'b0}};\nend\nelse if (out_stg3_valid_q)\nbegin\n    if (out_stg3_idx_q == 3\'d3)\n    begin\n        block_out[0] <= ((o_t0 + o_t7) >>> OUT_SHIFT);\n        block_out_tmp <= ((o_t0 - o_t7) >>> OUT_SHIFT); // block_out[7]\n        block_out[3] <= ((o_t3 + o_t4) >>> OUT_SHIFT);\n        block_out[4] <= ((o_t3 - o_t4) >>> OUT_SHIFT);\n    end\n\n    if (out_stg3_idx_q == 3\'d6)\n        block_out[7] <= block_out_tmp;\n\n    if (out_stg3_idx_q == 3\'d7)\n    begin\n        block_out[2] <= ((o_t2 + o_s5) >>> OUT_SHIFT);\n        block_out[5] <= ((o_t2 - o_s5) >>> OUT_SHIFT);\n        block_out[1] <= ((o_t1 + o_s6) >>> OUT_SHIFT);\n        block_out[6] <= ((o_t1 - o_s6) >>> OUT_SHIFT);\n    end\nend\n\nreg [7:0] valid_q;\n\nalways @ (posedge clk )\nif (rst)\n    valid_q  <= 8\'b0;\nelse if (img_start_i)\n    valid_q  <= 8\'b0;\nelse\n    valid_q <= {valid_q[6:0], out_stg3_valid_q};\n\nreg [5:0] ptr_q;\n\nalways @ (posedge clk )\nif (rst)\n    ptr_q <= 6\'d0;\nelse if (img_start_i)\n    ptr_q <= 6\'d0;\nelse if (outport_valid_o)\n    ptr_q <= ptr_q + 6\'d1;\n\nassign outport_valid_o = valid_q[6];\n\nwire signed [OUT_W-1:0] block_out_r = block_out[ptr_q[2:0]];\nassign outport_data_o  = {{(32-OUT_W){block_out_r[OUT_W-1]}}, block_out_r};\n\n// row pass: idx = ptr;  col pass: idx = {ptr[2:0], ptr[5:3]}\nassign outport_idx_o   = IDX_SWAP ? {ptr_q[2:0], ptr_q[5:3]} : ptr_q;\n\n/* verilator lint_on WIDTH */\n\nendmodule\n', old_string='    default:\n        ;\n    endcase\nend\n')
+
+[TOOL RESULT]
+[Step 9/60]
+Edited file: design.sv
+
+[ASSISTANT]
+Now I need to fix an ordering issue — the `/256` wires reference `o_t6_5` before its declaration. Let me move them after the register declarations, and append the transpose + col pass + top:
+  -> edit_file(filename='design.sv', old_string="wire signed [31:0] t6_5_ext = o_t6_5;\nwire signed [31:0] t5_6_ext = o_t5_6;\nwire signed [31:0] prod65   = t6_5_ext * 32'sd181;\nwire signed [31:0] prod56   = t5_6_ext * 32'sd181;\nwire signed [31:0] div65    = prod65[31] ? ((prod65 + 32'sd255) >>> 8) : (prod65 >>> 8);\nwire signed [31:0] div56    = prod56[31] ? ((prod56 + 32'sd255) >>> 8) : (prod56 >>> 8);\n\nreg signed [O_W-1:0] o_s5;", new_string='reg signed [O_W-1:0] o_s5;')
+  -> edit_file(filename='design.sv', old_string='reg signed [O_W-1:0] o_t6_5;\nreg signed [O_W-1:0] o_t5_6;\n\nalways @ (posedge clk )', new_string='reg signed [O_W-1:0] o_t6_5;\nreg signed [O_W-1:0] o_t5_6;\n\n//-----------------------------------------------------------------\n// (x*181)/256 : multiply wraps at 32 bits (as in the original),\n// divide truncates toward zero (as Verilog signed "/" does).\n//-----------------------------------------------------------------\nwire signed [31:0] t6_5_ext = o_t6_5;\nwire signed [31:0] t5_6_ext = o_t5_6;\nwire signed [31:0] prod65   = t6_5_ext * 32\'sd181;\nwire signed [31:0] prod56   = t5_6_ext * 32\'sd181;\nwire signed [31:0] div65    = prod65[31] ? ((prod65 + 32\'sd255) >>> 8) : (prod65 >>> 8);\nwire signed [31:0] div56    = prod56[31] ? ((prod56 + 32\'sd255) >>> 8) : (prod56 >>> 8);\n\nalways @ (posedge clk )')
+
+[TOOL RESULT]
+[Step 10/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 10/60]
+Edited file: design.sv
+
+[ASSISTANT]
+Both edits applied. Now appending the transpose and top-level modules:
+  -> edit_file(filename='design.sv', new_string="/* verilator lint_on WIDTH */\n\nendmodule\n\n//-----------------------------------------------------------------\n// Double-buffered corner-turn (transpose).  Behaviour identical to\n// the original jpeg_idct_transpose; data path narrowed to DW bits\n// (row-pass outputs provably fit 20 signed bits).\n//-----------------------------------------------------------------\nmodule jpeg_idct_transpose\n#(\n     parameter DW = 20\n)\n(\n     input             clk\n    ,input             rst\n    ,input             img_start_i\n    ,input             img_end_i\n    ,input             inport_valid_i\n    ,input      [DW-1:0] inport_data_i\n    ,input      [ 5:0] inport_idx_i\n    ,input             outport_ready_i\n    ,output            inport_accept_o\n    ,output            outport_valid_o\n    ,output     [DW-1:0] outport_data0_o\n    ,output     [DW-1:0] outport_data1_o\n    ,output     [DW-1:0] outport_data2_o\n    ,output     [DW-1:0] outport_data3_o\n    ,output     [ 2:0] outport_idx_o\n);\n\nreg         block_wr_q;\nreg         block_rd_q;\nreg [5:0]   rd_idx_q;\nreg [3:0]   rd_addr_q;\n\nwire [4:0]  wr_ptr_w = {block_wr_q, inport_idx_i[3:0]};\nwire [4:0]  rd_ptr_w = {block_rd_q, rd_addr_q};\n\nwire        wr_en_w = inport_valid_i && inport_accept_o;\nwire [1:0]  wr_bank_w = inport_idx_i[5:4];\n\n// Four banks x 32 words (bank selected by idx[5:4], word by\n// {block_wr, idx[3:0]}); all banks read at {block_rd, rd_addr_q}.\nreg [DW-1:0] mem0 [0:31];\nreg [DW-1:0] mem1 [0:31];\nreg [DW-1:0] mem2 [0:31];\nreg [DW-1:0] mem3 [0:31];\n\nreg [DW-1:0] ram_read0_q;\nreg [DW-1:0] ram_read1_q;\nreg [DW-1:0] ram_read2_q;\nreg [DW-1:0] ram_read3_q;\n\nalways @ (posedge clk)\nbegin\n    if (wr_en_w && wr_bank_w == 2'd0)\n        mem0[wr_ptr_w] <= inport_data_i;\n    if (wr_en_w && wr_bank_w == 2'd1)\n        mem1[wr_ptr_w] <= inport_data_i;\n    if (wr_en_w && wr_bank_w == 2'd2)\n        mem2[wr_ptr_w] <= inport_data_i;\n    if (wr_en_w && wr_bank_w == 2'd3)\n        mem3[wr_ptr_w] <= inport_data_i;\n\n    ram_read0_q <= mem0[rd_ptr_w];\n    ram_read1_q <= mem1[rd_ptr_w];\n    ram_read2_q <= mem2[rd_ptr_w];\n    ram_read3_q <= mem3[rd_ptr_w];\nend\n\n//-----------------------------------------------------------------\n// Input Buffer\n//-----------------------------------------------------------------\nreg [1:0] block_ready_q;\n\nalways @ (posedge clk )\nif (rst)\nbegin\n    block_ready_q     <= 2'b0;\n    block_wr_q        <= 1'b0;\n    block_rd_q        <= 1'b0;\nend\nelse if (img_start_i)\nbegin\n    block_ready_q     <= 2'b0;\n    block_wr_q        <= 1'b0;\n    block_rd_q        <= 1'b0;\nend\nelse\nbegin\n    if (inport_valid_i && inport_idx_i == 6'd63 && inport_accept_o)\n    begin\n        block_ready_q[block_wr_q] <= 1'b1;\n        block_wr_q                <= ~block_wr_q;\n    end\n\n    if (outport_valid_o && rd_idx_q[5:0] == 6'd63)\n    begin\n        block_ready_q[block_rd_q] <= 1'b0;\n        block_rd_q <= ~block_rd_q;\n    end\nend\n\nassign inport_accept_o = ~block_ready_q[block_wr_q];\n\n//-----------------------------------------------------------------\n// FSM\n//-----------------------------------------------------------------\nlocalparam STATE_W           = 2;\nlocalparam STATE_IDLE        = 2'd0;\nlocalparam STATE_SETUP       = 2'd1;\nlocalparam STATE_ACTIVE      = 2'd2;\n\nreg [STATE_W-1:0] state_q;\nreg [STATE_W-1:0] next_state_r;\n\nalways @ *\nbegin\n    next_state_r = state_q;\n\n    case (state_q)\n    STATE_IDLE:\n    begin\n        if (block_ready_q[block_rd_q] && outport_ready_i)\n            next_state_r = STATE_SETUP;\n    end\n    STATE_SETUP:\n    begin\n        next_state_r = STATE_ACTIVE;\n    end\n    STATE_ACTIVE:\n    begin\n        if (outport_valid_o && rd_idx_q == 6'd63)\n            next_state_r = STATE_IDLE;\n    end\n    default: ;\n    endcase\n\n    if (img_start_i)\n        next_state_r = STATE_IDLE;\nend\n\nalways @ (posedge clk )\nif (rst)\n    state_q <= STATE_IDLE;\nelse\n    state_q <= next_state_r;\n\nalways @ (posedge clk )\nif (rst)\n    rd_idx_q <= 6'b0;\nelse if (img_start_i)\n    rd_idx_q <= 6'b0;\nelse if (state_q == STATE_ACTIVE)\n    rd_idx_q <= rd_idx_q + 6'd1;\n\nalways @ (posedge clk )\nif (rst)\n    rd_addr_q <= 4'b0;\nelse if (state_q == STATE_IDLE)\n    rd_addr_q <= 4'b0;\nelse if (state_q == STATE_SETUP)\n    rd_addr_q <= 4'd8;\nelse if (state_q == STATE_ACTIVE)\nbegin\n    case (rd_idx_q[2:0])\n    3'd0: rd_addr_q <= rd_addr_q - 4'd8;\n    3'd1: rd_addr_q <= rd_addr_q + 4'd8;\n    3'd2: ;\n    3'd3: rd_addr_q <= rd_addr_q - 4'd8;\n    3'd4: rd_addr_q <= rd_addr_q + 4'd8;\n    3'd5: rd_addr_q <= rd_addr_q - 4'd8;\n    3'd6: rd_addr_q <= rd_addr_q + 4'd1;\n    3'd7: rd_addr_q <= rd_addr_q + 4'd8;\n    endcase\nend\n\nassign outport_valid_o = (state_q == STATE_ACTIVE);\nassign outport_idx_o   = rd_idx_q[2:0];\nassign outport_data0_o = ram_read0_q;\nassign outport_data1_o = ram_read1_q;\nassign outport_data2_o = ram_read2_q;\nassign outport_data3_o = ram_read3_q;\n\nendmodule\n\n//-----------------------------------------------------------------\n// jpeg_idct_2d — row pass -> transpose -> column pass\n//-----------------------------------------------------------------\nmodule jpeg_idct_2d\n(\n     input           clk\n    ,input           rst\n    ,input           img_start_i\n    ,input           img_end_i\n    ,input           inport_valid_i\n    ,input  [ 15:0]  inport_data0_i\n    ,input  [ 15:0]  inport_data1_i\n    ,input  [ 15:0]  inport_data2_i\n    ,input  [ 15:0]  inport_data3_i\n    ,input  [  2:0]  inport_idx_i\n    ,output          outport_valid_o\n    ,output [ 31:0]  outport_data_o\n    ,output [  5:0]  outport_idx_o\n);\n\n// ---- row pass inputs: sign-extend 16 -> 32 ------------------------\nwire [31:0] xd0 = {{16{inport_data0_i[15]}}, inport_data0_i};\nwire [31:0] xd1 = {{16{inport_data1_i[15]}}, inport_data1_i};\nwire [31:0] xd2 = {{16{inport_data2_i[15]}}, inport_data2_i};\nwire [31:0] xd3 = {{16{inport_data3_i[15]}}, inport_data3_i};\n\nwire        x_valid_w;\nwire [31:0] x_data_w;\nwire [ 5:0] x_idx_w;\nwire        x_accept_w;\n\njpeg_idct_1d\n#(\n     .LANE_W(17)\n    ,.MULQ_W(29)\n    ,.O_W(31)\n    ,.OUT_W(20)\n    ,.OUT_SHIFT(11)\n    ,.IDX_SWAP(1'b0)\n)\nu_idct_x\n(\n     .clk(clk)\n    ,.rst(rst)\n    ,.img_start_i(img_start_i)\n    ,.inport_valid_i(inport_valid_i)\n    ,.inport_data0_i(xd0)\n    ,.inport_data1_i(xd1)\n    ,.inport_data2_i(xd2)\n    ,.inport_data3_i(xd3)\n    ,.inport_idx_i(inport_idx_i)\n    ,.outport_valid_o(x_valid_w)\n    ,.outport_data_o(x_data_w)\n    ,.outport_idx_o(x_idx_w)\n);\n\n// ---- transpose (20-bit data path) --------------------------------\nwire          t_valid_w;\nwire [19:0]   t_data0_w;\nwire [19:0]   t_data1_w;\nwire [19:0]   t_data2_w;\nwire [19:0]   t_data3_w;\nwire [ 2:0]   t_idx_w;\n\njpeg_idct_transpose\n#(\n     .DW(20)\n)\nu_transpose\n(\n     .clk(clk)\n    ,.rst(rst)\n    ,.img_start_i(img_start_i)\n    ,.img_end_i(img_end_i)\n    ,.inport_valid_i(x_valid_w)\n    ,.inport_data_i(x_data_w[19:0])\n    ,.inport_idx_i(x_idx_w)\n    ,.inport_accept_o(x_accept_w)\n    ,.outport_valid_o(t_valid_w)\n    ,.outport_data0_o(t_data0_w)\n    ,.outport_data1_o(t_data1_w)\n    ,.outport_data2_o(t_data2_w)\n    ,.outport_data3_o(t_data3_w)\n    ,.outport_idx_o(t_idx_w)\n    ,.outport_ready_i(1'b1)\n);\n\n// ---- column pass inputs: sign-extend 20 -> 32 ---------------------\nwire [31:0] yd0 = {{12{t_data0_w[19]}}, t_data0_w};\nwire [31:0] yd1 = {{12{t_data1_w[19]}}, t_data1_w};\nwire [31:0] yd2 = {{12{t_data2_w[19]}}, t_data2_w};\nwire [31:0] yd3 = {{12{t_data3_w[19]}}, t_data3_w};\n\njpeg_idct_1d\n#(\n     .LANE_W(21)\n    ,.MULQ_W(32)\n    ,.O_W(32)\n    ,.OUT_W(18)\n    ,.OUT_SHIFT(15)\n    ,.IDX_SWAP(1'b1)\n)\nu_idct_y\n(\n     .clk(clk)\n    ,.rst(rst)\n    ,.img_start_i(img_start_i)\n    ,.inport_valid_i(t_valid_w)\n    ,.inport_data0_i(yd0)\n    ,.inport_data1_i(yd1)\n    ,.inport_data2_i(yd2)\n    ,.inport_data3_i(yd3)\n    ,.inport_idx_i(t_idx_w)\n    ,.outport_valid_o(outport_valid_o)\n    ,.outport_data_o(outport_data_o)\n    ,.outport_idx_o(outport_idx_o)\n);\n\nendmodule\n", old_string='/* verilator lint_on WIDTH */\n\nendmodule\n')
+
+[TOOL RESULT]
+[Step 11/60]
+Edited file: design.sv
+
+[ASSISTANT]
+Let me review the complete file for correctness before evaluating:
+  -> read_file(filename='design.sv', limit=120)
+
+[TOOL RESULT]
+[Step 12/60]
+//-----------------------------------------------------------------
+// jpeg_idct_2d — optimized, bit-exact re-implementation of the
+// core_jpeg (ultraembedded, Apache 2.0) 8x8 2-D IDCT composition:
+//   row pass (OUT_SHIFT=11) -> double-buffered transpose -> col pass (15)
+//
+// Bit-exactness notes:
+//  * Arithmetic that can wrap in the original (32-bit wrap-around) is
+//    kept in a 32-bit context.  Registers are narrowed ONLY where the
+//    original values are provably inside range for ANY input:
+//      - row pass: 16-bit inputs => intermediates <= 688,217,344 < 2^30
+//        (except the deliberate (x*181) 32-bit wrap); products <= 1.9e8.
+//      - row outputs after >>>11 fit in 20 signed bits (max 346,424),
+//        so the transpose stores 20 bits (sign-extended on read).
+//      - col pass lanes are those row outputs => mul lanes fit 20 bits
+//        (i0 fits 21); col pass sums CAN wrap => kept 32-bit; col
+//        outputs after >>>15 fit 18 signed bits.
+//  * (x*181)/256: multiply kept at 32-bit (wraps), division replaced
+//    by an exact truncation-toward-zero shift network.
+//  * Pipeline structure, latency, FSMs and streaming schedule are
+//    identical to the original.
+//-----------------------------------------------------------------
+
+module jpeg_idct_1d
+#(
+     parameter LANE_W    = 17
+    ,parameter MULQ_W    = 29
+    ,parameter O_W       = 31
+    ,parameter OUT_W     = 20
+    ,parameter OUT_SHIFT = 11
+    ,parameter IDX_SWAP  = 1'b0
+)
+(
+     input             clk
+    ,input             rst
+    ,input             img_start_i
+    ,input             inport_valid_i
+    ,input      [31:0] inport_data0_i
+    ,input      [31:0] inport_data1_i
+    ,input      [31:0] inport_data2_i
+    ,input      [31:0] inport_data3_i
+    ,input      [ 2:0] inport_idx_i
+    ,output            outport_valid_o
+    ,output     [31:0] outport_data_o
+    ,output     [ 5:0] outport_idx_o
+);
+/* verilator lint_off WIDTH */
+
+localparam [12:0] C1_16 = 13'd4017; // cos( pi/16) x4096
+localparam [12:0] C2_16 = 13'd3784; // cos(2pi/16) x4096
+localparam [12:0] C3_16 = 13'd3406; // cos(3pi/16) x4096
+localparam [12:0] C4_16 = 13'd2896; // cos(4pi/16) x4096
+localparam [12:0] C5_16 = 13'd2276; // cos(5pi/16) x4096
+localparam [12:0] C6_16 = 13'd1567; // cos(6pi/16) x4096
+localparam [12:0] C7_16 = 13'd799;  // cos(7pi/16) x4096
+
+wire signed [LANE_W-1:0] block_in_0_1 = inport_data0_i[LANE_W-1:0];
+wire signed [LANE_W-1:0] block_in_2_3 = inport_data1_i[LANE_W-1:0];
+wire signed [LANE_W-1:0] block_in_4_5 = inport_data2_i[LANE_W-1:0];
+wire signed [LANE_W-1:0] block_in_6_7 = inport_data3_i[LANE_W-1:0];
+
+//-----------------------------------------------------------------
+// IDCT input stage (schedule: even beats {0,2,5,7}, odd {1,3,4,6})
+//-----------------------------------------------------------------
+reg signed [LANE_W-1:0] i0;
+reg signed [LANE_W-1:0] mul0_a;
+reg signed [12:0]       mul0_b;
+reg signed [LANE_W-1:0] mul1_a;
+reg signed [12:0]       mul1_b;
+reg signed [LANE_W-1:0] mul2_a;
+reg signed [12:0]       mul2_b;
+reg signed [LANE_W-1:0] mul3_a;
+reg signed [12:0]       mul3_b;
+reg signed [LANE_W-1:0] mul4_a;
+reg signed [12:0]       mul4_b;
+
+always @ (posedge clk )
+if (rst)
+begin
+    i0     <= {LANE_W{1'b0}};
+    mul0_a <= {LANE_W{1'b0}};
+    mul0_b <= 13'b0;
+    mul1_a <= {LANE_W{1'b0}};
+    mul1_b <= 13'b0;
+    mul2_a <= {LANE_W{1'b0}};
+    mul2_b <= 13'b0;
+    mul3_a <= {LANE_W{1'b0}};
+    mul3_b <= 13'b0;
+    mul4_a <= {LANE_W{1'b0}};
+    mul4_b <= 13'b0;
+end
+else
+begin
+    case (inport_idx_i)
+    3'd0:
+    begin
+        i0     <= block_in_0_1 + block_in_4_5;
+        mul0_a <= block_in_2_3;
+        mul0_b <= C2_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C6_16;
+    end
+    3'd1:
+    begin
+        mul0_a <= block_in_0_1;
+        mul0_b <= C1_16;
+        mul1_a <= block_in_6_7;
+        mul1_b <= C7_16;
+        mul2_a <= block_in_4_5;
+        mul2_b <= C5_16;
+        mul3_a <= block_in_2_3;
+        mul3_b <= C3_16;
+        mul4_a <= i0;
+        mul4_b <= C4_16;
+    end
+    3'd2:
+    begin
+        i0     <= block_in_0_1 - block_in_4_5;
+    end
+    3'd3:
+    begin
+
+... (showing lines 1-120 of 730; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='design.sv', limit=240, offset=240)
+
+[TOOL RESULT]
+[Step 13/60]
+    out_stg2_idx_q   <= 3'b0;
+end
+else
+begin
+    out_stg2_valid_q <= out_stg1_valid_q;
+    out_stg2_idx_q   <= out_stg1_idx_q;
+end
+
+//-----------------------------------------------------------------
+// (x*181)/256 : multiply wraps at 32 bits (as in the original),
+// divide truncates toward zero (as Verilog signed "/" does).
+//-----------------------------------------------------------------
+reg signed [O_W-1:0] o_s5;
+reg signed [O_W-1:0] o_s6;
+reg signed [O_W-1:0] o_s7;
+reg signed [O_W-1:0] o_t0;
+reg signed [O_W-1:0] o_t1;
+reg signed [O_W-1:0] o_t2;
+reg signed [O_W-1:0] o_t3;
+reg signed [O_W-1:0] o_t4;
+reg signed [O_W-1:0] o_t5;
+reg signed [O_W-1:0] o_t6;
+reg signed [O_W-1:0] o_t7;
+reg signed [O_W-1:0] o_t6_5;
+reg signed [O_W-1:0] o_t5_6;
+
+//-----------------------------------------------------------------
+// (x*181)/256 : multiply wraps at 32 bits (as in the original),
+// divide truncates toward zero (as Verilog signed "/" does).
+//-----------------------------------------------------------------
+wire signed [31:0] t6_5_ext = o_t6_5;
+wire signed [31:0] t5_6_ext = o_t5_6;
+wire signed [31:0] prod65   = t6_5_ext * 32'sd181;
+wire signed [31:0] prod56   = t5_6_ext * 32'sd181;
+wire signed [31:0] div65    = prod65[31] ? ((prod65 + 32'sd255) >>> 8) : (prod65 >>> 8);
+wire signed [31:0] div56    = prod56[31] ? ((prod56 + 32'sd255) >>> 8) : (prod56 >>> 8);
+
+always @ (posedge clk )
+if (rst)
+begin
+    o_s5   <= {O_W{1'b0}};
+    o_s6   <= {O_W{1'b0}};
+    o_s7   <= {O_W{1'b0}};
+    o_t0   <= {O_W{1'b0}};
+    o_t1   <= {O_W{1'b0}};
+    o_t2   <= {O_W{1'b0}};
+    o_t3   <= {O_W{1'b0}};
+    o_t4   <= {O_W{1'b0}};
+    o_t5   <= {O_W{1'b0}};
+    o_t6   <= {O_W{1'b0}};
+    o_t7   <= {O_W{1'b0}};
+    o_t6_5 <= {O_W{1'b0}};
+    o_t5_6 <= {O_W{1'b0}};
+end
+else
+begin
+    case (out_stg2_idx_q)
+    3'd0:
+    begin
+        o_t3 <= mul0 + mul1; // s3
+    end
+    3'd1:
+    begin
+        o_s7 <= mul0 + mul1;
+        o_s6 <= mul2 + mul3;
+        o_t0 <= mul4;        // s0
+    end
+    3'd2:
+    begin
+        o_t0 <= o_t0 + o_t3; // t0
+        o_t3 <= o_t0 - o_t3; // t3
+        o_t7 <= o_s6 + o_s7;
+    end
+    3'd3:
+    begin
+        o_t4 <= (mul0 - mul1) + (mul2 - mul3);
+    end
+    3'd4:
+    begin
+        o_t0 <= mul0 - mul1; // s4
+        o_s5 <= mul2 - mul3;
+    end
+    3'd5:
+    begin
+        o_t3 <= mul0 - mul1; // s2
+        o_t4 <= mul4;        // s1
+        o_t5 <= o_t0 - o_s5;
+        o_t6 <= o_s7 - o_s6;
+    end
+    3'd6:
+    begin
+        o_t1 <= o_t4 + o_t3;
+        o_t2 <= o_t4 - o_t3;
+        o_t6_5 <= o_t6 - o_t5;
+        o_t5_6 <= o_t5 + o_t6;
+    end
+    default:
+    begin
+        o_s5 <= div65; // 1/sqrt(2)
+        o_s6 <= div56; // 1/sqrt(2)
+    end
+    endcase
+end
+
+reg        out_stg3_valid_q;
+reg [2:0]  out_stg3_idx_q;
+
+always @ (posedge clk )
+if (rst)
+begin
+    out_stg3_valid_q <= 1'b0;
+    out_stg3_idx_q   <= 3'b0;
+end
+else
+begin
+    out_stg3_valid_q <= out_stg2_valid_q;
+    out_stg3_idx_q   <= out_stg2_idx_q;
+end
+
+reg signed [OUT_W-1:0] block_out[0:7];
+reg signed [OUT_W-1:0] block_out_tmp;
+
+always @ (posedge clk )
+if (rst)
+begin
+    block_out[0] <= {OUT_W{1'b0}};
+    block_out[1] <= {OUT_W{1'b0}};
+    block_out[2] <= {OUT_W{1'b0}};
+    block_out[3] <= {OUT_W{1'b0}};
+    block_out[4] <= {OUT_W{1'b0}};
+    block_out[5] <= {OUT_W{1'b0}};
+    block_out[6] <= {OUT_W{1'b0}};
+    block_out[7] <= {OUT_W{1'b0}};
+    block_out_tmp <= {OUT_W{1'b0}};
+end
+else if (out_stg3_valid_q)
+begin
+    if (out_stg3_idx_q == 3'd3)
+    begin
+        block_out[0] <= ((o_t0 + o_t7) >>> OUT_SHIFT);
+        block_out_tmp <= ((o_t0 - o_t7) >>> OUT_SHIFT); // block_out[7]
+        block_out[3] <= ((o_t3 + o_t4) >>> OUT_SHIFT);
+        block_out[4] <= ((o_t3 - o_t4) >>> OUT_SHIFT);
+    end
+
+    if (out_stg3_idx_q == 3'd6)
+        block_out[7] <= block_out_tmp;
+
+    if (out_stg3_idx_q == 3'd7)
+    begin
+        block_out[2] <= ((o_t2 + o_s5) >>> OUT_SHIFT);
+        block_out[5] <= ((o_t2 - o_s5) >>> OUT_SHIFT);
+        block_out[1] <= ((o_t1 + o_s6) >>> OUT_SHIFT);
+        block_out[6] <= ((o_t1 - o_s6) >>> OUT_SHIFT);
+    end
+end
+
+reg [7:0] valid_q;
+
+always @ (posedge clk )
+if (rst)
+    valid_q  <= 8'b0;
+else if (img_start_i)
+    valid_q  <= 8'b0;
+else
+    valid_q <= {valid_q[6:0], out_stg3_valid_q};
+
+reg [5:0] ptr_q;
+
+always @ (posedge clk )
+if (rst)
+    ptr_q <= 6'd0;
+else if (img_start_i)
+    ptr_q <= 6'd0;
+else if (outport_valid_o)
+    ptr_q <= ptr_q + 6'd1;
+
+assign outport_valid_o = valid_q[6];
+
+wire signed [OUT_W-1:0] block_out_r = block_out[ptr_q[2:0]];
+assign outport_data_o  = {{(32-OUT_W){block_out_r[OUT_W-1]}}, block_out_r};
+
+// row pass: idx = ptr;  col pass: idx = {ptr[2:0], ptr[5:3]}
+assign outport_idx_o   = IDX_SWAP ? {ptr_q[2:0], ptr_q[5:3]} : ptr_q;
+
+/* verilator lint_on WIDTH */
+
+endmodule
+
+//-----------------------------------------------------------------
+// Double-buffered corner-turn (transpose).  Behaviour identical to
+// the original jpeg_idct_transpose; data path narrowed to DW bits
+// (row-pass outputs provably fit 20 signed bits).
+//-----------------------------------------------------------------
+module jpeg_idct_transpose
+#(
+     parameter DW = 20
+)
+(
+     input             clk
+    ,input             rst
+    ,input             img_start_i
+    ,input             img_end_i
+    ,input             inport_valid_i
+    ,input      [DW-1:0] inport_data_i
+    ,input      [ 5:0] inport_idx_i
+    ,input             outport_ready_i
+    ,output            inport_accept_o
+    ,output            outport_valid_o
+    ,output     [DW-1:0] outport_data0_o
+    ,output     [DW-1:0] outport_data1_o
+    ,output     [DW-1:0] outport_data2_o
+    ,output     [DW-1:0] outport_data3_o
+    ,output     [ 2:0] outport_idx_o
+);
+
+reg         block_wr_q;
+reg         block_rd_q;
+reg [5:0]   rd_idx_q;
+reg [3:0]   rd_addr_q;
+
+wire [4:0]  wr_ptr_w = {block_wr_q, inport_idx_i[3:0]};
+wire [4:0]  rd_ptr_w = {block_rd_q, rd_addr_q};
+
+wire        wr_en_w = inport_valid_i && inport_accept_o;
+wire [1:0]  wr_bank_w = inport_idx_i[5:4];
+
+// Four banks x 32 words (bank selected by idx[5:4], word by
+// {block_wr, idx[3:0]}); all banks read at {block_rd, rd_addr_q}.
+reg [DW-1:0] mem0 [0:31];
+reg [DW-1:0] mem1 [0:31];
+reg [DW-1:0] mem2 [0:31];
+reg [DW-1:0] mem3 [0:31];
+
+reg [DW-1:0] ram_read0_q;
+reg [DW-1:0] ram_read1_q;
+reg [DW-1:0] ram_read2_q;
+reg [DW-1:0] ram_read3_q;
+
+always @ (posedge clk)
+
+... (showing lines 240-479 of 730; use offset/limit for more)
+
+[ASSISTANT]
+The design looks structurally complete and faithful. Let me run the evaluation:
+  -> run_evaluation(filename='design.sv')
+
+[TOOL RESULT]
+[Step 14/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 8626797.332309531
+  Metrics:
+    area_delay_product: 8626797.332309531
+    delay: 2110.2063
+    area: 4088.129834656229
+    power_probabilistic_fixed_clock: 0.0274
+    target_delay: 500.0
+    worst_slack: -1616.42
+  Worst timing path:
+    Startpoint: u_transpose.rd_addr_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_transpose.ram_read2_q_$_NOT__Y_19_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_transpose.rd_addr_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+    1298.68 1298.68 ^ u_transpose.rd_addr_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     326.60 1625.28 v _38956_/Y (INVxp33_ASAP7_75t_R)
+     105.85 1731.13 ^ _38969_/Y (NAND2xp33_ASAP7_75t_R)
+      53.75 1784.88 ^ _38970_/Y (HB1xp67_ASAP7_75t_R)
+      44.94 1829.82 ^ _39040_/Y (HB1xp67_ASAP7_75t_R)
+      53.03 1882.84 ^ _39428_/Y (HB1xp67_ASAP7_75t_R)
+      21.34 1904.18 v _41542_/Y (OAI221xp5_ASAP7_75t_R)
+      44.51 1948.69 ^ _41543_/Y (INVxp33_ASAP7_75t_R)
+      23.85 1972.54 v _41544_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      56.51 2029.05 ^ _41545_/Y (OAI211xp5_ASAP7_75t_R)
+      22.81 2051.86 v _41546_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      36.01 2087.87 v _41547_/Y (AO21x1_ASAP7_75t_R)
+      22.34 2110.21 v _41548_/Y (HB1xp67_ASAP7_75t_R)
+       0.00 2110.21 v u_transpose.ram_read2_q_$_NOT__Y_19_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            2110.21   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ u_transpose.ram_read2_q_$_NOT__Y_19_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -6.22  493.78   library setup time
+             493.78   data required time
+    ---------------------------------------------------------
+             493.78   data required time
+            -2110.21   data arrival time
+    ---------------------------------------------------------
+            -1616.42   slack (VIOLATED)
+
+Best so far: 8626797.332309531 area_delay_product (eval 1)
+
+[ASSISTANT]
+Design passes at **8.63M ADP** (area 4088, delay 2110ps). The critical path is the **transpose read mux** — `rd_addr_q` fans out to 4 banks × 20 bits. My plan: (1) split read-pointer fanout with bank-private copies, then (2) sweep target_delay, (3) trim area.
+
+Let me apply the fanout-splitting edits:
+  -> edit_file(filename='design.sv', new_string='reg         block_wr_q;\nreg         block_rd_q;\nreg [5:0]   rd_idx_q;\nreg [3:0]   rd_addr_q;\n// bank-private read-pointer copies (fanout splitting on the read mux)\nreg [4:0]   rp1_q;\nreg [4:0]   rp2_q;\nreg [4:0]   rp3_q;\n\nwire [4:0]  wr_ptr_w = {block_wr_q, inport_idx_i[3:0]};', old_string='reg         block_wr_q;\nreg         block_rd_q;\nreg [5:0]   rd_idx_q;\nreg [3:0]   rd_addr_q;\n\nwire [4:0]  wr_ptr_w = {block_wr_q, inport_idx_i[3:0]};\nwire [4:0]  rd_ptr_w = {block_rd_q, rd_addr_q};')
+  -> edit_file(filename='design.sv', new_string='    ram_read0_q <= mem0[{block_rd_q, rd_addr_q}];\n    ram_read1_q <= mem1[rp1_q];\n    ram_read2_q <= mem2[rp2_q];\n    ram_read3_q <= mem3[rp3_q];', old_string='    ram_read0_q <= mem0[rd_ptr_w];\n    ram_read1_q <= mem1[rd_ptr_w];\n    ram_read2_q <= mem2[rd_ptr_w];\n    ram_read3_q <= mem3[rd_ptr_w];')
+  -> edit_file(filename='design.sv', new_string="always @ (posedge clk )\nif (rst)\nbegin\n    block_ready_q     <= 2'b0;\n    block_wr_q        <= 1'b0;\nend\nelse if (img_start_i)\nbegin\n    block_ready_q     <= 2'b0;\n    block_wr_q        <= 1'b0;\nend\nelse\nbegin\n    if (inport_valid_i && inport_idx_i == 6'd63 && inport_accept_o)\n    begin\n        block_ready_q[block_wr_q] <= 1'b1;\n        block_wr_q                <= ~block_wr_q;\n    end\n\n    if (outport_valid_o && rd_idx_q[5:0] == 6'd63)\n    begin\n        block_ready_q[block_rd_q] <= 1'b0;\n    end\nend", old_string="always @ (posedge clk )\nif (rst)\nbegin\n    block_ready_q     <= 2'b0;\n    block_wr_q        <= 1'b0;\n    block_rd_q        <= 1'b0;\nend\nelse if (img_start_i)\nbegin\n    block_ready_q     <= 2'b0;\n    block_wr_q        <= 1'b0;\n    block_rd_q        <= 1'b0;\nend\nelse\nbegin\n    if (inport_valid_i && inport_idx_i == 6'd63 && inport_accept_o)\n    begin\n        block_ready_q[block_wr_q] <= 1'b1;\n        block_wr_q                <= ~block_wr_q;\n    end\n\n    if (outport_valid_o && rd_idx_q[5:0] == 6'd63)\n    begin\n        block_ready_q[block_rd_q] <= 1'b0;\n        block_rd_q <= ~block_rd_q;\n    end\nend")
+  -> edit_file(filename='design.sv', new_string="//-----------------------------------------------------------------\n// Read-pointer next state: shared by the FSM state registers and by\n// the bank-private fanout copies (rp1..rp3)\n//-----------------------------------------------------------------\nwire read_done_w = outport_valid_o && (rd_idx_q == 6'd63);\n\nwire block_rd_nxt = rst         ? 1'b0 :\n                    img_start_i ? 1'b0 :\n                    read_done_w ? ~block_rd_q :\n                                  block_rd_q;\n\nwire [3:0] rd_addr_nxt =\n                    rst                     ? 4'd0 :\n                    (state_q == STATE_IDLE) ? 4'd0 :\n                    (state_q == STATE_SETUP) ? 4'd8 :\n                    (state_q == STATE_ACTIVE) ?\n                        ((rd_idx_q[2:0] == 3'd0) ? rd_addr_q - 4'd8 :\n                         (rd_idx_q[2:0] == 3'd1) ? rd_addr_q + 4'd8 :\n                         (rd_idx_q[2:0] == 3'd2) ? rd_addr_q :\n                         (rd_idx_q[2:0] == 3'd3) ? rd_addr_q - 4'd8 :\n                         (rd_idx_q[2:0] == 3'd4) ? rd_addr_q + 4'd8 :\n                         (rd_idx_q[2:0] == 3'd5) ? rd_addr_q - 4'd8 :\n                         (rd_idx_q[2:0] == 3'd6) ? rd_addr_q + 4'd1 :\n                                                   rd_addr_q + 4'd8) :\n                                                  rd_addr_q;\n\nalways @ (posedge clk)\nbegin\n    block_rd_q <= block_rd_nxt;\n    rd_addr_q  <= rd_addr_nxt;\n    rp1_q      <= {block_rd_nxt, rd_addr_nxt};\n    rp2_q      <= {block_rd_nxt, rd_addr_nxt};\n    rp3_q      <= {block_rd_nxt, rd_addr_nxt};\nend\n\nassign outport_valid_o = (state_q == STATE_ACTIVE);", old_string='assign outport_valid_o = (state_q == STATE_ACTIVE);')
+
+[TOOL RESULT]
+[Step 15/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 15/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 15/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 15/60]
+Edited file: design.sv
+
+[ASSISTANT]
+I must now remove the original `rd_addr_q` always block since my new shared block drives it (otherwise multiple drivers):
+  -> read_file(filename='design.sv', limit=70, offset=575)
+
+[TOOL RESULT]
+[Step 16/60]
+if (rst)
+    rd_idx_q <= 6'b0;
+else if (img_start_i)
+    rd_idx_q <= 6'b0;
+else if (state_q == STATE_ACTIVE)
+    rd_idx_q <= rd_idx_q + 6'd1;
+
+always @ (posedge clk )
+if (rst)
+    rd_addr_q <= 4'b0;
+else if (state_q == STATE_IDLE)
+    rd_addr_q <= 4'b0;
+else if (state_q == STATE_SETUP)
+    rd_addr_q <= 4'd8;
+else if (state_q == STATE_ACTIVE)
+begin
+    case (rd_idx_q[2:0])
+    3'd0: rd_addr_q <= rd_addr_q - 4'd8;
+    3'd1: rd_addr_q <= rd_addr_q + 4'd8;
+    3'd2: ;
+    3'd3: rd_addr_q <= rd_addr_q - 4'd8;
+    3'd4: rd_addr_q <= rd_addr_q + 4'd8;
+    3'd5: rd_addr_q <= rd_addr_q - 4'd8;
+    3'd6: rd_addr_q <= rd_addr_q + 4'd1;
+    3'd7: rd_addr_q <= rd_addr_q + 4'd8;
+    endcase
+end
+
+//-----------------------------------------------------------------
+// Read-pointer next state: shared by the FSM state registers and by
+// the bank-private fanout copies (rp1..rp3)
+//-----------------------------------------------------------------
+wire read_done_w = outport_valid_o && (rd_idx_q == 6'd63);
+
+wire block_rd_nxt = rst         ? 1'b0 :
+                    img_start_i ? 1'b0 :
+                    read_done_w ? ~block_rd_q :
+                                  block_rd_q;
+
+wire [3:0] rd_addr_nxt =
+                    rst                     ? 4'd0 :
+                    (state_q == STATE_IDLE) ? 4'd0 :
+                    (state_q == STATE_SETUP) ? 4'd8 :
+                    (state_q == STATE_ACTIVE) ?
+                        ((rd_idx_q[2:0] == 3'd0) ? rd_addr_q - 4'd8 :
+                         (rd_idx_q[2:0] == 3'd1) ? rd_addr_q + 4'd8 :
+                         (rd_idx_q[2:0] == 3'd2) ? rd_addr_q :
+                         (rd_idx_q[2:0] == 3'd3) ? rd_addr_q - 4'd8 :
+                         (rd_idx_q[2:0] == 3'd4) ? rd_addr_q + 4'd8 :
+                         (rd_idx_q[2:0] == 3'd5) ? rd_addr_q - 4'd8 :
+                         (rd_idx_q[2:0] == 3'd6) ? rd_addr_q + 4'd1 :
+                                                   rd_addr_q + 4'd8) :
+                                                  rd_addr_q;
+
+always @ (posedge clk)
+begin
+    block_rd_q <= block_rd_nxt;
+    rd_addr_q  <= rd_addr_nxt;
+    rp1_q      <= {block_rd_nxt, rd_addr_nxt};
+    rp2_q      <= {block_rd_nxt, rd_addr_nxt};
+    rp3_q      <= {block_rd_nxt, rd_addr_nxt};
+end
+
+assign outport_valid_o = (state_q == STATE_ACTIVE);
+assign outport_idx_o   = rd_idx_q[2:0];
+assign outport_data0_o = ram_read0_q;
+assign outport_data1_o = ram_read1_q;
+assign outport_data2_o = ram_read2_q;
+assign outport_data3_o = ram_read3_q;
+
+
+... (showing lines 575-644 of 765; use offset/limit for more)
+
+[ASSISTANT]
+  -> edit_file(filename='design.sv', new_string="always @ (posedge clk )\nif (rst)\n    rd_idx_q <= 6'b0;\nelse if (img_start_i)\n    rd_idx_q <= 6'b0;\nelse if (state_q == STATE_ACTIVE)\n    rd_idx_q <= rd_idx_q + 6'd1;\n\n//-----------------------------------------------------------------", old_string="always @ (posedge clk )\nif (rst)\n    rd_idx_q <= 6'b0;\nelse if (img_start_i)\n    rd_idx_q <= 6'b0;\nelse if (state_q == STATE_ACTIVE)\n    rd_idx_q <= rd_idx_q + 6'd1;\n\nalways @ (posedge clk )\nif (rst)\n    rd_addr_q <= 4'b0;\nelse if (state_q == STATE_IDLE)\n    rd_addr_q <= 4'b0;\nelse if (state_q == STATE_SETUP)\n    rd_addr_q <= 4'd8;\nelse if (state_q == STATE_ACTIVE)\nbegin\n    case (rd_idx_q[2:0])\n    3'd0: rd_addr_q <= rd_addr_q - 4'd8;\n    3'd1: rd_addr_q <= rd_addr_q + 4'd8;\n    3'd2: ;\n    3'd3: rd_addr_q <= rd_addr_q - 4'd8;\n    3'd4: rd_addr_q <= rd_addr_q + 4'd8;\n    3'd5: rd_addr_q <= rd_addr_q - 4'd8;\n    3'd6: rd_addr_q <= rd_addr_q + 4'd1;\n    3'd7: rd_addr_q <= rd_addr_q + 4'd8;\n    endcase\nend\n\n//-----------------------------------------------------------------")
+
+[TOOL RESULT]
+[Step 17/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.sv')
+
+[TOOL RESULT]
+[Step 18/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 12798356.675437938
+  Metrics:
+    area_delay_product: 12798356.675437938
+    delay: 3121.3855
+    area: 4100.216610680718
+    power_probabilistic_fixed_clock: 0.0275
+    target_delay: 500.0
+    worst_slack: -2641.73
+  Worst timing path:
+    Startpoint: u_transpose.rd_addr_q_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_transpose.ram_read2_q_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_transpose.rd_addr_q_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+    2152.71 2152.71 ^ u_transpose.rd_addr_q_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     555.13 2707.84 v _39288_/Y (NAND2xp5_ASAP7_75t_R)
+     131.04 2838.87 v _39289_/Y (HB1xp67_ASAP7_75t_R)
+      55.20 2894.08 v _39538_/Y (HB1xp67_ASAP7_75t_R)
+      29.78 2923.86 ^ _42819_/Y (OAI221xp5_ASAP7_75t_R)
+      31.26 2955.11 v _42820_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+     105.73 3060.85 ^ _42835_/Y (OAI221xp5_ASAP7_75t_R)
+      40.87 3101.72 ^ _42836_/Y (OA21x2_ASAP7_75t_R)
+      19.67 3121.39 ^ _42837_/Y (HB1xp67_ASAP7_75t_R)
+       0.00 3121.39 ^ u_transpose.ram_read2_q_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            3121.39   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ u_transpose.ram_read2_q_$_NOT__Y_18_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     -20.35  479.65   library setup time
+             479.65   data required time
+    ---------------------------------------------------------
+             479.65   data required time
+            -3121.39   data arrival time
+    ---------------------------------------------------------
+            -2641.73   slack (VIOLATED)
+
+Best so far: 8626797.332309531 area_delay_product (eval 1)
+
+[ASSISTANT]
+The fanout-split backfired — Yosys **merged the identical-D register copies** back (path still starts at `rd_addr_q`), while the duplicated next-state logic added load: delay rose to 3121ps. Let me revert to the known-good 8.63M configuration:
+  -> edit_file(filename='design.sv', new_string='reg         block_wr_q;\nreg         block_rd_q;\nreg [5:0]   rd_idx_q;\nreg [3:0]   rd_addr_q;\n\nwire [4:0]  wr_ptr_w = {block_wr_q, inport_idx_i[3:0]};\nwire [4:0]  rd_ptr_w = {block_rd_q, rd_addr_q};', old_string='reg         block_wr_q;\nreg         block_rd_q;\nreg [5:0]   rd_idx_q;\nreg [3:0]   rd_addr_q;\n// bank-private read-pointer copies (fanout splitting on the read mux)\nreg [4:0]   rp1_q;\nreg [4:0]   rp2_q;\nreg [4:0]   rp3_q;\n\nwire [4:0]  wr_ptr_w = {block_wr_q, inport_idx_i[3:0]};')
+  -> edit_file(filename='design.sv', new_string='    ram_read0_q <= mem0[rd_ptr_w];\n    ram_read1_q <= mem1[rd_ptr_w];\n    ram_read2_q <= mem2[rd_ptr_w];\n    ram_read3_q <= mem3[rd_ptr_w];', old_string='    ram_read0_q <= mem0[{block_rd_q, rd_addr_q}];\n    ram_read1_q <= mem1[rp1_q];\n    ram_read2_q <= mem2[rp2_q];\n    ram_read3_q <= mem3[rp3_q];')
+  -> edit_file(filename='design.sv', new_string="always @ (posedge clk )\nif (rst)\nbegin\n    block_ready_q     <= 2'b0;\n    block_wr_q        <= 1'b0;\n    block_rd_q        <= 1'b0;\nend\nelse if (img_start_i)\nbegin\n    block_ready_q     <= 2'b0;\n    block_wr_q        <= 1'b0;\n    block_rd_q        <= 1'b0;\nend\nelse\nbegin\n    if (inport_valid_i && inport_idx_i == 6'd63 && inport_accept_o)\n    begin\n        block_ready_q[block_wr_q] <= 1'b1;\n        block_wr_q                <= ~block_wr_q;\n    end\n\n    if (outport_valid_o && rd_idx_q[5:0] == 6'd63)\n    begin\n        block_ready_q[block_rd_q] <= 1'b0;\n        block_rd_q <= ~block_rd_q;\n    end\nend", old_string="always @ (posedge clk )\nif (rst)\nbegin\n    block_ready_q     <= 2'b0;\n    block_wr_q        <= 1'b0;\nend\nelse if (img_start_i)\nbegin\n    block_ready_q     <= 2'b0;\n    block_wr_q        <= 1'b0;\nend\nelse\nbegin\n    if (inport_valid_i && inport_idx_i == 6'd63 && inport_accept_o)\n    begin\n        block_ready_q[block_wr_q] <= 1'b1;\n        block_wr_q                <= ~block_wr_q;\n    end\n\n    if (outport_valid_o && rd_idx_q[5:0] == 6'd63)\n    begin\n        block_ready_q[block_rd_q] <= 1'b0;\n    end\nend")
+
+[TOOL RESULT]
+[Step 19/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 19/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 19/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> edit_file(filename='design.sv', new_string="always @ (posedge clk )\nif (rst)\n    rd_addr_q <= 4'b0;\nelse if (state_q == STATE_IDLE)\n    rd_addr_q <= 4'b0;\nelse if (state_q == STATE_SETUP)\n    rd_addr_q <= 4'd8;\nelse if (state_q == STATE_ACTIVE)\nbegin\n    case (rd_idx_q[2:0])\n    3'd0: rd_addr_q <= rd_addr_q - 4'd8;\n    3'd1: rd_addr_q <= rd_addr_q + 4'd8;\n    3'd2: ;\n    3'd3: rd_addr_q <= rd_addr_q - 4'd8;\n    3'd4: rd_addr_q <= rd_addr_q + 4'd8;\n    3'd5: rd_addr_q <= rd_addr_q - 4'd8;\n    3'd6: rd_addr_q <= rd_addr_q + 4'd1;\n    3'd7: rd_addr_q <= rd_addr_q + 4'd8;\n    endcase\nend\n\nassign outport_valid_o = (state_q == STATE_ACTIVE);", old_string="//-----------------------------------------------------------------\n// Read-pointer next state: shared by the FSM state registers and by\n// the bank-private fanout copies (rp1..rp3)\n//-----------------------------------------------------------------\nwire read_done_w = outport_valid_o && (rd_idx_q == 6'd63);\n\nwire block_rd_nxt = rst         ? 1'b0 :\n                    img_start_i ? 1'b0 :\n                    read_done_w ? ~block_rd_q :\n                                  block_rd_q;\n\nwire [3:0] rd_addr_nxt =\n                    rst                     ? 4'd0 :\n                    (state_q == STATE_IDLE) ? 4'd0 :\n                    (state_q == STATE_SETUP) ? 4'd8 :\n                    (state_q == STATE_ACTIVE) ?\n                        ((rd_idx_q[2:0] == 3'd0) ? rd_addr_q - 4'd8 :\n                         (rd_idx_q[2:0] == 3'd1) ? rd_addr_q + 4'd8 :\n                         (rd_idx_q[2:0] == 3'd2) ? rd_addr_q :\n                         (rd_idx_q[2:0] == 3'd3) ? rd_addr_q - 4'd8 :\n                         (rd_idx_q[2:0] == 3'd4) ? rd_addr_q + 4'd8 :\n                         (rd_idx_q[2:0] == 3'd5) ? rd_addr_q - 4'd8 :\n                         (rd_idx_q[2:0] == 3'd6) ? rd_addr_q + 4'd1 :\n                                                   rd_addr_q + 4'd8) :\n                                                  rd_addr_q;\n\nalways @ (posedge clk)\nbegin\n    block_rd_q <= block_rd_nxt;\n    rd_addr_q  <= rd_addr_nxt;\n    rp1_q      <= {block_rd_nxt, rd_addr_nxt};\n    rp2_q      <= {block_rd_nxt, rd_addr_nxt};\n    rp3_q      <= {block_rd_nxt, rd_addr_nxt};\nend\n\nassign outport_valid_o = (state_q == STATE_ACTIVE);")
+
+[TOOL RESULT]
+[Step 20/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.sv')
+
+[TOOL RESULT]
+[Step 21/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 8626797.332309531
+  Metrics:
+    area_delay_product: 8626797.332309531
+    delay: 2110.2063
+    area: 4088.129834656229
+    power_probabilistic_fixed_clock: 0.0274
+    target_delay: 500.0
+    worst_slack: -1616.42
+  Worst timing path:
+    Startpoint: u_transpose.rd_addr_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_transpose.ram_read2_q_$_NOT__Y_19_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_transpose.rd_addr_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+    1298.68 1298.68 ^ u_transpose.rd_addr_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     326.60 1625.28 v _38956_/Y (INVxp33_ASAP7_75t_R)
+     105.85 1731.13 ^ _38969_/Y (NAND2xp33_ASAP7_75t_R)
+      53.75 1784.88 ^ _38970_/Y (HB1xp67_ASAP7_75t_R)
+      44.94 1829.82 ^ _39040_/Y (HB1xp67_ASAP7_75t_R)
+      53.03 1882.84 ^ _39428_/Y (HB1xp67_ASAP7_75t_R)
+      21.34 1904.18 v _41542_/Y (OAI221xp5_ASAP7_75t_R)
+      44.51 1948.69 ^ _41543_/Y (INVxp33_ASAP7_75t_R)
+      23.85 1972.54 v _41544_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      56.51 2029.05 ^ _41545_/Y (OAI211xp5_ASAP7_75t_R)
+      22.81 2051.86 v _41546_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      36.01 2087.87 v _41547_/Y (AO21x1_ASAP7_75t_R)
+      22.34 2110.21 v _41548_/Y (HB1xp67_ASAP7_75t_R)
+       0.00 2110.21 v u_transpose.ram_read2_q_$_NOT__Y_19_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            2110.21   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ u_transpose.ram_read2_q_$_NOT__Y_19_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -6.22  493.78   library setup time
+             493.78   data required time
+    ---------------------------------------------------------
+             493.78   data required time
+            -2110.21   data arrival time
+    ---------------------------------------------------------
+            -1616.42   slack (VIOLATED)
+
+Best so far: 8626797.332309531 area_delay_product (eval 1)
+
+[ASSISTANT]
+Back to the known-good 8,626,797 (flow is deterministic — good). Now let me try a looser `target_delay` (2500) so Yosys maps for area while keeping similar speed:
+  -> run_evaluation(filename='design.sv', target_delay=2500)
+
+[TOOL RESULT]
+[Step 22/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 8613721.69906498
+  Metrics:
+    area_delay_product: 8613721.69906498
+    delay: 2110.2063
+    area: 4081.933457911191
+    power_probabilistic_fixed_clock: 0.00547
+    target_delay: 2500
+    worst_slack: 383.58
+  Worst timing path:
+    Startpoint: u_transpose.rd_addr_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_transpose.ram_read2_q_$_NOT__Y_19_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_transpose.rd_addr_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+    1298.68 1298.68 ^ u_transpose.rd_addr_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     326.60 1625.28 v _38956_/Y (INVxp33_ASAP7_75t_R)
+     105.85 1731.13 ^ _38969_/Y (NAND2xp33_ASAP7_75t_R)
+      53.75 1784.88 ^ _38970_/Y (HB1xp67_ASAP7_75t_R)
+      44.94 1829.82 ^ _39040_/Y (HB1xp67_ASAP7_75t_R)
+      53.03 1882.84 ^ _39428_/Y (HB1xp67_ASAP7_75t_R)
+      21.34 1904.18 v _41542_/Y (OAI221xp5_ASAP7_75t_R)
+      44.51 1948.69 ^ _41543_/Y (INVxp33_ASAP7_75t_R)
+      23.85 1972.54 v _41544_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      56.51 2029.05 ^ _41545_/Y (OAI211xp5_ASAP7_75t_R)
+      22.81 2051.86 v _41546_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      36.01 2087.87 v _41547_/Y (AO21x1_ASAP7_75t_R)
+      22.34 2110.21 v _41548_/Y (HB1xp67_ASAP7_75t_R)
+       0.00 2110.21 v u_transpose.ram_read2_q_$_NOT__Y_19_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            2110.21   data arrival time
+    
+    2500.00 2500.00   clock clk (rise edge)
+       0.00 2500.00   clock network delay (ideal)
+       0.00 2500.00   clock reconvergence pessimism
+            2500.00 ^ u_transpose.ram_read2_q_$_NOT__Y_19_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -6.22 2493.78   library setup time
+            2493.78   data required time
+    ---------------------------------------------------------
+            2493.78   data required time
+            -2110.21   data arrival time
+    ---------------------------------------------------------
+             383.58   slack (MET)
+
+Best so far: 8613721.69906498 area_delay_product (eval 4)
+
+[ASSISTANT]
+Identical delay — target_delay barely moves this mapping (area -0.15%). The critical path's bottleneck is **net delay on the shared read-address nets** (QN net ≈1300ps): Yosys builds one shared 32:1 mux tree where address bits drive ~1280 loads. 
+
+Fix: replace the inferred memory read with an explicit **one-hot decoder + AND-OR mux** (address fanout ≤16, shared decode):
+  -> edit_file(filename='design.sv', new_string="// One-hot read decode: keeps fanout of the read-address nets tiny\n// (16 loads per address bit instead of a shared 32:1 mux tree).\nwire [31:0] rsel_w;\ngenvar gi;\ngenerate\n    for (gi = 0; gi < 32; gi = gi + 1) begin : g_rsel\n        assign rsel_w[gi] = (rd_ptr_w == gi);\n    end\nendgenerate\n\nreg [DW-1:0] rdc0, rdc1, rdc2, rdc3;\ninteger ri;\nalways @* begin\n    rdc0 = {DW{1'b0}};\n    rdc1 = {DW{1'b0}};\n    rdc2 = {DW{1'b0}};\n    rdc3 = {DW{1'b0}};\n    for (ri = 0; ri < 32; ri = ri + 1) begin\n        rdc0 = rdc0 | ({DW{rsel_w[ri]}} & mem0[ri]);\n        rdc1 = rdc1 | ({DW{rsel_w[ri]}} & mem1[ri]);\n        rdc2 = rdc2 | ({DW{rsel_w[ri]}} & mem2[ri]);\n        rdc3 = rdc3 | ({DW{rsel_w[ri]}} & mem3[ri]);\n    end\nend\n\nalways @ (posedge clk)\nbegin\n    if (wr_en_w && wr_bank_w == 2'd0)\n        mem0[wr_ptr_w] <= inport_data_i;\n    if (wr_en_w && wr_bank_w == 2'd1)\n        mem1[wr_ptr_w] <= inport_data_i;\n    if (wr_en_w && wr_bank_w == 2'd2)\n        mem2[wr_ptr_w] <= inport_data_i;\n    if (wr_en_w && wr_bank_w == 2'd3)\n        mem3[wr_ptr_w] <= inport_data_i;\n\n    ram_read0_q <= rdc0;\n    ram_read1_q <= rdc1;\n    ram_read2_q <= rdc2;\n    ram_read3_q <= rdc3;\nend", old_string="always @ (posedge clk)\nbegin\n    if (wr_en_w && wr_bank_w == 2'd0)\n        mem0[wr_ptr_w] <= inport_data_i;\n    if (wr_en_w && wr_bank_w == 2'd1)\n        mem1[wr_ptr_w] <= inport_data_i;\n    if (wr_en_w && wr_bank_w == 2'd2)\n        mem2[wr_ptr_w] <= inport_data_i;\n    if (wr_en_w && wr_bank_w == 2'd3)\n        mem3[wr_ptr_w] <= inport_data_i;\n\n    ram_read0_q <= mem0[rd_ptr_w];\n    ram_read1_q <= mem1[rd_ptr_w];\n    ram_read2_q <= mem2[rd_ptr_w];\n    ram_read3_q <= mem3[rd_ptr_w];\nend")
+
+[TOOL RESULT]
+[Step 23/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.sv')
+
+[TOOL RESULT]
+[Step 24/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 4520992.907615762
+  Metrics:
+    area_delay_product: 4520992.907615762
+    delay: 1127.6195
+    area: 4009.3248721007058
+    power_probabilistic_fixed_clock: 0.0275
+    target_delay: 500.0
+    worst_slack: -632.89
+  Worst timing path:
+    Startpoint: u_idct_y.mul3_b_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_idct_y.mul3_q_$_NOT__Y_29_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_idct_y.mul3_b_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     180.54  180.54 ^ u_idct_y.mul3_b_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     132.07  312.62 v _54540_/Y (NOR2xp33_ASAP7_75t_R)
+      75.13  387.75 ^ _54590_/Y (NAND2xp33_ASAP7_75t_R)
+      37.31  425.06 v _54591_/Y (NAND2xp33_ASAP7_75t_R)
+      42.27  467.33 ^ _54612_/Y (OAI21xp33_ASAP7_75t_R)
+      29.30  496.63 v _54629_/Y (MAJIxp5_ASAP7_75t_R)
+      43.26  539.89 ^ _54654_/Y (NOR3xp33_ASAP7_75t_R)
+      37.00  576.89 v _54657_/Y (OAI21xp33_ASAP7_75t_R)
+      34.43  611.32 ^ _54660_/Y (AOI21xp33_ASAP7_75t_R)
+      30.38  641.70 v _54661_/Y (OAI22xp33_ASAP7_75t_R)
+      28.06  669.76 ^ _54733_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      22.37  692.14 v _54741_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      26.15  718.29 ^ _54936_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      17.71  735.99 v _54938_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      31.44  767.43 ^ _54940_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      29.65  797.08 v _55036_/Y (OAI311xp33_ASAP7_75t_R)
+      40.83  837.90 ^ _55122_/Y (AOI311xp33_ASAP7_75t_R)
+      23.24  861.14 v _55213_/Y (OAI31xp33_ASAP7_75t_R)
+      24.18  885.32 ^ _55247_/Y (NAND2xp33_ASAP7_75t_R)
+      27.79  913.12 v _55323_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      34.67  947.79 v _55355_/Y (OA21x2_ASAP7_75t_R)
+      20.91  968.71 ^ _55380_/Y (OAI21xp33_ASAP7_75t_R)
+      22.96  991.67 v _55384_/Y (OAI21xp33_ASAP7_75t_R)
+      23.88 1015.55 ^ _55410_/Y (NAND2xp33_ASAP7_75t_R)
+      27.07 1042.62 v _55411_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      35.31 1077.93 v _55432_/Y (MAJx2_ASAP7_75t_R)
+      13.21 1091.14 ^ _55460_/Y (AOI21xp33_ASAP7_75t_R)
+      15.69 1106.83 v _55461_/Y (NOR2xp33_ASAP7_75t_R)
+      20.79 1127.62 v _55462_/Y (BUFx2_ASAP7_75t_R)
+       0.00 1127.62 v u_idct_y.mul3_q_$_NOT__Y_29_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            1127.62   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ u_idct_y.mul3_q_$_NOT__Y_29_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      -5.27  494.73   library setup time
+             494.73   data required time
+    ---------------------------------------------------------
+             494.73   data required time
+            -1127.62   data arrival time
+    ---------------------------------------------------------
+            -632.89   slack (VIOLATED)
+
+Best so far: 4520992.907615762 area_delay_product (eval 5)
+
+[ASSISTANT]
+**ADP halved: 8.63M → 4.52M** (delay 2110→1128ps, area 4088→4009). New critical path: the col-pass multiplier.
+
+Next: remove redundant **sync-reset muxes from datapath registers** (Verilator is 2-state with zero-init; data regs are always written before use, and control regs keep their resets):
+  -> edit_file(filename='design.sv', new_string='always @ (posedge clk)\nbegin\n    case (inport_idx_i)', old_string="always @ (posedge clk )\nif (rst)\nbegin\n    i0     <= {LANE_W{1'b0}};\n    mul0_a <= {LANE_W{1'b0}};\n    mul0_b <= 13'b0;\n    mul1_a <= {LANE_W{1'b0}};\n    mul1_b <= 13'b0;\n    mul2_a <= {LANE_W{1'b0}};\n    mul2_b <= 13'b0;\n    mul3_a <= {LANE_W{1'b0}};\n    mul3_b <= 13'b0;\n    mul4_a <= {LANE_W{1'b0}};\n    mul4_b <= 13'b0;\nend\nelse\nbegin\n    case (inport_idx_i)")
+  -> edit_file(filename='design.sv', new_string='always @ (posedge clk)\nbegin\n    mul0_q <= mul0_a * mul0_b;', old_string="always @ (posedge clk )\nif (rst)\nbegin\n    mul0_q <= {MULQ_W{1'b0}};\n    mul1_q <= {MULQ_W{1'b0}};\n    mul2_q <= {MULQ_W{1'b0}};\n    mul3_q <= {MULQ_W{1'b0}};\n    mul4_q <= {MULQ_W{1'b0}};\nend\nelse\nbegin\n    mul0_q <= mul0_a * mul0_b;")
+  -> edit_file(filename='design.sv', new_string='always @ (posedge clk)\nbegin\n    mul0 <= mul0_q;', old_string="always @ (posedge clk )\nif (rst)\nbegin\n    mul0 <= {MULQ_W{1'b0}};\n    mul1 <= {MULQ_W{1'b0}};\n    mul2 <= {MULQ_W{1'b0}};\n    mul3 <= {MULQ_W{1'b0}};\n    mul4 <= {MULQ_W{1'b0}};\nend\nelse\nbegin\n    mul0 <= mul0_q;")
+  -> edit_file(filename='design.sv', new_string='always @ (posedge clk)\nbegin\n    case (out_stg2_idx_q)', old_string="always @ (posedge clk )\nif (rst)\nbegin\n    o_s5   <= {O_W{1'b0}};\n    o_s6   <= {O_W{1'b0}};\n    o_s7   <= {O_W{1'b0}};\n    o_t0   <= {O_W{1'b0}};\n    o_t1   <= {O_W{1'b0}};\n    o_t2   <= {O_W{1'b0}};\n    o_t3   <= {O_W{1'b0}};\n    o_t4   <= {O_W{1'b0}};\n    o_t5   <= {O_W{1'b0}};\n    o_t6   <= {O_W{1'b0}};\n    o_t7   <= {O_W{1'b0}};\n    o_t6_5 <= {O_W{1'b0}};\n    o_t5_6 <= {O_W{1'b0}};\nend\nelse\nbegin\n    case (out_stg2_idx_q)")
+  -> edit_file(filename='design.sv', new_string="always @ (posedge clk)\nif (out_stg3_valid_q)\nbegin\n    if (out_stg3_idx_q == 3'd3)", old_string="always @ (posedge clk )\nif (rst)\nbegin\n    block_out[0] <= {OUT_W{1'b0}};\n    block_out[1] <= {OUT_W{1'b0}};\n    block_out[2] <= {OUT_W{1'b0}};\n    block_out[3] <= {OUT_W{1'b0}};\n    block_out[4] <= {OUT_W{1'b0}};\n    block_out[5] <= {OUT_W{1'b0}};\n    block_out[6] <= {OUT_W{1'b0}};\n    block_out[7] <= {OUT_W{1'b0}};\n    block_out_tmp <= {OUT_W{1'b0}};\nend\nelse if (out_stg3_valid_q)\nbegin\n    if (out_stg3_idx_q == 3'd3)")
+
+[TOOL RESULT]
+[Step 25/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 25/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 25/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 25/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 25/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.sv')
+
+[TOOL RESULT]
+[Step 26/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 4454485.8343999125
+  Metrics:
+    area_delay_product: 4454485.8343999125
+    delay: 1140.4521
+    area: 3905.894718769787
+    power_probabilistic_fixed_clock: 0.0939
+    target_delay: 500.0
+    worst_slack: -655.5
+  Worst timing path:
+    Startpoint: u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     223.72  223.72 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     103.81  327.52 v _38826_/Y (NOR2xp67_ASAP7_75t_R)
+      39.89  367.42 ^ _38830_/Y (NOR2xp33_ASAP7_75t_R)
+      36.12  403.54 ^ _38831_/Y (XNOR2xp5_ASAP7_75t_R)
+      43.72  447.26 v _38839_/Y (OAI21xp33_ASAP7_75t_R)
+      35.72  482.98 ^ _38848_/Y (MAJIxp5_ASAP7_75t_R)
+      39.98  522.97 ^ _38863_/Y (XOR2xp5_ASAP7_75t_R)
+      23.15  546.11 v _38864_/Y (XNOR2xp5_ASAP7_75t_R)
+      76.29  622.41 ^ _38865_/Y (NOR5xp2_ASAP7_75t_R)
+      49.12  671.53 v _42442_/Y (MAJIxp5_ASAP7_75t_R)
+      37.96  709.49 ^ _42474_/Y (MAJIxp5_ASAP7_75t_R)
+      29.93  739.41 ^ _42506_/Y (AO21x1_ASAP7_75t_R)
+      20.80  760.22 v _42572_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      25.77  785.99 ^ _42612_/Y (AOI21xp5_ASAP7_75t_R)
+      16.28  802.27 v _42643_/Y (OAI21x1_ASAP7_75t_R)
+      21.35  823.62 ^ _42684_/Y (AOI21xp5_ASAP7_75t_R)
+      25.63  849.25 v _42727_/Y (OAI211xp5_ASAP7_75t_R)
+      41.91  891.15 ^ _42808_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      33.80  924.95 v _42897_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      30.77  955.72 ^ _42973_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      25.91  981.63 v _43008_/Y (AOI21xp5_ASAP7_75t_R)
+      31.65 1013.28 ^ _43036_/Y (MAJIxp5_ASAP7_75t_R)
+      26.02 1039.30 v _43089_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      23.87 1063.17 ^ _43111_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      24.57 1087.74 ^ _43124_/Y (AND2x2_ASAP7_75t_R)
+      13.12 1100.86 v _43141_/Y (OAI21xp5_ASAP7_75t_R)
+      17.78 1118.65 ^ _43153_/Y (OAI211xp5_ASAP7_75t_R)
+      21.81 1140.45 ^ _43154_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1140.45 ^ u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            1140.45   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     -15.05  484.95   library setup time
+             484.95   data required time
+    ---------------------------------------------------------
+             484.95   data required time
+            -1140.45   data arrival time
+    ---------------------------------------------------------
+            -655.50   slack (VIOLATED)
+
+Best so far: 4454485.8343999125 area_delay_product (eval 6)
+
+[ASSISTANT]
+Reset removal: PASS — area 4009→3906, ADP **4.45M** (-1.5%). Now the col-pass multiplier is clearly critical (~30 gate levels).
+
+To know how much I can safely narrow the multiplier operands, let me inspect actual vector magnitudes:
+  -> read_file(filename='vectors.dat', limit=14)
+
+[TOOL RESULT]
+[Step 27/60]
+0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+7fff 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe 00000ffe
+8000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000 fffff000
+7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff 7fff ffff7d3e ffffa044 00005773 ffffbc04 00006862 00005f8f ffffa8b6 00001a9e ffffa454 00000a1d fffff624 0000068b fffff586 fffff5ee 000009cf fffffcbc 00005b1f fffff54d 000008e8 fffff94d 00000a91 00000aa9 fffff720 000001c1 ffffbc04 00000749 fffff958 0000052c fffff80e fffff8ba 000006a4 fffffdf9 00006862 fffff4cf 00000a38 fffff80e 00000c32 00000b2a fffff5cc 0000031c 00005be4 fffff715 00000902 fffff8c4 00000ad1 000008eb fffff6fc 000003b2 ffffa4a7 0000097f fffff7f0 00000762 fffff516 fffff67d 00000812 fffffdce 00001a9f fffffd25 0000029b fffffdf9 0000031c 000002d9 fffffd66 000000cb
+8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 8000 000082b9 00005fbd ffffa889 000043fb ffff979c ffffa070 00005747 ffffe560 00005bad fffff5e2 000009db fffff974 00000a79 00000a11 fffff630 00000343 ffffa4de 00000ab3 fffff717 000006b2 fffff56e fffff556 000008de fffffe3e 000043fb fffff8b6 000006a8 fffffad3 000007f1 00000745 fffff95b 00000206 ffff979c 00000b30 fffff5c7 000007f1 fffff3cd fffff4d5 00000a33 fffffce3 ffffa41b 000008ea fffff6fd 0000073b fffff52e fffff714 00000903 fffffc4d 00005b58 fffff680 0000080f fffff89d 00000ae9 00000982 fffff7ed 00000231 ffffe560 000002da fffffd64 00000206 fffffce3 fffffd26 00000299 ffffff34
+7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 7fff 8001 00001a9e ffffa8b6 00005f8f 00006862 ffffbc04 00005773 ffffa044 ffff7d3e fffffcbc 000009cf fffff5ee fffff586 0000068b fffff624 00000a1d ffffa454 000001c1 fffff720 00000aa9 00000a91 fffff94d 000008e8 fffff54d 00005b1f fffffdf9 000006a4 fffff8ba fffff80e 0000052c fffff958 00000749 ffffbc04 0000031c fffff5cc 00000b2a 00000c32 fffff80e 00000a38 fffff4cf 00006862 000003b2 fffff6fc 000008eb 00000ad1 fffff8c4 00000902 fffff715 00005be4 fffffdce 00000812 fffff67d fffff516 00000762 fffff7f0 0000097f ffffa4a7 000000cb fffffd66 000002d9 0000031c fffffdf9 0000029b fffffd25 00001a9f
+4ff6 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe 000009fe
+0000 4ff6 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 00000ddc 0000006f ffffff5d 000002c1 fffffd3e 000000a2 ffffff90 fffff223 00000ddc 0000006f ffffff5d 000002c1 fffffd3e 000000a2 ffffff90 fffff223 00000ddc 0000006f ffffff5d 000002c1 fffffd3e 000000a2 ffffff90 fffff223 00000ddc 0000006f ffffff5d 000002c1 fffffd3e 000000a2 ffffff90 fffff223 00000ddc 0000006f ffffff5d 000002c1 fffffd3e 000000a2 ffffff90 fffff223 00000ddc 0000006f ffffff5d 000002c1 fffffd3e 000000a2 ffffff90 fffff223 00000ddc 0000006f ffffff5d 000002c1 fffffd3e 000000a2 ffffff90 fffff223 00000ddc 0000006f ffffff5d 000002c1 fffffd3e 000000a2 ffffff90 fffff223
+0000 0000 4ff6 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 00000d0e 00000568 fffffa97 fffff2f1 fffff2f1 fffffa97 00000568 00000d0e 00000d0e 00000568 fffffa97 fffff2f1 fffff2f1 fffffa97 00000568 00000d0e 00000d0e 00000568 fffffa97 fffff2f1 fffff2f1 fffffa97 00000568 00000d0e 00000d0e 00000568 fffffa97 fffff2f1 fffff2f1 fffffa97 00000568 00000d0e 00000d0e 00000568 fffffa97 fffff2f1 fffff2f1 fffffa97 00000568 00000d0e 00000d0e 00000568 fffffa97 fffff2f1 fffff2f1 fffffa97 00000568 00000d0e 00000d0e 00000568 fffffa97 fffff2f1 fffff2f1 fffffa97 00000568 00000d0e 00000d0e 00000568 fffffa97 fffff2f1 fffff2f1 fffffa97 00000568 00000d0e
+0000 0000 0000 4ff6 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 00000bc0 00000012 00000047 fffff825 000007da ffffffb8 ffffffed fffff43f 00000bc0 00000012 00000047 fffff825 000007da ffffffb8 ffffffed fffff43f 00000bc0 00000012 00000047 fffff825 000007da ffffffb8 ffffffed fffff43f 00000bc0 00000012 00000047 fffff825 000007da ffffffb8 ffffffed fffff43f 00000bc0 00000012 00000047 fffff825 000007da ffffffb8 ffffffed fffff43f 00000bc0 00000012 00000047 fffff825 000007da ffffffb8 ffffffed fffff43f 00000bc0 00000012 00000047 fffff825 000007da ffffffb8 ffffffed fffff43f 00000bc0 00000012 00000047 fffff825 000007da ffffffb8 ffffffed fffff43f
+0000 0000 0000 0000 4ff6 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe 000009fe fffff601 fffff601 000009fe
+0000 0000 0000 0000 0000 4ff6 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 000007da 00000047 ffffffed 00000bc0 fffff43f 00000012 ffffffb8 fffff825 000007da 00000047 ffffffed 00000bc0 fffff43f 00000012 ffffffb8 fffff825 000007da 00000047 ffffffed 00000bc0 fffff43f 00000012 ffffffb8 fffff825 000007da 00000047 ffffffed 00000bc0 fffff43f 00000012 ffffffb8 fffff825 000007da 00000047 ffffffed 00000bc0 fffff43f 00000012 ffffffb8 fffff825 000007da 00000047 ffffffed 00000bc0 fffff43f 00000012 ffffffb8 fffff825 000007da 00000047 ffffffed 00000bc0 fffff43f 00000012 ffffffb8 fffff825 000007da 00000047 ffffffed 00000bc0 fffff43f 00000012 ffffffb8 fffff825
+0000 0000 0000 0000 0000 0000 4ff6 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 00000568 fffff2f1 00000d0e fffffa97 fffffa97 00000d0e fffff2f1 00000568 00000568 fffff2f1 00000d0e fffffa97 fffffa97 00000d0e fffff2f1 00000568 00000568 fffff2f1 00000d0e fffffa97 fffffa97 00000d0e fffff2f1 00000568 00000568 fffff2f1 00000d0e fffffa97 fffffa97 00000d0e fffff2f1 00000568 00000568 fffff2f1 00000d0e fffffa97 fffffa97 00000d0e fffff2f1 00000568 00000568 fffff2f1 00000d0e fffffa97 fffffa97 00000d0e fffff2f1 00000568 00000568 fffff2f1 00000d0e fffffa97 fffffa97 00000d0e fffff2f1 00000568 00000568 fffff2f1 00000d0e fffffa97 fffffa97 00000d0e fffff2f1 00000568
+0000 0000 0000 0000 0000 0000 0000 4ff6 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 000002c1 000000a2 0000006f fffff223 00000ddc ffffff90 ffffff5d fffffd3e 000002c1 000000a2 0000006f fffff223 00000ddc ffffff90 ffffff5d fffffd3e 000002c1 000000a2 0000006f fffff223 00000ddc ffffff90 ffffff5d fffffd3e 000002c1 000000a2 0000006f fffff223 00000ddc ffffff90 ffffff5d fffffd3e 000002c1 000000a2 0000006f fffff223 00000ddc ffffff90 ffffff5d fffffd3e 000002c1 000000a2 0000006f fffff223 00000ddc ffffff90 ffffff5d fffffd3e 000002c1 000000a2 0000006f fffff223 00000ddc ffffff90 ffffff5d fffffd3e 000002c1 000000a2 0000006f fffff223 00000ddc ffffff90 ffffff5d fffffd3e
+
+... (showing lines 1-14 of 323; use offset/limit for more)
+
+[ASSISTANT]
+Key finding: vectors include **worst-case blocks** (all coefficients = 0x7fff / 0x8000) — so my proven bounds are *attained*; y-pass widths are already minimal (20/21-bit lanes, 32-bit sums for wrap). The multiplier architecture is the lever now.
+
+Let me first check if a tighter target_delay reshapes the multiplier mapping:
+  -> run_evaluation(filename='design.sv', target_delay=1000)
+
+[TOOL RESULT]
+[Step 28/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 4841257.680627154
+  Metrics:
+    area_delay_product: 4841257.680627154
+    delay: 1242.8755
+    area: 3895.207267845535
+    power_probabilistic_fixed_clock: 0.0487
+    target_delay: 1000
+    worst_slack: -258.8
+  Worst timing path:
+    Startpoint: u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     205.35  205.35 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     160.04  365.39 v _38817_/Y (NOR2xp33_ASAP7_75t_R)
+      47.58  412.96 ^ _38843_/Y (NOR2xp33_ASAP7_75t_R)
+      36.84  449.80 ^ _38844_/Y (XNOR2xp5_ASAP7_75t_R)
+      36.45  486.25 v _38854_/Y (OAI21xp33_ASAP7_75t_R)
+      37.41  523.66 v _38861_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.84  554.50 v _38862_/Y (XNOR2xp5_ASAP7_75t_R)
+      29.50  584.00 v _38863_/Y (XOR2xp5_ASAP7_75t_R)
+      33.38  617.38 v _38864_/Y (XNOR2xp5_ASAP7_75t_R)
+      76.18  693.57 ^ _38865_/Y (NOR5xp2_ASAP7_75t_R)
+      49.10  742.67 v _42442_/Y (MAJIxp5_ASAP7_75t_R)
+      37.95  780.62 ^ _42474_/Y (MAJIxp5_ASAP7_75t_R)
+      29.90  810.52 ^ _42506_/Y (AO21x1_ASAP7_75t_R)
+      19.68  830.20 v _42572_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      25.33  855.53 ^ _42612_/Y (AOI21xp33_ASAP7_75t_R)
+      27.30  882.83 v _42643_/Y (OAI21xp33_ASAP7_75t_R)
+      29.62  912.45 ^ _42684_/Y (AOI21xp33_ASAP7_75t_R)
+      29.28  941.73 v _42727_/Y (OAI211xp5_ASAP7_75t_R)
+      41.91  983.63 ^ _42808_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      33.80 1017.44 v _42897_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      29.22 1046.65 ^ _42973_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      30.67 1077.32 v _43008_/Y (AOI21xp33_ASAP7_75t_R)
+      34.41 1111.73 ^ _43036_/Y (MAJIxp5_ASAP7_75t_R)
+      26.02 1137.75 v _43089_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      23.87 1161.61 ^ _43111_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      24.17 1185.78 ^ _43124_/Y (AND2x2_ASAP7_75t_R)
+      16.04 1201.82 v _43141_/Y (OAI21xp33_ASAP7_75t_R)
+      18.48 1220.31 ^ _43153_/Y (OAI211xp5_ASAP7_75t_R)
+      22.57 1242.88 ^ _43154_/Y (BUFx2_ASAP7_75t_R)
+       0.00 1242.88 ^ u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            1242.88   data arrival time
+    
+    1000.00 1000.00   clock clk (rise edge)
+       0.00 1000.00   clock network delay (ideal)
+       0.00 1000.00   clock reconvergence pessimism
+            1000.00 ^ u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     -15.93  984.07   library setup time
+             984.07   data required time
+    ---------------------------------------------------------
+             984.07   data required time
+            -1242.88   data arrival time
+    ---------------------------------------------------------
+            -258.80   slack (VIOLATED)
+
+Best so far: 4454485.8343999125 area_delay_product (eval 6)
+
+[ASSISTANT]
+Now the key multiplier improvement: `mul_b` is **always positive** (799..4017 ≤ 4095) but declared as *signed 13-bit* — forcing synthesis to build the signed top-row negation network. Making it **unsigned 12-bit** yields bit-identical results (modular arithmetic: zero-extension of `a` is harmless mod 2^C) while removing that network. Also narrowing the data-lane multiplier operand by 1 bit:
+  -> edit_file(filename='design.sv', new_string="// Constants are always positive and < 4096: kept as UNSIGNED 12-bit\n// so the multipliers build plain unsigned shift-add rows (result bits\n// are identical: (a mod 2^C)*b == a*b mod 2^C for any signed a).\nlocalparam [11:0] C1_16 = 12'd4017; // cos( pi/16) x4096\nlocalparam [11:0] C2_16 = 12'd3784; // cos(2pi/16) x4096\nlocalparam [11:0] C3_16 = 12'd3406; // cos(3pi/16) x4096\nlocalparam [11:0] C4_16 = 12'd2896; // cos(4pi/16) x4096\nlocalparam [11:0] C5_16 = 12'd2276; // cos(5pi/16) x4096\nlocalparam [11:0] C6_16 = 12'd1567; // cos(6pi/16) x4096\nlocalparam [11:0] C7_16 = 12'd799;  // cos(7pi/16) x4096", old_string="localparam [12:0] C1_16 = 13'd4017; // cos( pi/16) x4096\nlocalparam [12:0] C2_16 = 13'd3784; // cos(2pi/16) x4096\nlocalparam [12:0] C3_16 = 13'd3406; // cos(3pi/16) x4096\nlocalparam [12:0] C4_16 = 13'd2896; // cos(4pi/16) x4096\nlocalparam [12:0] C5_16 = 13'd2276; // cos(5pi/16) x4096\nlocalparam [12:0] C6_16 = 13'd1567; // cos(6pi/16) x4096\nlocalparam [12:0] C7_16 = 13'd799;  // cos(7pi/16) x4096")
+  -> edit_file(filename='design.sv', new_string='reg signed [LANE_W-1:0] i0;\nreg signed [LANE_W-1:0] mul0_a;\nreg        [11:0]       mul0_b;\nreg signed [LANE_W-1:1] mul1_a;\nreg        [11:0]       mul1_b;\nreg signed [LANE_W-1:1] mul2_a;\nreg        [11:0]       mul2_b;\nreg signed [LANE_W-1:1] mul3_a;\nreg        [11:0]       mul3_b;\nreg signed [LANE_W-1:0] mul4_a;\nreg        [11:0]       mul4_b;', old_string='reg signed [LANE_W-1:0] i0;\nreg signed [LANE_W-1:0] mul0_a;\nreg signed [12:0]       mul0_b;\nreg signed [LANE_W-1:0] mul1_a;\nreg signed [12:0]       mul1_b;\nreg signed [LANE_W-1:0] mul2_a;\nreg signed [12:0]       mul2_b;\nreg signed [LANE_W-1:0] mul3_a;\nreg signed [12:0]       mul3_b;\nreg signed [LANE_W-1:0] mul4_a;\nreg signed [12:0]       mul4_b;')
+
+[TOOL RESULT]
+[Step 29/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 29/60]
+Edited file: design.sv
+
+[ASSISTANT]
+Fix `mul0_a` width for consistency (LANE_W-1 bits — value-exact truncation), then evaluate:
+  -> edit_file(filename='design.sv', new_string='reg signed [LANE_W-1:0] i0;\nreg signed [LANE_W-2:0] mul0_a;\nreg        [11:0]       mul0_b;', old_string='reg signed [LANE_W-1:0] i0;\nreg signed [LANE_W-1:0] mul0_a;\nreg        [11:0]       mul0_b;')
+
+[TOOL RESULT]
+[Step 30/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.sv')
+
+[TOOL RESULT]
+[Step 31/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 19903/20672
+  Sim output: TB_ERROR block=2 pos=0 expected_y=fffff000 actual_y=0000a97d
+TB_ERROR block=2 pos=8 expected_y=fffff000 actual_y=0000a97d
+TB_ERROR block=2 pos=16 expected_y=fffff000 actual_y=0000a97d
+TB_ERROR block .. h/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/jpeg-adp/mimo-v2.6-flash/jpeg_idct_2d_verilog/xiaomi_mimo-v2.6-flash/20261014_091812/workspace/tb.sv:165: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+45 expected_y=00000296 actual_y=0000c380
+TB_ERROR block=322 pos=53 expected_y=000000a3 actual_y=0000c305
+TB_ERROR block=322 pos=61 expected_y=ffffff15 actual_y=ffffa58a
+TB_ERROR block=322 pos=6 expected_y=fffffe61 actual_y=0000d51b
+TB_ERROR block=322 pos=14 expected_y=00000189 actual_y=00003920
+TB_ERROR block=322 pos=22 expected_y=fffffd84 actual_y=ffffe85e
+TB_ERROR block=322 pos=30 expected_y=fffffea0 actual_y=ffff4e5d
+TB_ERROR block=322 pos=38 expected_y=0000012c actual_y=ffff4c4e
+TB_ERROR block=322 pos=46 expected_y=fffffd19 actual_y=ffffe6de
+TB_ERROR block=322 pos=54 expected_y=00000069 actual_y=00003970
+TB_ERROR block=322 pos=62 expected_y=fffffe62 actual_y=0000d207
+TB_ERROR block=322 pos=7 expected_y=fffffabd actual_y=ffffe747
+TB_ERROR block=322 pos=15 expected_y=fffffea7 actual_y=00004fcd
+TB_ERROR block=322 pos=23 expected_y=fffffd7f actual_y=ffffffa3
+TB_ERROR block=322 pos=31 expected_y=fffffe56 actual_y=ffff5451
+TB_ERROR block=322 pos=39 expected_y=fffffe0e actual_y=ffff73ee
+TB_ERROR block=322 pos=47 expected_y=fffffd0b actual_y=00000083
+TB_ERROR block=322 pos=55 expected_y=fffffe81 actual_y=00004ef7
+TB_ERROR block=322 pos=63 expected_y=00000092 actual_y=ffffef62
+TB_SUMMARY total=20672 errors=19903
+[22047000] %Fatal: tb.sv:165: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/jpeg-adp/mimo-v2.6-flash/jpeg_idct_2d_verilog/xiaomi_mimo-v2.6-flash/20261014_091812/workspace/tb.sv:165: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_neu1svdb/verilator_netlist_out.log
+
+Best so far: 4454485.8343999125 area_delay_product (eval 6)
+
+[ASSISTANT]
+The failure is exactly on the first **negative**-coefficient block: Verilog converts operands to unsigned at *operand width*, not context width — my modular argument was wrong. Fix: keep the expression **signed**, but tie the top bit of `b` to literal `0` via concat — arithmetically identical to eval-6, while letting abc prune the signed-multiply negation row:
+  -> edit_file(filename='design.sv', new_string="    mul0_q <= mul0_a * $signed({1'b0, mul0_b});\n    mul1_q <= mul1_a * $signed({1'b0, mul1_b});\n    mul2_q <= mul2_a * $signed({1'b0, mul2_b});\n    mul3_q <= mul3_a * $signed({1'b0, mul3_b});\n    mul4_q <= mul4_a * $signed({1'b0, mul4_b});", old_string='    mul0_q <= mul0_a * mul0_b;\n    mul1_q <= mul1_a * mul1_b;\n    mul2_q <= mul2_a * mul2_b;\n    mul3_q <= mul3_a * mul3_b;\n    mul4_q <= mul4_a * mul4_b;')
+
+[TOOL RESULT]
+[Step 32/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.sv')
+
+[TOOL RESULT]
+[Step 33/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 4454485.8343999125
+  Metrics:
+    area_delay_product: 4454485.8343999125
+    delay: 1140.4521
+    area: 3905.894718769787
+    power_probabilistic_fixed_clock: 0.0939
+    target_delay: 500.0
+    worst_slack: -655.5
+  Worst timing path:
+    Startpoint: u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     223.72  223.72 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     103.81  327.52 v _38826_/Y (NOR2xp67_ASAP7_75t_R)
+      39.89  367.42 ^ _38830_/Y (NOR2xp33_ASAP7_75t_R)
+      36.12  403.54 ^ _38831_/Y (XNOR2xp5_ASAP7_75t_R)
+      43.72  447.26 v _38839_/Y (OAI21xp33_ASAP7_75t_R)
+      35.72  482.98 ^ _38848_/Y (MAJIxp5_ASAP7_75t_R)
+      39.98  522.97 ^ _38863_/Y (XOR2xp5_ASAP7_75t_R)
+      23.15  546.11 v _38864_/Y (XNOR2xp5_ASAP7_75t_R)
+      76.29  622.41 ^ _38865_/Y (NOR5xp2_ASAP7_75t_R)
+      49.12  671.53 v _42442_/Y (MAJIxp5_ASAP7_75t_R)
+      37.96  709.49 ^ _42474_/Y (MAJIxp5_ASAP7_75t_R)
+      29.93  739.41 ^ _42506_/Y (AO21x1_ASAP7_75t_R)
+      20.80  760.22 v _42572_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      25.77  785.99 ^ _42612_/Y (AOI21xp5_ASAP7_75t_R)
+      16.28  802.27 v _42643_/Y (OAI21x1_ASAP7_75t_R)
+      21.35  823.62 ^ _42684_/Y (AOI21xp5_ASAP7_75t_R)
+      25.63  849.25 v _42727_/Y (OAI211xp5_ASAP7_75t_R)
+      41.91  891.15 ^ _42808_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      33.80  924.95 v _42897_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      30.77  955.72 ^ _42973_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      25.91  981.63 v _43008_/Y (AOI21xp5_ASAP7_75t_R)
+      31.65 1013.28 ^ _43036_/Y (MAJIxp5_ASAP7_75t_R)
+      26.02 1039.30 v _43089_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      23.87 1063.17 ^ _43111_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      24.57 1087.74 ^ _43124_/Y (AND2x2_ASAP7_75t_R)
+      13.12 1100.86 v _43141_/Y (OAI21xp5_ASAP7_75t_R)
+      17.78 1118.65 ^ _43153_/Y (OAI211xp5_ASAP7_75t_R)
+      21.81 1140.45 ^ _43154_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1140.45 ^ u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            1140.45   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     -15.05  484.95   library setup time
+             484.95   data required time
+    ---------------------------------------------------------
+             484.95   data required time
+            -1140.45   data arrival time
+    ---------------------------------------------------------
+            -655.50   slack (VIOLATED)
+
+Best so far: 4454485.8343999125 area_delay_product (eval 6)
+
+[ASSISTANT]
+PASS — but metrics identical to eval-6: Yosys had **already** constant-folded `b[12]=0` and width-reduced `a`, so that change was neutral (kept for clarity). The shift-add multiplier looks near-optimal for abc.
+
+Let me probe a more aggressive target_delay (300) — at 1000 mapping got *slower*, so the response isn't monotonic:
+  -> run_evaluation(filename='design.sv', target_delay=300)
+
+[TOOL RESULT]
+[Step 34/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 4454485.8343999125
+  Metrics:
+    area_delay_product: 4454485.8343999125
+    delay: 1140.4521
+    area: 3905.894718769787
+    power_probabilistic_fixed_clock: 0.139
+    target_delay: 300
+    worst_slack: -855.5
+  Worst timing path:
+    Startpoint: u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     223.72  223.72 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     103.81  327.52 v _38826_/Y (NOR2xp67_ASAP7_75t_R)
+      39.89  367.42 ^ _38830_/Y (NOR2xp33_ASAP7_75t_R)
+      36.12  403.54 ^ _38831_/Y (XNOR2xp5_ASAP7_75t_R)
+      43.72  447.26 v _38839_/Y (OAI21xp33_ASAP7_75t_R)
+      35.72  482.98 ^ _38848_/Y (MAJIxp5_ASAP7_75t_R)
+      39.98  522.97 ^ _38863_/Y (XOR2xp5_ASAP7_75t_R)
+      23.15  546.11 v _38864_/Y (XNOR2xp5_ASAP7_75t_R)
+      76.29  622.41 ^ _38865_/Y (NOR5xp2_ASAP7_75t_R)
+      49.12  671.53 v _42442_/Y (MAJIxp5_ASAP7_75t_R)
+      37.96  709.49 ^ _42474_/Y (MAJIxp5_ASAP7_75t_R)
+      29.93  739.41 ^ _42506_/Y (AO21x1_ASAP7_75t_R)
+      20.80  760.22 v _42572_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      25.77  785.99 ^ _42612_/Y (AOI21xp5_ASAP7_75t_R)
+      16.28  802.27 v _42643_/Y (OAI21x1_ASAP7_75t_R)
+      21.35  823.62 ^ _42684_/Y (AOI21xp5_ASAP7_75t_R)
+      25.63  849.25 v _42727_/Y (OAI211xp5_ASAP7_75t_R)
+      41.91  891.15 ^ _42808_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      33.80  924.95 v _42897_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      30.77  955.72 ^ _42973_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      25.91  981.63 v _43008_/Y (AOI21xp5_ASAP7_75t_R)
+      31.65 1013.28 ^ _43036_/Y (MAJIxp5_ASAP7_75t_R)
+      26.02 1039.30 v _43089_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      23.87 1063.17 ^ _43111_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      24.57 1087.74 ^ _43124_/Y (AND2x2_ASAP7_75t_R)
+      13.12 1100.86 v _43141_/Y (OAI21xp5_ASAP7_75t_R)
+      17.78 1118.65 ^ _43153_/Y (OAI211xp5_ASAP7_75t_R)
+      21.81 1140.45 ^ _43154_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1140.45 ^ u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            1140.45   data arrival time
+    
+     300.00  300.00   clock clk (rise edge)
+       0.00  300.00   clock network delay (ideal)
+       0.00  300.00   clock reconvergence pessimism
+             300.00 ^ u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     -15.05  284.95   library setup time
+             284.95   data required time
+    ---------------------------------------------------------
+             284.95   data required time
+            -1140.45   data arrival time
+    ---------------------------------------------------------
+            -855.50   slack (VIOLATED)
+
+Best so far: 4454485.8343999125 area_delay_product (eval 6)
+
+[ASSISTANT]
+Identical mapping at target 300 — abc saturates below 500; the multiplier architecture is the only lever left. 
+
+First, a safe area win: `mul4` always multiplies by **C4 only** (both case branches) — turn it into a constant multiplier (drops its `b` register, halves that multiplier), and tighten y-pass product width to 31 bits (proven max 2.006e9 < 2³¹):
+  -> edit_file(filename='design.sv', new_string='reg signed [LANE_W-1:1] mul3_a;\nreg        [11:0]       mul3_b;\nreg signed [LANE_W-1:0] mul4_a;', old_string='reg signed [LANE_W-1:1] mul3_a;\nreg        [11:0]       mul3_b;\nreg signed [LANE_W-1:0] mul4_a;\nreg        [11:0]       mul4_b;')
+  -> edit_file(filename='design.sv', new_string="        mul4_a <= i0;\n    end\n    3'd2:", old_string="        mul4_a <= i0;\n        mul4_b <= C4_16;\n    end\n    3'd2:")
+  -> edit_file(filename='design.sv', new_string='        mul4_a <= i0;\n    end\n    default:', old_string='        mul4_a <= i0;\n        mul4_b <= C4_16;\n    end\n    default:')
+  -> edit_file(filename='design.sv', new_string="    mul4_q <= mul4_a * $signed({1'b0, C4_16});", old_string="    mul4_q <= mul4_a * $signed({1'b0, mul4_b});")
+  -> edit_file(filename='design.sv', new_string='     .LANE_W(21)\n    ,.MULQ_W(31)', old_string='     .LANE_W(21)\n    ,.MULQ_W(32)')
+
+[TOOL RESULT]
+[Step 35/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 35/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 35/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 35/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 35/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.sv')
+
+[TOOL RESULT]
+[Step 36/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 12/20672
+  Sim output: TB_ERROR block=3 pos=8 expected_y=ffffa454 actual_y=0000a454
+TB_ERROR block=3 pos=16 expected_y=00005b1f actual_y=ffff5b1f
+TB_ERROR block=3 pos=40 expected_y=00005be4 actual_y=ffff5be4
+TB_ERROR bloc .. h/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/jpeg-adp/mimo-v2.6-flash/jpeg_idct_2d_verilog/xiaomi_mimo-v2.6-flash/20261014_091812/workspace/tb.sv:165: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR block=3 pos=8 expected_y=ffffa454 actual_y=0000a454
+TB_ERROR block=3 pos=16 expected_y=00005b1f actual_y=ffff5b1f
+TB_ERROR block=3 pos=40 expected_y=00005be4 actual_y=ffff5be4
+TB_ERROR block=3 pos=48 expected_y=ffffa4a7 actual_y=0000a4a7
+TB_ERROR block=4 pos=8 expected_y=00005bad actual_y=ffff5bad
+TB_ERROR block=4 pos=16 expected_y=ffffa4de actual_y=0000a4de
+TB_ERROR block=4 pos=40 expected_y=ffffa41b actual_y=0000a41b
+TB_ERROR block=4 pos=48 expected_y=00005b58 actual_y=ffff5b58
+TB_ERROR block=5 pos=15 expected_y=ffffa454 actual_y=0000a454
+TB_ERROR block=5 pos=23 expected_y=00005b1f actual_y=ffff5b1f
+TB_ERROR block=5 pos=47 expected_y=00005be4 actual_y=ffff5be4
+TB_ERROR block=5 pos=55 expected_y=ffffa4a7 actual_y=0000a4a7
+TB_SUMMARY total=20672 errors=12
+[22047000] %Fatal: tb.sv:165: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/jpeg-adp/mimo-v2.6-flash/jpeg_idct_2d_verilog/xiaomi_mimo-v2.6-flash/20261014_091812/workspace/tb.sv:165: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_ioy7qqld/verilator_netlist_out.log
+
+Best so far: 4454485.8343999125 area_delay_product (eval 6)
+
+[ASSISTANT]
+Sign flips only in extreme blocks: I mis-computed — *signed* 31-bit max is 2³⁰−1 ≈ 1.07e9, but y-pass products reach 2.006e9 (needs 32). Reverting `MULQ_W` to 32, keeping the mul4 constant-multiplier:
+  -> edit_file(filename='design.sv', new_string='     .LANE_W(21)\n    ,.MULQ_W(32)', old_string='     .LANE_W(21)\n    ,.MULQ_W(31)')
+
+[TOOL RESULT]
+[Step 37/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.sv')
+
+[TOOL RESULT]
+[Step 38/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 4513160.078923129
+  Metrics:
+    area_delay_product: 4513160.078923129
+    delay: 1154.0267
+    area: 3910.793466843643
+    power_probabilistic_fixed_clock: 0.0969
+    target_delay: 500.0
+    worst_slack: -667.69
+  Worst timing path:
+    Startpoint: u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_idct_y.mul2_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     223.93  223.93 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     125.66  349.59 v _43339_/Y (NOR2xp33_ASAP7_75t_R)
+      50.89  400.49 v _43340_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.70  435.19 ^ _43341_/Y (AOI21xp33_ASAP7_75t_R)
+      30.42  465.61 v _43343_/Y (AOI211xp5_ASAP7_75t_R)
+      55.99  521.59 ^ _43345_/Y (NOR4xp25_ASAP7_75t_R)
+      37.75  559.34 v _43347_/Y (NOR3xp33_ASAP7_75t_R)
+      34.16  593.50 ^ _43349_/Y (NOR3xp33_ASAP7_75t_R)
+      29.13  622.62 v _43351_/Y (NOR2xp33_ASAP7_75t_R)
+      32.18  654.80 v _43352_/Y (OR3x1_ASAP7_75t_R)
+      23.10  677.90 v _43354_/Y (AND2x2_ASAP7_75t_R)
+      29.63  707.54 v _43358_/Y (MAJx2_ASAP7_75t_R)
+      20.88  728.42 ^ _43389_/Y (AOI21xp5_ASAP7_75t_R)
+      26.40  754.82 v _43452_/Y (OAI21xp5_ASAP7_75t_R)
+      36.22  791.04 v _43453_/Y (MAJx2_ASAP7_75t_R)
+      33.81  824.85 ^ _43536_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      32.02  856.87 ^ _43575_/Y (OR2x2_ASAP7_75t_R)
+      23.58  880.45 ^ _43613_/Y (AO21x1_ASAP7_75t_R)
+      22.91  903.36 v _43695_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      29.00  932.37 ^ _43782_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      29.04  961.41 v _43854_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.36  988.77 ^ _43917_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      19.58 1008.35 v _43942_/Y (AOI21xp5_ASAP7_75t_R)
+      31.60 1039.95 v _43968_/Y (OA21x2_ASAP7_75t_R)
+      25.57 1065.52 v _43990_/Y (OA21x2_ASAP7_75t_R)
+      25.72 1091.24 v _44013_/Y (OA21x2_ASAP7_75t_R)
+      22.66 1113.90 ^ _44031_/Y (OAI21xp5_ASAP7_75t_R)
+      24.79 1138.69 ^ _44033_/Y (AND2x2_ASAP7_75t_R)
+      15.33 1154.03 ^ _44034_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1154.03 ^ u_idct_y.mul2_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            1154.03   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ u_idct_y.mul2_q_$_NOT__Y_2_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     -13.66  486.34   library setup time
+             486.34   data required time
+    ---------------------------------------------------------
+             486.34   data required time
+            -1154.03   data arrival time
+    ---------------------------------------------------------
+            -667.69   slack (VIOLATED)
+
+Best so far: 4454485.8343999125 area_delay_product (eval 6)
+
+[ASSISTANT]
+Interesting — the constant multiplier made things slightly *worse* (+5 area, +14ps): abc's general multiplier mapping is already well-optimized, and losing the shared-structure hurt. Reverting mul4 to the original register form:
+  -> edit_file(filename='design.sv', new_string='reg signed [LANE_W-1:1] mul3_a;\nreg        [11:0]       mul3_b;\nreg signed [LANE_W-1:0] mul4_a;\nreg        [11:0]       mul4_b;', old_string='reg signed [LANE_W-1:1] mul3_a;\nreg        [11:0]       mul3_b;\nreg signed [LANE_W-1:0] mul4_a;')
+  -> edit_file(filename='design.sv', new_string="        mul4_a <= i0;\n        mul4_b <= C4_16;\n    end\n    3'd2:", old_string="        mul4_a <= i0;\n    end\n    3'd2:")
+  -> edit_file(filename='design.sv', new_string='        mul4_a <= i0;\n        mul4_b <= C4_16;\n    end\n    default:', old_string='        mul4_a <= i0;\n    end\n    default:')
+  -> edit_file(filename='design.sv', new_string="    mul4_q <= mul4_a * $signed({1'b0, mul4_b});", old_string="    mul4_q <= mul4_a * $signed({1'b0, C4_16});")
+
+[TOOL RESULT]
+[Step 39/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 39/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 39/60]
+Edited file: design.sv
+
+[TOOL RESULT]
+[Step 39/60]
+Edited file: design.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.sv')
+
+[TOOL RESULT]
+[Step 40/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/20672
+Cost: OK
+  area_delay_product: 4454485.8343999125
+  Metrics:
+    area_delay_product: 4454485.8343999125
+    delay: 1140.4521
+    area: 3905.894718769787
+    power_probabilistic_fixed_clock: 0.0939
+    target_delay: 500.0
+    worst_slack: -655.5
+  Worst timing path:
+    Startpoint: u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+              (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     223.72  223.72 ^ u_idct_y.mul3_b_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+     103.81  327.52 v _38826_/Y (NOR2xp67_ASAP7_75t_R)
+      39.89  367.42 ^ _38830_/Y (NOR2xp33_ASAP7_75t_R)
+      36.12  403.54 ^ _38831_/Y (XNOR2xp5_ASAP7_75t_R)
+      43.72  447.26 v _38839_/Y (OAI21xp33_ASAP7_75t_R)
+      35.72  482.98 ^ _38848_/Y (MAJIxp5_ASAP7_75t_R)
+      39.98  522.97 ^ _38863_/Y (XOR2xp5_ASAP7_75t_R)
+      23.15  546.11 v _38864_/Y (XNOR2xp5_ASAP7_75t_R)
+      76.29  622.41 ^ _38865_/Y (NOR5xp2_ASAP7_75t_R)
+      49.12  671.53 v _42442_/Y (MAJIxp5_ASAP7_75t_R)
+      37.96  709.49 ^ _42474_/Y (MAJIxp5_ASAP7_75t_R)
+      29.93  739.41 ^ _42506_/Y (AO21x1_ASAP7_75t_R)
+      20.80  760.22 v _42572_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      25.77  785.99 ^ _42612_/Y (AOI21xp5_ASAP7_75t_R)
+      16.28  802.27 v _42643_/Y (OAI21x1_ASAP7_75t_R)
+      21.35  823.62 ^ _42684_/Y (AOI21xp5_ASAP7_75t_R)
+      25.63  849.25 v _42727_/Y (OAI211xp5_ASAP7_75t_R)
+      41.91  891.15 ^ _42808_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      33.80  924.95 v _42897_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      30.77  955.72 ^ _42973_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      25.91  981.63 v _43008_/Y (AOI21xp5_ASAP7_75t_R)
+      31.65 1013.28 ^ _43036_/Y (MAJIxp5_ASAP7_75t_R)
+      26.02 1039.30 v _43089_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      23.87 1063.17 ^ _43111_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      24.57 1087.74 ^ _43124_/Y (AND2x2_ASAP7_75t_R)
+      13.12 1100.86 v _43141_/Y (OAI21xp5_ASAP7_75t_R)
+      17.78 1118.65 ^ _43153_/Y (OAI211xp5_ASAP7_75t_R)
+      21.81 1140.45 ^ _43154_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1140.45 ^ u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/D (DFFHQNx1_ASAP7_75t_R)
+            1140.45   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ u_idct_y.mul3_q_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     -15.05  484.95   library setup time
+             484.95   data required time
+    ---------------------------------------------------------
+             484.95   data required time
+            -1140.45   data arrival time
+    ---------------------------------------------------------
+            -655.50   slack (VIOLATED)
+
+Best so far: 4454485.8343999125 area_delay_product (eval 6)
+
+[USER]
+The design session is now over. Final result: PASS, best cost: 4.454e+06 area_delay_product.
+
+Please write a brief summary covering:
+1. What approaches did you try and what worked best?
+2. What optimizations had the most impact?
+3. What didn't work or caused regressions?
+4. Lessons learned and what you would do differently next time.
+
+Your design files are carried over to the next agent, so refer to them by filename where useful.
+Be concise and specific.
+
+================================================================================

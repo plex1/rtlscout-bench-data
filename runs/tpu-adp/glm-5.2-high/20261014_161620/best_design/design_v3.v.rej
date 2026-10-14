@@ -1,0 +1,65 @@
+--- design_v3.v
++++ design_v3.v
+@@ -96,7 +96,7 @@ module tpu_array
+       for (j = 0; j < N; j = j + 1) begin : g_pe_r1
+          tpu_pe #(.DW(DW), .ACCW(17)) u_pe
+            (.clk(clk), .rst(rst), .ld(ld), .en(en),
+-            .w_north(w_v[1][j]), .a_west(a_h[1][j]),
++            .w_north(w_v[1][j]), .a_west(a_h[1][j]),
+             .psum_north({psum_0[j][15], psum_0[j]}),
+             .w_south(w_v[2][j]), .a_east(a_h[1][j+1]),
+             .psum_south(psum_1[j]));
+@@ -105,7 +105,7 @@ module tpu_array
+       for (j = 0; j < N; j = j + 1) begin : g_pe_r2
+          tpu_pe #(.DW(DW), .ACCW(18)) u_pe
+            (.clk(clk), .rst(rst), .ld(ld), .en(en),
+-            .w_north(w_v[2][j]), .a_west(a_h[2][j]),
++            .w_north(w_v[2][j]), .a_west(a_h[2][j]),
+             .psum_north({psum_1[j][16], psum_1[j]}),
+             .w_south(w_v[3][j]), .a_east(a_h[2][j+1]),
+             .psum_south(psum_2[j]));
+@@ -114,7 +114,7 @@ module tpu_array
+       for (j = 0; j < N; j = j + 1) begin : g_pe_r3
+          tpu_pe #(.DW(DW), .ACCW(19)) u_pe
+            (.clk(clk), .rst(rst), .ld(ld), .en(en),
+-            .w_north(w_v[3][j]), .a_west(a_h[3][j]),
++            .w_north(w_v[3][j]), .a_west(a_h[3][j]),
+             .psum_north({psum_2[j][17], psum_2[j]}),
+             .w_south(w_v[4][j]), .a_east(a_h[3][j+1]),
+             .psum_south(psum_3[j]));
+@@ -123,7 +123,7 @@ module tpu_array
+       for (j = 0; j < N; j = j + 1) begin : g_pe_r4
+          tpu_pe #(.DW(DW), .ACCW(20)) u_pe
+            (.clk(clk), .rst(rst), .ld(ld), .en(en),
+-            .w_north(w_v[4][j]), .a_west(a_h[4][j]),
++            .w_north(w_v[4][j]), .a_west(a_h[4][j]),
+             .psum_north({psum_3[j][18], psum_3[j]}),
+             .w_south(w_v[5][j]), .a_east(a_h[4][j+1]),
+             .psum_south(psum_4[j]));
+@@ -132,7 +132,7 @@ module tpu_array
+       for (j = 0; j < N; j = j + 1) begin : g_pe_r5
+          tpu_pe #(.DW(DW), .ACCW(21)) u_pe
+            (.clk(clk), .rst(rst), .ld(ld), .en(en),
+-            .w_north(w_v[5][j]), .a_west(a_h[5][j]),
++            .w_north(w_v[5][j]), .a_west(a_h[5][j]),
+             .psum_north({psum_4[j][19], psum_4[j]}),
+             .w_south(w_v[6][j]), .a_east(a_h[5][j+1]),
+             .psum_south(psum_5[j]));
+@@ -141,7 +141,7 @@ module tpu_array
+       for (j = 0; j < N; j = j + 1) begin : g_pe_r6
+          tpu_pe #(.DW(DW), .ACCW(22)) u_pe
+            (.clk(clk), .rst(rst), .ld(ld), .en(en),
+-            .w_north(w_v[6][j]), .a_west(a_h[6][j]),
++            .w_north(w_v[6][j]), .a_west(a_h[6][j]),
+             .psum_north({psum_5[j][20], psum_5[j]}),
+             .w_south(w_v[7][j]), .a_east(a_h[6][j+1]),
+             .psum_south(psum_6[j]));
+@@ -150,7 +150,7 @@ module tpu_array
+       for (j = 0; j < N; j = j + 1) begin : g_pe_r7
+          tpu_pe #(.DW(DW), .ACCW(23)) u_pe
+            (.clk(clk), .rst(rst), .ld(ld), .en(en),
+-            .w_north(w_v[7][j]), .a_west(a_h[7][j]),
++            .w_north(w_v[7][j]), .a_west(a_h[7][j]),
+             .psum_north({psum_6[j][21], psum_6[j]}),
+             .w_south(w_v[8][j]), .a_east(a_h[7][j+1]),
+             .psum_south(psum_7[j]));

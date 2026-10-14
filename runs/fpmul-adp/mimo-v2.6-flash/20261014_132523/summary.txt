@@ -1,0 +1,31 @@
+## Summary
+
+**Final: PASS, ADP = 99,513** (best file: `v14.sv`, area 97.3, delay 1023 ps) vs. baseline 145,429 — a **31.6% improvement**.
+
+### 1. Approaches tried / what worked
+- Started from `starting_point.v` (unpack → 11×11 multiply → 22-bit LZC + bidirectional barrel shifter + dual rounding paths).
+- Built a **pre-normalizing architecture** first (v1–v4): LZC + shift operands before the multiply. Correct but slower — the front-end sat in front of the multiplier.
+- Pivoted to **raw multiply + one lossless `u = prod << ZS` post-shifter** (v5) — LZC moves off the critical path (parallel with the multiply). This was the single biggest architectural win (135k → 125k).
+- Then a series of targeted refinements (v7–v16), each measured: dual-branch subnormal window, direct overflow derivation, single-extraction identity, fanout duplication.
+
+### 2. Most impactful optimizations
+1. **Flattened pack** (v3): realized the subnormal result value `{sign,4'b0,cs,fres}` already equals signed zero when `fres==0`, so zero/subnormal share one select — deleted the zero-detect and chained flags (−10k).
+2. **Raw multiply + `prod<<ZS` normalizer** (v5) — removed the LZC from the input path (−10k).
+3. **Dual-branch window select** (v7): `jj = jbase-s` waited for `s`; computing both `s=0/s=1` branches with early selects (−4k).
+4. **Direct `cr/cs` carry-outs** as AND-trees, and **`ovf` from `(jv, cr)`** instead of a full subtract+compare (−5k, −5k).
+5. **`jj0 = jj1+1` identity** (v12): both subnormal branches use the *same* window extraction and sticky range — halved the window logic (−7k).
+6. **`(* keep *)` driver duplication** of `ea0/eb0`, `rup/rs`, and especially `ZS` (fanout split between shifter control and exponent math) — small, cumulative wins to 99.5k.
+
+### 3. What didn't work (reverted)
+- Pre-normalized operands with v7-style tail (v10) — serializes front + multiply.
+- Prod-domain sticky with thermo masks (v9) — +6 area, slower.
+- Log-depth prefix incrementers (v4, v13) — abc's native `+` maps better; made things worse twice.
+- Early-`s` via 22:1 `prod[21-ZS]` mux (v6), `jbase` duplication (v17), `s` self-AND buffer (v18), multiplier operand swap — all regressed or were area-neutral losses.
+- `target_delay` had **zero** effect on mapping in this flow (tested 500 vs 1500).
+
+### 4. Lessons learned
+- **Measure everything**; synthesis results were often counterintuitive (e.g., explicit fast structures losing to abc's native inference). Each change was evaluated in isolation so reverts were cheap.
+- **Path reports drove every decision**: decomposing the critical path segment-by-segment (front / mult / shifter / window / sticky / round / pack) showed where the real time went — my initial analysis (blaming the LZC) was wrong until the path was read carefully.
+- Balancing *parallel* branches matters more than making one branch fastest: several "faster" sub-branches (v9 sticky) just moved the bottleneck.
+- Fanout is a first-class delay lever at this scale; `keep`-guarded duplicate drivers were the cheapest late wins.
+- Next time I'd restructure the pack/overflow logic and fanout splits *early* (they were nearly free wins found late), and spend the budget on the two inherently deep blocks (multiplier CPA, 5-stage shifter) only after the tail is lean.

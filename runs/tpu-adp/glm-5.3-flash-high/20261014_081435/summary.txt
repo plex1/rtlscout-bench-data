@@ -1,0 +1,34 @@
+# TPU Design Session Summary
+
+## Final Result
+**`design5.v` at target_delay=400 → cost 2,762,645** (area 4874, delay 567 ps), down from baseline 4,624,409 (area 4604, delay 1004 ps). **~40% cost reduction**, 100% correctness (6782/6782 checks).
+
+## 1. Approaches Tried
+| Design | Idea | Result |
+|---|---|---|
+| design.v | Golden copy (baseline) | 4.62M, delay 1004 |
+| design2.v | Broadcast A rows (no east shift) + narrow accumulator | **FAIL** — broadcast breaks golden cycle behavior |
+| design3.v | Golden structure + 19-bit accumulators + no datapath reset | 3.19M, delay 810 |
+| design4.v | FMA PE (shifted-PP tree + CPA in one) | 3.09–3.16M, delay 751 |
+| design5.v | **Carry-save accumulation (Wallace CSA tree, CPA only at column output)** | 2.76M–2.86M, delay 567–589 ← **winner** |
+| design6/8.v | Radix-4 Booth recoding (combinational / registered codes) | 2.92M / 3.09M — worse than plain CSA |
+| design7.v | Carry-save but leaving `*` to Yosys | 3.23M — Yosys maps `*` to slow CPA multiplier (729 ps) |
+
+## 2. Most Impactful Optimizations
+1. **19-bit internal accumulators** (design3): products lie in [-16256, +16384], 8-term sums fit exactly in 19 bits. Shrank all 64 PE adders + de-skew registers; sign-extend to 32 only at pins. Biggest single win (−1.43M).
+2. **Carry-save PE state** (design5): store (sum, carry) pair, one 9→2 Wallace tree per cycle, single CPA per column at the bottom. Critical path: multiplier+CPA → 5 CSA levels. Delay 810→567 ps.
+3. **Dropping datapath resets**: only `c_valid` pipeline needs reset (checked every cycle); datapath regs are naturally flushed (zero-weight/zero-A cycles in trace; Verilator zero-inits).
+4. **target_delay sweep**: 400 ps sweet spot for design5 (pressure without excessive upsizing).
+
+## 3. What Didn't Work / Regressions
+- **Broadcast activations**: golden's eastward shift changes *which weight* a PE uses when weights are reloaded mid-stream — the shift is functionally observable, not just wiring. Cost me 2 evals.
+- **Booth recoding** (both variants): extra decode logic front-end negated the smaller tree; registered codes added mux depth back. Slower and larger than plain shifted-PP Wallace.
+- **Yosys `*` operator**: does NOT infer an efficient multiplier — explicit partial-product trees are much faster.
+- Bug pattern: negation corrections in PP trees (`-(a<<7) = ~(a<<7)+1`, not `+128`), Booth digit decoding (`pos2` requires `bm=1`; `111`→d=0 breaks naive `ksum`).
+
+## 4. Lessons Learned
+- **Desk-check arithmetic corner cases against actual vectors.dat rows before evaluating** — the directed extreme-value tiles (±128) caught several sign/correction bugs; reading the specific failing vector pinpointed each bug immediately.
+- The golden RTL's *timing* of operand consumption is part of the contract (mid-stream weight reloads); "obviously equivalent" restructurings (broadcast) are not.
+- Hand-built compression trees beat both the naive cascade AND synthesis-inferred `*` for small multipliers; but keep trees balanced (my first CSA chain was serial — restructuring to Wallace helped).
+- Keep every passing variant in a separate file — design5's target_delay sweep (500→400) was free improvement on an already-correct file.
+- Next time: budget ~3 evals for arith-correctness debugging of custom multiply structures; consider a 4:2 or 5:2 compressor (fewer levels than 3:2 chains) as a further exploration.

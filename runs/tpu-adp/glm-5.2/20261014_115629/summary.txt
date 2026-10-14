@@ -1,0 +1,29 @@
+## Summary
+
+### Best Design
+`design_csa_split.v` — **2.84M area_delay_product** (delay 660ps, area 4303), down from the starting point's 4.62M (38% improvement).
+
+### What Worked Best (in order of impact)
+
+1. **Carry-save accumulator (CSA) replacing ripple chain** — the single biggest win. Instead of `psum_south = psum_north + prod` (a 19-bit ripple add per PE, chaining 8 deep), each PE maintains redundant (sum, carry) form with only XOR/MAJ logic (no carry propagation). A final `sum + carry` add only at the column bottom. This cut delay from ~820ps to ~669ps (4.62M→2.88M).
+
+2. **Narrow internal accumulator (32→19 bits)** — reduced all psum registers and adders. Max partial sum = 8 × 128² = 2¹⁷, requiring 19-bit signed. This alone took the baseline from 4.62M to 3.24M.
+
+3. **Split CSA into lower 16-bit and upper 3-bit sections** — since the product is 16-bit sign-extended, the upper 3 bits of the CSA operate on identical (sign) bits, simplifying logic. Squeezed 2.88M→2.84M.
+
+4. **Removing resets from all registers except vpipe** — small area saving (3.24M→3.18M on the ripple version).
+
+### What Didn't Work
+- **18-bit accumulator** — overflowed (2¹⁷ = 131072 > 2¹⁷-1)
+- **Hybrid CSA+ripple (4 or 6 CSA rows then ripple)** — the conversion adder created a longer critical path than full CSA
+- **Narrow carry registers (17-18 bits)** — broke correctness due to carry bit 18 being non-zero
+- **18-bit deskew registers** — overflowed at 2¹⁷
+- **Sign-extension multiplier trick** — no improvement over plain `$signed() * $signed()`
+- **Flat packed shift registers** — no measurable benefit
+- **Higher target_delay** — consistently worse; delay increased more than area decreased
+
+### Lessons Learned
+- The carry-save accumulator is the key technique for systolic MAC chains — it eliminates the cascaded carry propagation that dominates delay.
+- Width optimization (finding the minimum safe accumulator width) is a free win with no correctness risk if the range analysis is correct.
+- The synthesis tool's default `target_delay=500` was optimal for this design; sweeping it was unproductive.
+- Splitting datapaths by bit significance (16-bit product vs 3-bit sign extension) can yield small but real improvements in both area and delay.

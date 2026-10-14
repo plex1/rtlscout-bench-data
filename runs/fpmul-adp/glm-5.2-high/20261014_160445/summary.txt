@@ -1,0 +1,23 @@
+## Summary
+
+### Best Design
+`design_v5.v` — cost **141061** (area=108.75, delay=1297ps), down from the starting point's 145429 (~3% improvement).
+
+### What Worked Best
+1. **Replacing `integer`-typed `bit_at` function with barrel-shifter logic** (v5): The biggest win was replacing the `bit_at(prod, sr-1)` function (which used 32-bit `integer` indexing) with direct barrel-shifter expressions like `prod >> (sr - 5'd1)`. This cut delay from 1338→1297ps and area slightly, yielding the best result.
+
+2. **`exp_fin`/`frac_fin` two-level mux in packing** (v9/v11): Restructuring the output mux to first select norm vs sub, then select vs special cases, kept area neutral but didn't hurt.
+
+### What Didn't Work / Caused Regressions
+- **Tree-based if-else LZC** (v2, v8): Consistently worse than the simple loop-based LZC — the synthesis tool optimizes the loop better.
+- **Combined exponent subtraction** (v6, v10, v12): Computing `e_norm = exp_sum + carry - 14 - lz` in one step was consistently worse than the original separate `lhs = exp_sum + 1 + carry` then `e_norm = lhs - limit_under`. The tool prefers separate add/subtract stages.
+- **Narrower arithmetic** (6-bit, 7-bit in v7, v14, v16): Worse than 8-bit — the synthesis tool maps 8-bit adders to more efficient cells.
+- **Removing `sub_is_zero`** (v17): Increased area slightly (109.8 vs 108.8), net worse.
+- **High `target_delay`** (2000ps, 5000ps): Increased delay significantly with minimal area savings — bad for area×delay.
+
+### Lessons Learned
+1. The synthesis tool (Yosys+ASAP7) is highly sensitive to RTL structure — combining arithmetic operations that look simpler in RTL often synthesizes worse, as the tool optimizes separate stages better.
+2. **`integer` types are expensive** — always use explicitly-sized wires for shift amounts and indices.
+3. The default `target_delay=500ps` is near-optimal for this design; the tool can't meet it but produces the best area×delay tradeoff.
+4. The critical path (exponent add→subtract→mux chain, ~1297ps) is hard to reduce further without fundamentally restructuring the algorithm (e.g., pipelining, which isn't allowed for combinational logic).
+5. The reference implementation's cascade priority encoder for LZC and guard/sticky selection is not better than the simple loop — the tool handles loops well.

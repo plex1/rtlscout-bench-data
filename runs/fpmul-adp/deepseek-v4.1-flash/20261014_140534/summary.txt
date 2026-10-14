@@ -1,0 +1,37 @@
+# Summary
+
+## Final result
+Best passing design: **`design_v8.sv`** — 100% correct over all 18,874,371 vectors, cost **119,394** (area 86.9, delay 1374 ps), vs. the starting point's **145,429** (~18% better) and my first restructure `design_v3.sv` at 137,488.
+
+All design files below are in the workspace and all pass except where noted.
+
+## 1. Approaches tried
+| Design | Idea | Result |
+|---|---|---|
+| `design.sv` | Given starting point (unpack / 22b multiply / variable shift / two separate normalize + subnormal barrels) | PASS, 145,429 |
+| `design_v2/v3.sv` | Single unified shifter: `S = normal ? (11-lz) : (26-E)`; balanced 2-level LZC on `p[21:10]` | v3 PASS, 137,488 |
+| `design_v5.sv` | Product `p = m_a·m_b`; exploit `lz ≤ 11`, use `por2 = |(p<<1)` prefix-OR + mux for sticky | PASS, 130,510 |
+| `design_v7.sv` | Serial prefix-OR replaced by 12-bit LZC | PASS, 130,602 |
+| **`design_v8.sv`** | **Balanced Kogge-Stone prefix-OR (5 levels) for `stickyy = pr[S]`** | **PASS, 119,394 ← best** |
+| `design_v9.sv` | Integrated-sticky barrel shifter (OR-collector inside shifter, no separate tree) | PASS, 130,064 (worse) |
+| `design_v10.sv` | Reuse `D = E-14-lz` for both the normal/sublnormal decision and the exponent | PASS, 129,638 (worse) |
+| `design_v11.sv` | Remove the OR tree entirely: `sticky = (V ≤ S-2) & (S≥2)` where `V = v2(m_a)+v2(m_b)` (2-adic valuation shortcut) | **FAIL** — last edit (normal-operand v2 fix) was applied but never re-evaluated; this is the most promising unexplored direction |
+
+## 2. Optimizations that had the most impact
+- **Collapsing the two barrel shifters into one** unified shift amount (`S`, 5 bits) — removed an entire normalization datapath (145k → 130k).
+- **Replacing a serial 22-stage prefix-OR chain with a balanced 5-level Kogge-Stone prefix-OR** — the single biggest win (130.6k → 119.4k, ~100 ps off the critical path). Logic depth matters far more than gate count here.
+- Shrinking the product window to `p[21:10]` + 2-level LZC (correct for subnormals, unlike the naive `lz = ~p[21]` version, which broke).
+- Dropping all zero-detection: a zero product naturally yields `field==0 && frac==0`, and the `(inf_a & zero_b)|(zero_a & inf_b)` NaN terms handled the rest.
+
+## 3. What didn't work / caused regressions
+- `lz = ~p[21]` (`design_v4/v6.sv`) — wrong for subnormals, where `p` can be far below `2^20`.
+- `design_v9.sv`'s integrated-sticky shifter added more enable-AND fan-in (5 terms) than the tree it replaced.
+- `design_v10.sv`'s shared `D` comparator didn't shorten the path.
+- **Recurring pitfall:** unsigned subtraction wrapping. `E - 6'd14 - lz` had to be rewritten with explicit `$signed(...)` and widened to 7 bits, or overflow/zero-result detection silently broke.
+- `target_delay` is nearly a no-op here: 250/300/500/1000/2000 ps all reproduced the same netlist and same delay. RTL structure is the only real lever.
+
+## 4. Lessons and next steps
+- Verify with an inline reference model early; two of my six failing iterations were one-line signedness/semantic errors, each costing an evaluation cycle (~2 steps).
+- The critical path in `design_v8.sv` starts at `a[14]` (exponent) through the LZC → `S` → shifter → sticky mux → exponent add. **The next thing to attack is folding the LZC and `S` computation together** so `S` issues from a single carry chain rather than `lzc → sub → mux`.
+- **Highest-value unexplored idea: finish `design_v11.sv`.** The 2-adic valuation trick eliminates the entire prefix-OR tree (~110 gates, and sticky comes off the narrow `V ≤ S-2` comparator computed in parallel with the multiplier instead of off the shifter output). My last edit set `v2a`/`v2b` correctly (normal operand with zero fraction must give 10, not 12); it needs one evaluation to confirm. If it passes it should beat 119k, and if the sticky now arrives earlier than the shifter output it may also shorten the critical path.
+- Also worth trying: Sklansky structure for the prefix-OR instead of Kogge-Stone, and moving the `S == 0` / `p == 0` corner cases out of the shifter enable logic.

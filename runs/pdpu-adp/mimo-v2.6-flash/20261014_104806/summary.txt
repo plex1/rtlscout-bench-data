@@ -1,0 +1,27 @@
+## Summary
+
+**Final result:** `starting_point.v` — 100% correct, ADP **797,796** (delay 822.9 ps, area 969.5), vs. baseline 968,045 (delay 910.2, area 1063.5) → **−17.6% ADP**.
+
+### 1. Approaches tried
+Started from the provided 5-stage pipelined baseline, evaluated it, then made a sequence of single-change RTL experiments, each followed by an evaluation: multiplier replacement, two's-complement restructuring, pipeline-boundary analysis (all 5 stages + output encoder are balanced ~800 ps, so moving logic across registers is near zero-sum), area sweeps (FF reduction, dead-module deletion), `target_delay` probes (350/500/880/900), and structural rewrites of the shifter and CSA compressor.
+
+### 2. Optimizations that worked (in impact order)
+- **Booth multiplier → plain 4×4 `*`** (ADP 968k→906k): 16 tiny multipliers don't justify booth+CSA overhead; also removed 16 8-bit adders from stage 3.
+- **One's-complement accumulation + `popcount(signs)` correction** (906k→840k): replaced 17×20-bit incrementers in the critical stage-3 path with a balanced popcount tree plus one small constant add.
+- **Fold `+count` and the constant high sign columns into a single 18th CSA operand** (`corr = count − count<<14`, computed in stage 3): eliminated `pipe3_signs`, 102 CSA input columns, and a serial adder (854k→814k, then 797,796 final).
+- **Encode round-increment and sign-negation into one add** in `posit_encoder`: `result = (sign ? ~vr : vr) + (round ^ sign)` (798,499 at that point).
+- **Pipe3 stores only the 14 significant mantissa bits** (sign columns rebuilt as wiring) — area win.
+- **Comparator-tree split** (8 pair compares into stage 1, top levels in stage 2) — kept stage 2 off the critical path.
+
+### 3. What didn't work / regressed
+- **Hand-rolled sparse alignment shifters** (per-bit equality muxes): area +26, delay +13 — ABC already prunes constants in the generic barrel shifter; duplicated decoders hurt. Reverted.
+- **Sklansky prefix adder for `sum_result`**: ABC's native `+` mapping was ~35 ps faster. Reverted.
+- **Cin-free `compressor_4to2`**: mathematically wrong — the b1/b2 shifted streams overlap and require arithmetic addition, not XOR (broke correctness). Reverted; also learned the original cascade's `cin` chain has *constant* depth since `cout` is cin-independent.
+- **`target_delay` knob**: flat/identical below 500, strictly worse above (area −0.6% for +6% delay). Exhausted early.
+- **Tree-split revert / exp_part rewiring for −7 FF**: delay penalty exceeded area saving (mapping-perturbation sensitivity).
+
+### 4. Lessons
+- Synthesis is **deterministic** — identical RTL returns bit-identical metrics, so reverts reliably restore known-good results; but even logically-neutral rewiring perturbs mapping enough to swing ±15 ps, so judge small changes skeptically.
+- The design was **balanced at ~800 ps/stage across all 6 logic segments**; once balanced, per-stage delay work becomes zero-sum — remaining headroom was in *work removal* (arithmetic identities), not repartitioning.
+- FFs were ~60% of area and near-information-theoretically irreducible for this 5-stage spec; targeting them (e.g., folding constant contributions into existing operands) gave the best area wins.
+- Next time: I'd do the identity-based arithmetic rewrites (popcount/correction folding) *first* since they're provably bit-exact and hit multiple metrics, then probe `target_delay` early to confirm it's flat before spending steps there.

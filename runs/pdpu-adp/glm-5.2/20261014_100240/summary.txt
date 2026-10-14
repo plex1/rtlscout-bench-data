@@ -1,0 +1,35 @@
+## Summary
+
+### 1. Approaches Tried & What Worked Best
+
+Starting from the upstream PDPU pipelined design (`starting_point.v`, cost 968,044), I applied these optimizations in sequence:
+
+1. **Two's complement → XOR + post-CSA correction** (step 17): Replaced per-element `~x+1` increment adders (17 of them on the critical path) with simple XOR, adding the count of negative operands as a correction term after the adder tree. Cost: 968K → 936K.
+
+2. **Simplified comparator** (step 27): Replaced the case-based `comparator` module with `$signed(a) >= $signed(b) ? a : b`. Cost: 936K → 856K.
+
+3. **Simple `*` multiplier** (step 32): Replaced the radix-4 Booth multiplier + CSA tree with native `*` operator, setting `mul_carry=0`. Cost: 856K → 801K.
+
+4. **Simple adder tree** (step 34): Replaced the recursive `csa_tree` module for 17-input accumulation with a flat `for`-loop adder tree. Cost: 801K → 765K.
+
+5. **Simplified barrel shifter** (step 36): Replaced the custom mux-tree barrel shifter with `>>`/`<<` operators. Cost: 765K → 742K.
+
+6. **Simplified LZC** (step 39): Replaced the complex parallel-prefix LZC with a simple priority-encoder loop. Cost: 742K → **731K** (best result).
+
+### 2. Most Impactful Optimizations
+- **Simple multiplier** (`*` instead of Booth): ~55K reduction
+- **Two's complement → XOR+correction**: ~32K reduction, removed 17 increment adders from critical path
+- **Simple adder tree**: ~35K reduction
+- **Simplified comparator**: ~80K reduction (both area and delay)
+
+### 3. What Didn't Work / Caused Regressions
+- **Moving `comp_tree` to stage 0** (step 20): Made it worse (1.6M) because the path from input through posit decoder + comparator tree became the longest path.
+- **XOR+correction for `sum_c`** (step 41): The `+final_sign` created a carry-propagate adder on the critical path (929ps).
+- **Moving normalization before pipe4 register** (step 46): Merged too much logic into one stage (1.17M).
+- **Accidentally overwrote starting_point.v** (step 51): Lost the best version; had to reconstruct from memory.
+
+### 4. Lessons Learned
+- **Yosys maps `*` and `>>`/`<<` very efficiently** — better than hand-rolled Booth/CSA/barrel structures for these widths.
+- **Removing increment adders from the critical path** by deferring correction to after the adder tree is a powerful pattern.
+- **Pipeline retiming requires care**: moving combinational logic across stage boundaries can backfire if it creates a longer combined path.
+- **Always keep backups** — accidentally overwriting the file cost several recovery steps.

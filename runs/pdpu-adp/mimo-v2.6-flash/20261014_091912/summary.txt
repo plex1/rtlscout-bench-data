@@ -1,0 +1,28 @@
+## Summary
+
+**Final: PASS, ADP = 763,352** (`starting_point.v`; baseline was 968,045 → **−21%**), delay ≈ 784–796 ps, area ≈ 959–974, all 1,999,992 checks clean.
+
+### 1. Approaches tried
+- **Pipeline rebalancing** (moving combinational logic across the 5 fixed register stages) was the main lever; function is preserved for any forward move in this feed-forward DAG, so every move was verified only by the 2M-vector oracle.
+- **Bit-exact rewrites** of datapath pieces: negation-count lane, direct `*` multiplier, Sklansky prefix adder, CSA pre-compression, encoder parallel round/negate, LZC leaf-constant folding.
+- **Parameter sweep** on `target_delay` (400/500/850) and several area probes (compact LZC, narrower encoder shifter).
+
+### 2. Most impactful optimizations
+1. **Negation "+1" folded into a popcount CSA lane** — removed 17 incrementers from the alignment path (910→859 ps) plus a serial-popcount fix split across stages 2/3.
+2. **Sklansky prefix adder for `csa_sum + csa_carry`** + **moving booth final-add into stage 2** (−128 flops) → big combined win (818→776).
+3. **Pre-compress one CSA level in stage 3** (18→12 lanes, 3:2 compressors) — shallower stage 4 and −160 flops (776→763).
+4. **First comparator-tree level before pipe1** (stage 2: 4→3 levels) and **direct 4×4 `*`** (−27 area).
+5. **Encoder double-incrementer fusion** and **regime→shift precompute moved to stage 5** — balanced the two output stages.
+
+### 3. What regressed (reverted)
+- Computing exponent-diff/shift-amount in stage 2 (1086 ps — comp+sub too serial).
+- Moving negation into stage 4 (S4 = 919 — inv+CSA too deep).
+- Saturation split across stages 5/6 (mapping noise, +4%).
+- Compact priority LZC (no area win, +44 ps).
+- `target_delay` ≠ 500: 850 → ADP 930k; 400 → bit-identical to 500. Area is structure-bound; only pressure changes mapping.
+
+### 4. Lessons
+- **Every stage was ~800–900 ps**; ADP only improves by cutting the *serial chain* (e.g., sub→shift→negate), not by moving work between already-full stages — check the worst-path report each eval to see which stage surfaced.
+- **Synthesis mapping noise is ±30–50 ps** between structurally similar variants; only trust trends larger than that, and keep changes one-at-a-time.
+- The strongest pattern was **algebraic fusing**: `−(x+r) = ~x+(1−r)`, `K−cnt` as leaf constants, `Σ negations` as one lane — removing arithmetic entirely beats relocating it.
+- If starting over: instrument stage-by-stage delays first (probe by deliberately unbalancing), then attack the longest serial chain; also check `target_delay` early — it turned out to be a dead knob here, saving later steps.

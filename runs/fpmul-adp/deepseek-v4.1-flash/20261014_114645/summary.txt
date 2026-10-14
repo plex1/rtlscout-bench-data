@@ -1,0 +1,30 @@
+# Summary
+
+## Final result
+**design10.sv** — PASS on all 18.87M checks, cost **126,030** (`area_delay_product`), delay 1174 ps, area 107.4. Baselines: `starting_point.v`/`design.sv` = 145,429 (1338 ps); a clean unified-shift rewrite only reached 158,396.
+
+## 1. Approaches tried
+- **design2/6 (unified shift)**: one shifter handling normal *and* subnormal grids via `d = max(p-10, 26-exp_sum)`. Correct and much smaller (area 88–94) but *slower* end-to-end.
+- **design3/8/13 (casez / group-select LZ)**: rejected as an optimization — `casez` fails the X/Z lint rule, and the two-level group-select LZ made the path **worse** (1287–1305 ps vs 1174).
+- **design7/9/10/11/12/14/15/17/18**: variants of the dual-path structure with targeted front-end, shifter, exponent and pack optimizations.
+- **design16/17** (single shifter + single rounding adder): the biggest *area* win (area 90.8) but 1499 ps.
+
+## 2. Optimizations with the most impact
+1. **Narrowing the exponent path.** Replacing `lhs = exp+1+carry` / `limit_under = BIAS+lz` (two compares, three adders) with one pre-scaled value `epre = exp_sum + ppos - 35`, compared once and incremented by the rounding carry, took design10 from 1345 → 1174 ps. This was the single biggest win.
+2. **Removing the `sub_is_zero` mux.** A rounded-away subnormal already packs as `{sign,0,0}`, so the extra zero-detection + 4-way mux disappears.
+3. **Carry-injection by arithmetic wrap.** `mr = mant + rup` wraps to 0 on overflow and `carry = mr[10] ^ mant[10]`, removing a conditional mux on the fraction. The `epre == 30 && carry` overflow case then needs no explicit handling — mant wraps to 0 and the packed value is already infinity.
+4. **Fusing sticky into the shifter.** Deriving sticky from the shifted-out OR of a `{P,0}` barrel shifter replaced 22-bit `below[]` prefix-OR chains (bit_at on `below`) and gave the clean `R[11:1]`/`R[10:1]` guard alignment.
+
+## 3. What didn't work
+- **`target_delay` had literally no effect** — identical delay/area at 500 and 1300 ps, so I stopped sweeping it.
+- **Binary-search LZ (`|P[21:11]` then `>>5/>>3/>>2`)** and **group-select LZ** were both *slower* than the naive `for(i=0..21)` priority chain that Yosys synthesizes — counterintuitive but reproducible (1571 and 1287 vs 1250).
+- **Explicit balanced partial-product adder trees (design9)** offered nothing over the inferred `*`.
+- **Weakening the multiplicand** (`{ea_nz, f_a}`, design12) *hurt* the multiplier's start.
+
+## 4. Lessons
+- **Measurement noise is real (~5–8%)**: design.sv gave 1345 and 1174 ps across runs of near-identical RTL. Single-sample comparisons of small edits are unreliable; re-run the promising candidate (`run_evaluation` on design10 returned the identical 126,030, confirming determinism only for *identical* files).
+- **Yosys does not reward "clever" LZ encodings here**; the priority chain it infers is already near-optimal. Structure changes on the *exponent* and *pack* stages paid off much more than normaliser micro-optimisation.
+- Spreading effort across many structurally distinct variants (design2→18) rather than tweaking one was the right call given the step budget, but I spent too many steps on LZ variants that consistently regressed.
+
+## Handoff
+Best = `design10.sv`. The most promising unexplored direction is `design18.sv`, which was never evaluated: it combines design17's single-shifter/single-rounding-adder area win (area ≈ 91) with the two-level LZ. If that LZ is fast in that context, the area·delay product could beat 126,030 — worth one evaluation before anything else.

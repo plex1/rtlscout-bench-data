@@ -1,0 +1,27 @@
+# Summary
+
+## 1. Approaches tried
+
+**Baseline (`starting_point.v`, cost 145,429):** unpack → 22-bit multiply → leading-zero count over the product → barrel shift → round → pack. Correct but the LZC + barrel shift + big output muxes dominated the critical path (1338 ps).
+
+**Winning approach (`design.sv` / `design6.sv`, cost 123,735, delay 1375 ps, area 90.0):** *operand pre-normalization*. Instead of normalizing the product, subnormal significands are left-shifted so their leading one sits at bit 10 (with the exponent adjusted by `17-sha`). Then the 11×11 product of two values in [1,2) is always in [2^20, 2^22), so **the only normalization needed is a 1-bit shift** driven by the product carry `p[21]`. The only barrel shifter is the small one that places subnormal results on the 2^-24 grid (`sh = 48-sec`, saturated at 15). Key trick: a **zero operand is given a pseudo-exponent of 1**, which makes the exponent/round arithmetic itself emit a signed zero — no output mux for zero.
+
+## 2. Most impactful optimizations
+- Eliminating the product LZC + wide barrel shifter (the single biggest structural win).
+- Collapsing zero/inf/normal/subnormal into unified arithmetic instead of a 4-way output mux.
+- Gathering the sticky bit from the shifter stages (`o1..o4` OR-ed with `|p[8:0]`) rather than OR-reducing the full product below the shift point.
+- Carrying exponents biased by +16 so the normal-path field is `sec + carry + round-carry - 47`.
+
+## 3. What didn't work (regressions)
+- **design7** (folding inf into a pseudo-exponent of 78): 1459 ps — longer delay, abandoned.
+- **design8** (two-stage 4-way shifter, nibble-mask sticky): 1449 ps — worse than the 4-stage version; Yosys maps the per-stage stickies more cheaply.
+- **design9/design10** (precomputed exponent-sum terms, `sub = sh > carry`): ~1368 ps, essentially tied but slightly worse cost (124,964). design10 also had a real bug from splitting the rounding leading bit.
+- **`target_delay` knob:** 250 → no change; 1500 → area dropped to 87.6 but delay rose to 1480 (cost 129,720, worse); 1300 → identical to default. Not a useful lever here.
+
+## 4. Lessons / what I'd do differently
+- I burned ~20 steps on hand-derivation errors in the exponent/shift constants (off-by-one in the left-shift table, wrong `48` vs `47`, signed/unsigned comparisons, truncating fields to too-narrow widths). **Verifying the constants against the TB's known golden vectors first** (rather than after) would have saved most of those steps.
+- Reserved-word identifiers (`small`) and truncation-to-narrow-field bugs were silent correctness killers; declaring exponent/field wires wider than nominally needed is cheap insurance.
+- The `sub` decision must use the *un-truncated* exponent sum, not a modulo-32 field — an easy trap.
+- Structural RTL changes (pre-normalization) moved the needle; `target_delay` sweeps did not. Focus effort there.
+
+**Files:** `design.sv` (best, verified PASS, 123,735) is the promoted final. Variants `design2/3/5/6/8/9/10/11.sv` are kept for reference; `design6.sv` is the identical source of the winner.

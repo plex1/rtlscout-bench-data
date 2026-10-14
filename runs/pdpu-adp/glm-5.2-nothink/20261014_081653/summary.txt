@@ -1,0 +1,25 @@
+## Summary
+
+### Best Design: `design_opt1.v` — Cost: 842,484 (13% improvement over 968,045 baseline)
+
+### What Worked
+
+1. **Eliminated the two's complement +1 carry chain (pipe2→pipe3)**: Replaced `sign ? (~mantissa + 1) : mantissa` (carry propagation adder before register) with `sign ? ~mantissa : mantissa` (XOR only, no carry). The +1 correction is computed as a popcount of negative-sign operands, registered separately, and added to the final sum. This removed the critical carry chain from the pipe2→pipe3 path. **Impact: 968K → 936K**
+
+2. **Simplified the comparator module**: Replaced the case-statement-based signed comparator in `comp_tree` with a direct `assign result_o = (operand_a >= operand_b) ? operand_a : operand_b`. This reduced both area and delay of the exponent max tree. **Impact: 936K → 842K**
+
+### What Didn't Work (Regressions)
+
+- **Moving comp_tree to pipe2→pipe3**: Overloaded that stage with comp_tree + exp_diff + barrel_shifter, making delay 1239ps. Reverted.
+- **Moving CSA tree to pipe2→pipe3**: Combined barrel shifter + CSA tree on one path = 976ps. Area dropped to 950 but delay killed it. Reverted.
+- **N+2-input CSA tree for neg_count injection**: The csa_tree width calculation broke, causing off-by-1 errors. Reverted to separate adder.
+- **Replacing 4:2 compressor with cascaded 3:2**: Added an extra XOR level, making it slower (849K vs 842K). Reverted.
+- **Moving final adder to pipe4→pipe5**: Overloaded pipe4→pipe5 with adder + mantissa_norm + encoder = 1060ps. Reverted.
+- **Higher target_delay (800–1500ps)**: Either no area benefit or worse delay, always worse ADP.
+
+### Lessons Learned
+
+1. **Pipeline balancing is the primary lever**: The key win came from removing logic from the critical stage (pipe2→pipe3) and placing the correction in a stage with slack. Moving entire blocks between stages often overloads the destination — targeted extraction of just the carry chain was the sweet spot.
+2. **Register the popcount, not the raw signs**: Computing the sign popcount combinationally and registering it avoids adding delay to the CSA+adder stage.
+3. **Simpler RTL often synthesizes better**: The direct `>=` comparator outperformed the hand-optimized case-statement version, likely because Yosys maps it to efficient carry-chain logic.
+4. **Target_delay had minimal impact** — the RTL structure was the real lever, as the tips suggested.

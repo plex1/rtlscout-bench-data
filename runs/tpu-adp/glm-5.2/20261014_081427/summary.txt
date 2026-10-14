@@ -1,0 +1,27 @@
+## Summary
+
+1. **Approaches Tried**
+   - **Baseline (`design.v`)**: Original 8x8 systolic array with 32-bit carry-propagate adder in each PE. High cost (4.62M).
+   - **Carry-Save Accumulation (`design_cs.v`)**: Replaced the 32-bit CPA in each PE with a 3:2 CSA, placing a single CPA at the bottom of each column.
+   - **Narrowed Datapath (`design_cs4.v`, `design_cs8.v`)**: Reduced PE accumulator and deskew registers from 32-bit to 19-bit (sufficient for 8x8 signed dot products), sign-extending only at the final output.
+   - **Async Reset on PEs (`design_cs8.v`)**: Used `posedge clk or posedge rst` in `tpu_pe` to change flip-flop mapping.
+   - **Hybrid CPA/Deskew Splitting (`design_cs3.v`, `design_cs9.v`, `design_cs11.v`)**: Attempted to register CSA outputs (sum, carry) and move the CPA into the deskew pipeline to break the critical path.
+   - **Pipeline Product (`design_cs5.v`)**: Attempted to register the multiplier output before the CSA.
+   - **Split Multiplier (`design_booth.v`)**: Attempted to split the 8x8 multiplier into two 4x8 multiplies.
+
+2. **Most Impactful Optimizations**
+   - **Carry-Save Accumulation with a bottom-of-column CPA** was the single biggest win, reducing delay from ~1004ps to ~680ps by removing the ripple-carry chain from the PE-to-PE partial sum path.
+   - **Narrowing the CSA and deskew registers to 19-bit** significantly reduced area without impacting timing, cutting cost from ~3.10M to ~2.89M.
+   - **Async reset on PEs (`design_cs8.v`)** nudged the synthesizer to use a DFFHQNx1 cell, slightly lowering both delay and area, yielding the best result: **2.863M**.
+
+3. **Regressions and Failures**
+   - **Product pipeline (`design_cs5.v`)**: Broke cycle accuracy because adding a register to the product path shifted the alignment of partial sums relative to activations.
+   - **Narrowing to 17 or 18 bits (`design_cs6.v`)**: Caused overflow on extreme test vectors, failing simulation.
+   - **CPA/Deskew Splitting (`design_cs9.v`, `design_cs11.v`)**: Increased area due to doubled registers for sum/carry without reducing the critical path, as the multiplier+CSA delay remained dominant.
+   - **Async reset on all registers**: Applying it to the skew/deskew chains hurt area/delay due to reset mux overhead.
+
+4. **Lessons Learned**
+   - Replacing carry-propagate adders with carry-save logic is highly effective for weight-stationary systolic arrays.
+   - Exact-width datapath optimization is a simple and reliable area-reduction technique, but boundary conditions must be verified to avoid overflow.
+   - Async reset can subtly change flip-flop cell selection and timing, but it is not universally beneficial for all register types.
+   - For future work, exploring explicit partial-product generation (Wallace/Dadda trees) instead of behavioral `*` might further reduce the multiplier delay, which became the primary bottleneck.

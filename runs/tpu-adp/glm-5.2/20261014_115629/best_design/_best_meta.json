@@ -1,0 +1,7 @@
+{
+  "eval_index": 27,
+  "step_index": 50,
+  "best_cost": 2841793.860305808,
+  "cost_metric": "area_delay_product",
+  "design_file": "design_csa_split.v"
+}

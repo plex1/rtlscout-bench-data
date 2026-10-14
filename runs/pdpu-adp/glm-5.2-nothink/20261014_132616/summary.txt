@@ -1,0 +1,36 @@
+## Summary
+
+### Final Result
+- **Best cost:** 800,573 area_delay_product (down from 968,045 baseline = 17.2% reduction)
+- **Best file:** `design.v` (the version before the last split-CSA regression)
+- **Final design PASSes 100% of 1,999,992 test vectors**
+
+### What Worked Best
+
+1. **Moving mantissa sum+carry and fixed-shift product to pipe1→pipe2** (pre-computing `mants_norm_c` and `product` before the pipe2 register): Broke the original critical path through exp_max→exp_diff→shift→barrel_shift→complement. Saved ~44ps delay and ~34 area. Cost: 968K → 893K.
+
+2. **Replacing radix-4 Booth multiplier with simple `*` operator**: The 4-bit×4-bit mantissa multiply was over-engineered with Booth encoding + CSA tree. A direct `a * b` let Yosys optimize better, reducing both area and delay significantly. Cost: 861K → 819K.
+
+3. **Ones' complement with popcount correction**: Replaced per-lane two's complement `~x+1` (incrementer on critical path) with `~x` (ones' complement) + a registered popcount of signs added to the final sum. Removed the ripple incrementer from the barrel-shifter→pipe3 path. Cost: 893K → 861K.
+
+4. **Simplifying the comparator module** to a single `>=` comparison instead of the sign/magnitude case statement. Cost: 819K → 804K.
+
+5. **Injecting popcount as 18th CSA operand** instead of adding it to the final sum separately. Cost: 804K → 800K.
+
+### What Didn't Work / Regressions
+
+1. **Ones' complement with simple `$unsigned(signs)` addition**: First attempt failed correctness (1.7M errors) — the popcount correction wasn't being computed properly. Required an explicit popcount tree of adders to work.
+
+2. **Pre-computing shift amounts in pipe1→pipe2**: Moving the exp_diff→shift_amount computation earlier overloaded the pipe1→pipe2 stage (comparator tree + exp diff + shift amount = 1075ps), making it worse than the original.
+
+3. **Direct `>>` shift instead of barrel_shifter module**: Yosys didn't optimize the inline shift as well as the explicit barrel shifter (915K vs 893K).
+
+4. **Splitting CSA and final add into separate stages** (last attempt): Moving the final addition to pipe4→pipe5 overloaded that stage with final_add + mantissa_norm + posit_encode, creating a 951ps critical path. Cost regressed to 918K.
+
+### Lessons Learned
+
+- **Simple operators often beat hand-crafted structures** for small widths — Yosys's technology mapping for `*` and `>=` is well-optimized, while custom Booth multipliers and sign/magnitude comparators add overhead.
+- **Pipeline retiming is the primary lever** for delay reduction — moving logic between stages to balance critical paths is more impactful than micro-optimizing individual modules.
+- **Ones' complement trick** (deferring the `+1` as a popcount correction) is a classic and effective technique to remove incrementers from critical paths, but requires careful popcount computation.
+- **Stage splitting must consider total load** — splitting one stage can overload the next; the whole pipeline must be rebalanced.
+- **Always save working variants** before trying risky changes, and evaluate after every edit.

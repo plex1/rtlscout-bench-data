@@ -1,0 +1,29 @@
+## Summary
+
+**Final result: PASS, best cost 9.68e5 area_delay_product** — which corresponds to the **original `starting_point.v`** (area 1063.5, delay 910.2). Important: the working file `starting_point.v` was left **broken** by my last edit cycle (132,022/2M vector failures) — see §4. `newdesign.v` is a stray placeholder; ignore it.
+
+### 1. Approaches tried
+- **Baseline eval** of the original 5-stage pipelined PDPU: PASS, 968k (area 1063 × delay 910).
+- **Multiplier swap**: replaced 16 radix-4 Booth multipliers (4×4 mantissa multiply) with plain `*`. Exact same results, less logic.
+- **Negate folding**: replaced the 17 per-row two's-complement negate incrementers with a one's-complement XOR (invert) plus a popcount-of-sign-mask constant added in the final carry-propagate adder. Mathematically exact mod 2^20.
+- **Stage rebalancing**: moved exp-diff subtract/saturate into stage B (registered shift amounts into pipe2), products into pipe2, keeping the 14-bit barrel shifters alone in stage C.
+- **3-way comparator max tree**: replaced the recursive pairwise `comp_tree` (17 inputs, 5 levels) with a 3-level max3 tree using plain `$signed >` (value-equivalent; tie-breaks don't matter since only the max *value* is used).
+- **Kogge-Stone prefix adder** for the final 3-input combine (3:2 compress then one prefix add).
+- **Wallace popcount** (FA/HA column compression) for the sign-mask popcount.
+- **target_delay sweep**: at default 500 the tool chased an unreachable constraint using huge cells. Relaxing to 4000–5000 shrank area ~3× at flat ~750ps structural delay (e.g. 4500 → area ~287, cost ~215k; 5000 → 262k; 10000 → 426k). This was the single biggest lever in late-stage gains.
+
+### 2. Most impactful
+- The `target_delay` relaxation (default 500 was far below the ~730ps structural floor) — several-fold cost reduction with zero RTL change.
+- Structural: negate folding + 3-way max tree + Kogge-Stone adder together cut the worst stage from ~955ps to ~730ps and area from 1063 to ~922 (cost 968k → ~678k before the target sweep).
+
+### 3. What didn't work / regressed
+- **Moving exp-diff/saturate after the compare tree without rebalancing**: overloaded one stage (1138ps) — worse than baseline.
+- **18-row CSA tree** (popcount appended as an 18th operand): the recursive `csa_tree` truncates carry bits at each 4:2 level; adding a row changed the truncation pattern → 6.6% mismatch. Must keep 17 rows and add the popcount in the final adder.
+- **Sequential popcount loop** (`neg_count = neg_count + 1` in always_comb) built a ripple chain → stage D became critical.
+- **Fused one-hot AND-OR field select** replacing the LZC+barrel shifter in stage E: functionally wrong (132k failures) — my index math had a subtle error, and my subsequent "revert" was incomplete.
+
+### 4. Lessons learned
+- **Verify every intermediate edit with an eval** — I made several edits in one turn and mis-tracked which registers existed, spending many steps chasing a phantom bug.
+- **Keep a saved known-good copy before risky edits** (I had none; the final broken state is unrecoverable without re-doing edits). The known-good optimized configuration was: plain `*` multiply, 17-row tree + popcount in final adder, 3-way max tree, Kogge-Stone final add, Wallace popcount, eval at target_delay ≈ 4500.
+- Replicate the original's **CSA-tree truncation semantics exactly** — the oracle shares them, so any tree restructuring is a bit-exactness gamble.
+- Cost = area × achieved delay: if the constraint is unmeetable, relaxing `target_delay` is nearly free area.

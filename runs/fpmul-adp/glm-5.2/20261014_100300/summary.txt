@@ -1,0 +1,28 @@
+## Summary
+
+### 1. Approaches tried and what worked best
+
+- **Baseline (starting_point.v)**: 145,429 cost (1338ps, 108.7 area) at default target_delay=500.
+- **V1 - Partial product decomposition**: Split 11×11 multiplier into 10×10 + partial products. Fixed a bit-alignment bug. Result: 155,050 — worse than baseline.
+- **V2 - Priority encoder LZ + clean subnormal shift**: Replaced loop-based LZ with priority encoder, used unsigned arithmetic for subnormal shift. Result: 148,210 — worse.
+- **V3 - Tree-based LZ + 7-bit exponent**: Binary tree LZ counter, narrower exponent arithmetic. Result: 146,150 — slightly worse.
+- **V4 - Mask-based sticky**: Replaced `below[]` array with shift-and-mask. Result: 148,784 — worse.
+- **V5 - Simplified output mux**: Ternary chain for output selection. Result: 146,677 — slightly worse.
+- **V6 (BEST, design.sv) - Restructured output mux + 7-bit exp**: Reorganized output mux with nested ternary and early special-case detection, narrowed exponent arithmetic to 7-bit. Result: **142,328** at target_delay=1345.
+
+### 2. Optimizations with most impact
+- **target_delay tuning**: Swept 100–2000ps. Sweet spot ~1345–1360 where slack barely meets timing, giving best area-delay product. This alone reduced cost from ~145k to ~142k.
+- **7-bit exponent arithmetic**: Narrowing from 8-bit to 7-bit saved a small amount of area.
+- **Restructured output mux**: Moving from explicit 4-flag chain to direct ternary-based selection reduced logic depth slightly.
+
+### 3. What didn't work or caused regressions
+- **Partial product decomposition (V1)**: The 3-way addition of partial products was worse than the native 11×11 multiply, which Yosys maps efficiently.
+- **Priority encoder / tree LZ (V2, V3)**: The original loop-based LZ was already better optimized by synthesis.
+- **Mask-based sticky (V4)**: The `below[]` prefix-OR array was already well-optimized; replacing it added area.
+- **Mux-based guard/sticky (V8)**: Added significant area for the 12-way muxes.
+
+### 4. Lessons learned
+- Yosys is very good at optimizing the starting point structure; most structural changes either didn't help or regressed.
+- `target_delay` is the highest-leverage "free" optimization — sweeping around the critical-path delay to find the exact transition point from violated to met slack gives the best area-delay tradeoff.
+- The 22-bit prefix-OR array and `bit_at` function are already efficiently synthesized despite appearing verbose in RTL.
+- For this problem class (small float multiplier), the multiplier dominates area and control logic is relatively small, so RTL micro-optimizations have limited impact. The main lever was finding the optimal synthesis constraint.

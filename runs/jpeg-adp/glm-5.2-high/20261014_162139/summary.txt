@@ -1,0 +1,29 @@
+## Summary
+
+### Best Design
+**`design.v`** — the final passing design with cost **8.69M** (down from baseline 9.50M, ~8.6% improvement). The last step regressed to 10.78M due to the INPUT_WIDTH parameterization changing the mux structure; the best version is the one from step 46 (before step 57's parameterization).
+
+### What Worked Best
+
+1. **Division-to-shift replacement (biggest win: 9.21M → 8.69M)** — The original uses signed division `/ 256` for the 1/√2 scaling (`(x * 181) / 256`). Replacing this with `{{8{hi[23]}}, hi[23:0]} + corr` where `hi = prod[31:8]` and `corr = prod[31] & |prod[7:0]` eliminated the combinational divider, reducing delay by ~125ps. Key insight: using explicit bit-slicing (`prod[31:8]`) rather than `>>>` operator was needed for correctness.
+
+2. **Parameterized 1-D module (9.50M → 9.21M)** — Merging the duplicate `jpeg_idct_x` and `jpeg_idct_y` into one `jpeg_idct_1d` module with `IS_Y` parameter for index permutation. Also narrowed multiplier constants from 16-bit to 13-bit (`signed [12:0]`), reducing multiplier area.
+
+### What Didn't Work / Regressions
+
+3. **Split-bank RAMs** — Splitting 32-entry RAMs into two 16-entry banks with a 2:1 output mux *increased* delay (the bank select mux added latency on top of the 16:1 mux).
+
+4. **Removing reset from RAM read register** — Made things much worse (delay jumped from 2073ps to 2797ps). The synthesis tool chose a slower FF without reset.
+
+5. **`>>>` operator for division replacement** — Using `(prod >>> 8) + corr` produced ±512 errors. The arithmetic shift right on a wire didn't match Verilator's signed division semantics. Explicit bit extraction `prod[31:8]` with manual sign extension was required.
+
+6. **INPUT_WIDTH parameterization** — Added complexity that changed the mux structure and regressed to 10.78M.
+
+### Key Bottleneck
+The critical path is consistently **transpose RAM read address decode**: `rd_addr_q` FF (QN output, ~1422ps) → 32:1 mux decode (~650ps) → `ram_read1_q` FF. The DFFHQNx1 inverting flip-flop accounts for ~68% of path delay. The synthesis tool consistently chooses the QN (inverted Q) output, requiring an extra inverter. No coding style I tried could force a non-inverting FF.
+
+### Lessons for Next Time
+- Pre-register the RAM read address one cycle ahead to break the `rd_addr_q → mux → ram_read1_q` path
+- Try async RAM read (combinational mux) with compensating pipeline register outside the RAM module
+- Experiment with Yosys `abc` script or `techmap` options to influence FF selection
+- Try reducing RAM to 16 entries by changing the addressing scheme (e.g., 8 RAMs of 16 entries)

@@ -1,0 +1,33 @@
+# Design Session Summary — `tpu` weight-stationary MXU tile
+
+**Final: `design19.sv` — ADP 2.368e6 (area 4793.6, delay 493.9 ps), 0/6782 errors**, vs baseline 4.624e6 (**−49%**).
+
+## 1. Approaches tried / what worked
+
+Kept the original systolic mesh architecture throughout (skew/de-skew/stall semantics are hard to replicate exactly with mid-drain weight-reload mixing), and optimized the PE datapath + mapping:
+
+- **Narrow accumulators** (`design.sv`): every psum holds ≤ 8 signed products → 19 bits suffice; 32-bit output recovered by sign extension. → 3.24M
+- **Carry-save psums** (`design2.sv`): PE stores redundant {carry,sum}; per-stage CPA replaced by one XOR3/MAJ level. → 3.10M
+- **Manual compressor tree, no `*`** (`design4.sv`): product built from shifted rows `a·w = Σₖ w[k]·(a≪k) − w[7]·(a≪7)` (`−ex = ~ex+1`), psum pair fed directly into the same balanced 5-level 3:2 tree → **zero CPAs anywhere in the array**. → 2.75M
+- **Reset/mapping/grouping search** (designs 5–22, ~16 variants): reset style + tree operand grouping change abc's mapping by ±5%. Winner: `design19.sv` = const row paired with low rows `(r0,r1,+1)`, negated row `(r5,r6,~ex)` last, psum pair split across the two level-2 compressors, datapath FFs without reset (vpipe keeps reset) — **2.368M**
+
+## 2. Highest-impact optimizations
+
+1. **Manual CSA tree replacing `$signed*` + adder** (~−15% ADP each): removed both the multiplier's internal CPA and the accumulator adder from the clock-critical path (delay 820→581 ps). The 32→19-bit narrowing and carry-save were the other big wins.
+2. **target_delay ≤ 400**: the achieved-delay × area product is best in the most aggressive mapping bin (500/570 bins were worse); area barely moves, delay drops ~30 ps.
+3. **Grouping/reset lottery** (~−2% more): cheap to test, surprisingly large mapping variance (±5%).
+
+## 3. What didn't work (regressions)
+
+- Explicit unsigned-mul + sign correction (`design3`, 3.43M) — Yosys's native `$signed` mul is more compact.
+- Psum-at-level-0/level-1 groupings, L1/L3 cross-pairings, Booth radix-4 (recode + popcount depth eats the tree-level savings) — all 2.5–2.7M.
+- Removing datapath resets sometimes *increased* area (mapping noise); async-vs-sync-vs-none ordering changed with tree shape — no universal winner, only per-combination luck.
+- Per-row accumulator narrowing: mathematically valid but blocked — widening a *redundant* pair mod 2ᵂ isn't possible without a CPA.
+- target_delay 570/800: delay rose far more than area fell.
+
+## 4. Lessons
+
+- **Structure you hand to the mapper matters as much as the math**: identical-function CSA chains (11 variants) spanned 2.37–2.67M. Budget lottery tickets after finding the best *architecture*.
+- The metric rewards pushing timing far past feasibility when area is FF-dominated (area is nearly constant across target bins).
+- Verify bounds rigorously before narrowing (19 bits, not 18: all-`0x80` tiles hit exactly 2¹⁷).
+- Next time: build the CSA tree + narrow widths + manual rows from the start (skip the `$signed*` detour), then spend the budget on grouping/reset exploration with `target_delay=300`.

@@ -1,0 +1,24 @@
+## Summary
+
+**Final result:** The session ended with the original `starting_point.v` (9.497e6 ADP) still as best, but `design_v3.v` is a **fully passing optimized design** (area 4101 vs 4274, delay 3466 vs 2222) that just needs delay work. `design_v4.v`/`design_v5.v` also pass and are per-array-timing variants.
+
+### 1. Approaches tried
+- **v1/v2** (failed): 1-D pass with constant-coefficient multipliers (only operand-a registered, 13-bit constant folded into the multiply), single product register, `/256` → add-255-then-shift, 21-bit x-pass output, and a restructured transpose (8 × 16-entry arrays instead of 4 × 32-entry 32-bit RAMs).
+- **v3** (passes): fixed index-field decoding (the killer bug), lane-organized transpose storage, registered read side.
+- **v4/v5** (pass): per-array private address/enable registers to cut control-signal fanout.
+
+### 2. What had most impact
+- **Constant-coefficient multipliers** + dropping the redundant second product register: big multiplier-area cut (the 32×32 multipliers become ~18×13).
+- **21-bit x-pass output narrowing** (proven bound |t|<2³⁰ → shift-11 output fits ±2¹⁹) shrinks the entire corner-turn storage and y-pass input datapath from 32 to 21 bits.
+- **Transpose restructure**: write address = beat counter (no address computation), read = 16:1 mux per lane array instead of 32:1 32-bit decode.
+- **`{ptr[2:0],ptr[5:3]}`** replacing the 64-entry `ptr_conv` LUT.
+
+### 3. What caused regressions
+- **Index-field mixups** (three separate bugs): row-major `k={row,col}` fields were swapped between write/read paths; even/odd row-set flag must be `k[0]^k[2]` (y-pass schedule), not `k[2]`; one write-case only covered half the banks. Cost several eval cycles.
+- **Schedule sensitivity**: my passes are 1 cycle shorter than the original, and the corner-turn FSM / block_out read-before-write alignment depends on exact timing. Merging the streamer pipeline breaks the `bo_tmp`/`block_out[4,7]` same-cycle overwrite pattern — had to keep OUT_DELAY=7 (total latency 10, writes at +3) to reproduce the original's alignment.
+- **Delay regression**: registering transpose outputs helped (4075→3466), but per-array register sharing mistakes (v4: `ra_q` outside generate = shared high-fanout register) made things worse (5594). Critical path is still the read-mux → y-pass `i0` adder path; v5's fully-local per-array registers are untested on cost.
+
+### 4. Lessons
+- The original's fixed-beat schedule makes **latency alignment semantically load-bearing** — reproduce the original's cycle-by-cycle streamer behavior exactly, then optimize internals only.
+- Verified area optimizations (multipliers, width) worked immediately; **all failures were control/decode/index bugs**, which a local sim loop would have caught in minutes instead of burning eval steps on `$display` tracing through the shared output.
+- Next time: build a small local differential testbench (Verilator) before touching the design; attack the transpose read path with v5-style per-array registered addresses plus a properly registered output stage (v5 is the ready starting point).

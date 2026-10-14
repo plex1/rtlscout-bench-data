@@ -1,0 +1,24 @@
+## Session Summary
+
+**Final result: PASS at 968,045 area_delay_product (the starting point itself, `starting_point.v`).**
+
+### 1. Approaches tried
+- **Baseline evaluation** of `starting_point.v` (upstream PDPU 5-stage pipeline): PASS, cost 968k (delay 910 ps dominated by the pipe2→pipe3 stage: comparator tree → exponent subtract → barrel shift → 17× 20-bit ripple two's-complement).
+- **`design1.v` — aggressive restructure** (never reached PASS):
+  - Plain 4×4 multiply instead of booth + per-lane CSA re-add.
+  - Conditional-inversion + popcount correction in the final adder instead of per-lane two's complement.
+  - Log-depth parallel-prefix negation (`neg_prefix`) replacing ripple incrementers.
+  - Split final adder (lo/hi chunks) to shorten the carry chain.
+
+### 2. What had most impact
+Nothing beat the baseline. The most valuable finding: the critical path is the **17× 20-bit ripple `~x+1` incrementers** after the barrel shifters — that is the right target, and `neg_prefix` (OR-prefix carry computation, log depth) is the correct structural fix.
+
+### 3. What didn't work / caused regressions
+- **The booth multiplier is not a real booth multiplier.** The reference `gen_prods` has quirks: `one` has priority over `two` in `gen_product`, PP widths are 7/8/9 bits (truncating PP1's sign-extension bit), PP0 puts `tp0` at bit0, and negation is bitwise-NOT without +1 at the PP level (the +1s come from `sign` bits placed at bit positions: net effect ≈ `tp0 + 4·tp1 + 4·tp2 − 31·s0 − 127·s1 mod 256`, with `tp_i = neg ? ~mag : mag`). I burned ~15 steps rediscovering this by trial and error; errors stayed at ~99% failure because per-lane products feed the whole datapath.
+- **Two's-complement is done at 20 bits (zero-extended)**, so the "invert 14 bits + add popcount" trick is *not* equivalent — per-lane negation of a zero-extended value has high bits 0x3F, not a clean borrow pattern. This invalidated the popcount-correction idea entirely.
+- Multiple syntax/declaration-order slips (`wire` used before declaration, duplicated blocks after edits) wasted steps.
+
+### 4. Lessons learned
+- **Before restructuring, fully read the reference implementation** (here embedded as sv2v output inside `tb.sv`) and derive bit-exact identities on paper first. "Obviously equivalent" transforms were not equivalent because the source contains bugs/quirks that the testbench's golden model inherits.
+- **Isolate uncertainty with small experiments**: swapping `neg_prefix` to `~x+1` and seeing identical failure counts told me the negation wasn't the (only) problem — I should have done that kind of A/B test much earlier.
+- **Next time**: (a) first swap *only* the multiplier for the emulated booth formula while keeping everything else verbatim, verify, then swap only the negators, verify; (b) keep the original module structure and only patch leaves, rather than rewriting the top; (c) budget ~5 steps for correctness bring-up per transform, and revert to the last passing file (`starting_point.v`) aggressively.

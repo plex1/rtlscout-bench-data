@@ -1,0 +1,27 @@
+# PDPU Pipelined Design Session Summary
+
+## Final State
+- **Best passing result: cost 9.68e+05** (area 1063.5, delay 910.2 ps) — achieved by the **baseline** (`starting_point.v` + `include` in `design.v`, eval #1).
+- The last edited `design.v` (my restructured 6-layer variant, just made correct at eval ~58 with cost 1.32e+06) was mid-rebalance (moving normalize into stage 5 comb + encoder after p5 reg) when the session ended — **it has not been re-evaluated and is likely still worse than the baseline**. The reliable artifact is the untouched `starting_point.v` design (baseline result recorded above).
+
+## What I Tried
+1. **Baseline (original upstream RTL)**: PASS, cost 968k, delay 910 ps. Critical path: pipe2→pipe3 = exp diff/subtract → shift clamp → 17 barrel shifters → two's-complement negate (17 adders).
+2. **Opt A**: moved diff/clamp computation one stage earlier (into stage 2), replaced per-lane `(~x+1)` negation with invert-only + a `sign_corr` count term added in the final CPA. Correct, but delay worsened to 1144 ps (cost 1.13e6) — the mult + max-compare-tree + subtract all landed in one stage.
+3. **Opt B**: rebalanced that variant (CPA into stage 2, diff/clamp into stage 3) — failed; the design had become a 6-register-layer datapath that cannot meet the fixed 5-cycle latency (outputs lag by one; error pattern "got = previous expected").
+4. **Opt C**: full rewrite (`design.v`) with direct `*` multiplies replacing booth/wallace, stages: decode → mul+exp-add → max-tree+diff+clamp → align+sign → CSA+CPA (+ normalize). Took many debug iterations (missing acc sign bit, `p2_rg_exp_c` sized for N instead of N+1 lanes so the acc exponent was dropped, wrong encoder MANT_WIDTH, missing `sign_corr` in the sum). Once correct: PASS but **delay 1229 ps** — the normalize+encode tail overflew the last stage.
+
+## Most Impactful Lessons
+- **The combinational `+1` in negation is cheap** relative to barrel shifters; the baseline's 910 ps critical path was already fairly balanced across its stage boundaries.
+- **The last stage (normalize + encoder) is a serious timing hazard** when the CSA/CPA also sits there — the LZC + barrel shifter + encoder chain is long.
+- **Stage-count discipline**: with a fixed 5-cycle latency contract, every restructuring must preserve exactly 5 FF layers. My repeated failure mode was silently adding/removing a register layer; the TB's "lag-by-one" error signature identifies this instantly.
+
+## What Didn't Work
+- Moving work across stage boundaries without re-counting FF layers (Opts A/B).
+- Slicing packed-array-style gathers with mismatched lane counts (`N` vs `N+1`) — the acc lane silently fell off the end and wrapped to index 0.
+- Cost never beat the baseline; all rewrites landed 1.1–1.4e6.
+
+## What I'd Do Differently
+1. **Start from the baseline and make one surgical change at a time**, keeping the original 6 FF-layer structure (pipe0..pipe5) intact — only move *combinational logic* between existing registers, never add/remove layers.
+2. The most promising untried idea: keep the baseline structure but **replace the two's-complement negate adders with invert + `sign_corr` in the CSA tree** (feed `sign_corr` as a 17th CSA operand row) — it removes 17 small adders without moving any stage boundary.
+3. Verify stage widths (`N+1` vs `N` lanes) **before** simulating; most of my debug cycles were spent on out-of-range lane writes that Verilator lint did not flag.
+4. Re-evaluate immediately after any edit; the session ended with an unverified file in place — `design.v` should be restored to the `` `include "starting_point.v" `` baseline form (which was the eval-1 PASS) if reproducing the best result.

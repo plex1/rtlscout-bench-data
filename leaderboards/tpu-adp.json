@@ -18,9 +18,9 @@
  },
  "runs": {
   "glm-5.2": [
-   "20260727_085945",
-   "20260727_085947",
-   "20260727_085949"
+   "20261014_081427",
+   "20261014_091631",
+   "20261014_115629"
   ],
   "kimi-k3": [
    "20260725_185648",
@@ -41,6 +41,26 @@
    "20261012_205005",
    "20261013_021651",
    "20261013_081305"
+  ],
+  "glm-5.2-nothink": [
+   "20261014_081528",
+   "20261014_102517",
+   "20261014_130630"
+  ],
+  "glm-5.3-flash-high": [
+   "20261014_081435",
+   "20261014_100539",
+   "20261014_125859"
+  ],
+  "deepseek-v4.1-flash": [
+   "20261014_085209",
+   "20261014_111421",
+   "20261014_133936"
+  ],
+  "mimo-v2.6-flash": [
+   "20261014_091810",
+   "20261014_092036",
+   "20261014_113349"
   ]
  },
  "exclude": [
@@ -58,13 +78,49 @@
    "entry": "glm-5.3-flash",
    "run": "20261010_155747",
    "reason": "superseded by suite-v2 runs"
+  },
+  {
+   "entry": "glm-5.2",
+   "run": "20260727_085945",
+   "reason": "superseded by suite-v2 runs"
+  },
+  {
+   "entry": "glm-5.2",
+   "run": "20260727_085947",
+   "reason": "superseded by suite-v2 runs"
+  },
+  {
+   "entry": "glm-5.2",
+   "run": "20260727_085949",
+   "reason": "superseded by suite-v2 runs"
+  },
+  {
+   "entry": "glm-5.2-high",
+   "run": "20261014_152121",
+   "reason": "effort variant held back: the high setting leaves GLM 5.2's reasoning volume unchanged (1k to 2k output tokens per step, as at default); see the GLM 5.2 entry note"
+  },
+  {
+   "entry": "glm-5.2-high",
+   "run": "20261014_152129",
+   "reason": "effort variant held back: the high setting leaves GLM 5.2's reasoning volume unchanged (1k to 2k output tokens per step, as at default); see the GLM 5.2 entry note"
+  },
+  {
+   "entry": "glm-5.2-high",
+   "run": "20261014_161620",
+   "reason": "effort variant held back: the high setting leaves GLM 5.2's reasoning volume unchanged (1k to 2k output tokens per step, as at default); see the GLM 5.2 entry note"
   }
  ],
  "notes": {
-  "glm-5.2": "Provider-default reasoning effort.",
+  "glm-5.2": "Default effort, pinned to Z.AI. Through OpenRouter a request without an effort setting behaves like thinking off: the default, high and off rows all produce 1k to 2k output tokens per step, and their results are within noise of each other. The high-effort runs are recorded but held back from the table.",
   "kimi-k3": "Provider-default reasoning effort (seed runs launched 2026-07-25).",
   "kimi-k3-high": "RTLSCOUT_REASONING_EFFORT=high (seed runs launched 2026-07-26). The old run directories do not record the effort; the split by launch date comes from the campaign notes.",
-  "nemotron-3-ultra": "550B-A55B. One seed run ended above the starting point: it edited the design before measuring the unmodified one."
+  "nemotron-3-ultra": "550B-A55B. One seed run ended above the starting point: it edited the design before measuring the unmodified one.",
+  "glm-5.2-nothink": "RTLSCOUT_REASONING_EFFORT=off, pinned to Z.AI: zero reasoning tokens in every reply.",
+  "glm-5.2-high": "RTLSCOUT_REASONING_EFFORT=high, pinned to Z.AI. Held back from the table: the setting leaves GLM 5.2's reasoning volume unchanged (1k to 2k output tokens per step, as at default), see the GLM 5.2 note.",
+  "glm-5.3-flash": "Default effort, which Z.AI documents as max for this model; 13k to 18k output tokens per step, reasoning included. Pinned to Z.AI.",
+  "glm-5.3-flash-high": "RTLSCOUT_REASONING_EFFORT=high, one level below Z.AI's default max for this model: 2k to 6k output tokens per step against 13k to 18k for the default row. Pinned to Z.AI.",
+  "deepseek-v4.1-flash": "Default effort, which DeepSeek documents as high. Pinned to the CoreWeave endpoint (fp8).",
+  "mimo-v2.6-flash": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8)."
  },
  "footnotes": [
   "Rows labelled as measured before the current suite are earlier data (pre-v1 seed runs from July 2026 with an unpackaged rtlscout, or suite-v1 runs from October 2026 without the provider pin and completion cap). Each is replaced when reruns of that entry under the current suite are published.",

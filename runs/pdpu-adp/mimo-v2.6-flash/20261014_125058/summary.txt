@@ -1,0 +1,36 @@
+# Session Summary — `pdpu_top_pipelined` (5-stage posit(8,2)×16 dot-product-accumulate)
+
+**Final: PASS, ADP = 631,879 (area 906.4 × delay 697.1 ps)** vs. baseline 968,045 (area 1063.5 × delay 910.2) → **−34.7% ADP**, 0/1,999,992 check failures. Design file: `starting_point.v`.
+
+## 1. Approaches tried / what worked best
+- **Data-driven iteration**: each eval's worst-path report told me which stage was binding, so I always optimized the actual critical path instead of guessing.
+- **Bit-exact algebraic rewrites** (the big winners): reformulations proven equal mod 2^20 or by identity, so no functional risk:
+  - plain `a*b` for the 4×4 mantissa product (verified exact for all 256 combos via the uniform sweep),
+  - deferred per-lane `+1` folded into a sign-popcount extra CSA operand,
+  - `−(v+r) = ~v + (1−r)` to un-series the encoder's rounding/negation.
+- **Pipeline rebalancing**: moved the diff/saturation, CSA rounds, and max-network between stages, using the path report to verify each balance point.
+- **Flat-max networks** with balanced `bit_and_tree`/`bit_or_tree` selects, culminating in **pair-shared compares** (one `>=` per pair, reverse direction = inversion; ties still resolve to an equal-valued unique argmax).
+- **Exact split saturation**: register cheap parts (4-bit nibble + closed-form predicate `dhi≠0 && (dhi≠1||ge) && (dhi≠−7||ge)`), move only the mux to the next stage.
+- FF-count reductions: pipe3 340→120, pipe2 items(119)→shift fields(85), merged mul sum/carry→product.
+
+## 2. Highest-impact optimizations
+1. Pair-shared flat-max compares: **744k → 631.9k** alone (−8.5% ADP: delay −38 ps, area −35).
+2. Split diff/saturation registration: **744k → 691.5k** (−7%).
+3. Booth→`*` + deferred increments + CSA split: **968k → 791k** (initial −18%).
+4. Encoder micro-cuts and flat-max tree (earlier): 791k → 744k.
+
+## 3. What didn't work / regressed (all reverted)
+- **Single-level 17-way flat max**: 3 variants (signed, bias-unsigned, row-chunked) all **timed out synthesis** (~272→136 wide compares explode ABC's runtime). Final attempt at step 57 timed out too.
+- **Bias-unsigned compares** in the working 2-level network: delay 800→849 (signed maps better).
+- **XOR-mask reformulations** of the decoder negate and `sign?~x:x`: area *and* delay both worse (782k).
+- **Explicit Kogge-Stone `add_fast`**: perturbed whole-design mapping, delay 735→789.
+- **Moving max-level 1 into stage 1**: revealed decode ≈ 520 ps; stage 1 became critical (828).
+- **target_delay**: inert for 350–600 (bit-identical netlists); 700/750 worse. Not a useful knob here.
+- A first saturation-split attempt had a wrong field-weight derivation (bits[6:4] weight 16, mixed-sign fields) — caught immediately by the tb, reverted.
+
+## 4. Lessons learned
+- **Path reports are the real oracle**: every eval revealed the binding stage; several "improvements" only shifted the bottleneck until all stages were ~equal.
+- **Tool constraints dominate theory**: flat17 is logically best but un-synthesizable; hierarchical cone size didn't help (flow flattens). Never beat ~50 compares in one network.
+- **Mapping noise is ±5%**: tiny edits can swing delay ±40 ps for no logical reason — always eval, always keep the recorded best, and batch-at-most-one structural change per eval for clean attribution.
+- **Prove bit-exactness before editing** (the mod-2^20 congruence and closed-form sat predicate made those changes safe); the one edit I made without complete proof failed exactly where predicted.
+- Next time: I'd measure stage depths *first* (cheap probe configs) before investing in any single stage's optimization, and I'd write the pair-sharing insight up-front since compares dominated both area and delay of the exponent max.

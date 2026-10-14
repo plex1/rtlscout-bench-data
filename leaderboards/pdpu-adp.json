@@ -21,6 +21,31 @@
    "20261012_205108",
    "20261013_064901",
    "20261013_132434"
+  ],
+  "glm-5.2": [
+   "20261014_081431",
+   "20261014_100240",
+   "20261014_120956"
+  ],
+  "glm-5.2-nothink": [
+   "20261014_081653",
+   "20261014_110212",
+   "20261014_132616"
+  ],
+  "glm-5.3-flash-high": [
+   "20261014_081439",
+   "20261014_101651",
+   "20261014_130446"
+  ],
+  "deepseek-v4.1-flash": [
+   "20261014_091211",
+   "20261014_114617",
+   "20261014_140205"
+  ],
+  "mimo-v2.6-flash": [
+   "20261014_091912",
+   "20261014_104806",
+   "20261014_125058"
   ]
  },
  "exclude": [
@@ -38,9 +63,32 @@
    "entry": "glm-5.3-flash",
    "run": "20261010_203340",
    "reason": "superseded by suite-v2 runs"
+  },
+  {
+   "entry": "glm-5.2-high",
+   "run": "20261014_152125",
+   "reason": "effort variant held back: the high setting leaves GLM 5.2's reasoning volume unchanged (1k to 2k output tokens per step, as at default); see the GLM 5.2 entry note"
+  },
+  {
+   "entry": "glm-5.2-high",
+   "run": "20261014_155506",
+   "reason": "effort variant held back: the high setting leaves GLM 5.2's reasoning volume unchanged (1k to 2k output tokens per step, as at default); see the GLM 5.2 entry note"
+  },
+  {
+   "entry": "glm-5.2-high",
+   "run": "20261014_165058",
+   "reason": "effort variant held back: the high setting leaves GLM 5.2's reasoning volume unchanged (1k to 2k output tokens per step, as at default); see the GLM 5.2 entry note"
   }
  ],
- "notes": {},
+ "notes": {
+  "glm-5.2": "Default effort, pinned to Z.AI. Through OpenRouter a request without an effort setting behaves like thinking off: the default, high and off rows all produce 1k to 2k output tokens per step, and their results are within noise of each other. The high-effort runs are recorded but held back from the table.",
+  "glm-5.2-nothink": "RTLSCOUT_REASONING_EFFORT=off, pinned to Z.AI: zero reasoning tokens in every reply.",
+  "glm-5.2-high": "RTLSCOUT_REASONING_EFFORT=high, pinned to Z.AI. Held back from the table: the setting leaves GLM 5.2's reasoning volume unchanged (1k to 2k output tokens per step, as at default), see the GLM 5.2 note.",
+  "glm-5.3-flash": "Default effort, which Z.AI documents as max for this model; 13k to 18k output tokens per step, reasoning included. Pinned to Z.AI.",
+  "glm-5.3-flash-high": "RTLSCOUT_REASONING_EFFORT=high, one level below Z.AI's default max for this model: 2k to 6k output tokens per step against 13k to 18k for the default row. Pinned to Z.AI.",
+  "deepseek-v4.1-flash": "Default effort, which DeepSeek documents as high. Pinned to the CoreWeave endpoint (fp8).",
+  "mimo-v2.6-flash": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8)."
+ },
  "footnotes": [
   "Rows labelled as measured before the current suite are earlier data (pre-v1 seed runs from July 2026 with an unpackaged rtlscout, or suite-v1 runs from October 2026 without the provider pin and completion cap). Each is replaced when reruns of that entry under the current suite are published.",
   "All entries were called through OpenRouter without prompt caching, so every step pays for its full input.",

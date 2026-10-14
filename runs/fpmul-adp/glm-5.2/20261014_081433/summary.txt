@@ -1,0 +1,24 @@
+1. **What approaches did you try and what worked best?**
+   - I started with the provided `starting_point.v` (cost ~145,429).
+   - I tried replacing the `for`-loop leading-zero counter with a priority-encoder and tree-based logic, but the original `for`-loop synthesized best.
+   - I attempted to replace the `bit_at` function in the subnormal path with direct variable indexing (`prod[total_shift-1]`), but Verilator strictly enforced out-of-bounds checking, causing simulation failures.
+   - The best result was achieved in `design_v12.sv` (copied to `design.sv`), which combined three key optimizations:
+     1. **Left-shift normalization:** Shifting the product left by `lz` to place the leading 1 at bit 21, allowing direct extraction of the mantissa, guard, and sticky bits without calling the expensive `bit_at` function for the normal path.
+     2. **Exponent `+1` folding:** Pre-computing the normalization bias `+1` into `exp_sum` rather than adding it separately to `lhs`, saving an adder stage in the critical path.
+     3. **Parallelized classification:** Restructuring the `is_inf -> is_sub -> is_zero` sequential dependency in the packing stage into independent, parallel gates (`force_inf`, `is_sub`, `is_zero`), significantly reducing the logic depth at the output.
+
+2. **What optimizations had the most impact?**
+   - Left-shifting the product for the normal path had the largest initial impact, dropping the cost from ~145,429 to ~139,293.
+   - Parallelizing the output classification logic dropped it further to ~136,531.
+   - Folding the `+1` into the exponent sum yielded the final best cost of **135,917**.
+
+3. **What didn't work or caused regressions?**
+   - Narrowing the exponent arithmetic to 6-bit types caused a slight area/delay regression.
+   - Attempting to replace the `below[]` OR-reduction array and `bit_at` function with dynamic variable right-shifts failed due to Verilator's strict bounds checking or synthesized poorly due to wide variable shifts.
+   - Unifying the subnormal and normal shift logic by adding carry-dependency back into the subnormal shift logic created a massive critical path regression (cost ~176,138).
+
+4. **Lessons learned and what you would do differently next time:**
+   - Yosys synthesizes simple `for`-loops into efficient priority encoders naturally; manually expanding them into nested ternary operators often increases area without delay benefits.
+   - Verilator is strict with variable index bounds; using a `bit_at` function with explicit bounds checking is safer than direct variable indexing, though it adds some overhead. 
+   - Breaking sequential boolean dependencies (like classification flags) into parallel terms is a highly effective way to cut the critical path delay at the very end of the data path.
+   - I would spend more time exploring different structural implementations of the `below[]` prefix-OR array to see if its area can be reduced, as it remains solely to support the subnormal sticky bit.

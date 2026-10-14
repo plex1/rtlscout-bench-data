@@ -1,0 +1,30 @@
+## Summary
+
+### Starting Point
+- `starting_point.v`: Original PDPU pipelined dot-product (5-stage, 16-lane posit(8,2) → posit(16,2)).
+- Baseline cost: **968,044** area_delay_product (delay=910ps, area=1064).
+
+### Optimizations Applied (final best: **875,728** — 9.6% reduction)
+
+1. **Two's complement deferral (biggest win):** Replaced per-term `~mantissa + 1` (17 wide incrementers on the pipe2→pipe3 critical path) with just `~mantissa` (XOR only). The +1 corrections are accumulated as a `neg_count` popcount of negative signs, added later to the final sum. This removed 17 wide adders from the critical path. Cost: 968K → 936K.
+
+2. **Pre-computed comparator tree level 1:** Computed the first level of pairwise max (8 pairs of product exponents) before the pipe1 register, reducing the pipe1→pipe2 comparator tree from 17→2 (depth 5) to 9→2 (depth 4). Registered the intermediate maxes. Cost: 936K → 907K.
+
+3. **Folding neg_count into CSA tree:** Instead of `csa_sum + csa_carry + neg_count` (3-operand final add), folded `neg_count` as the 18th operand of the CSA tree, reducing the final addition to 2 operands. Cost: 907K → 876K.
+
+### What Didn't Work
+- **Moving comparator tree entirely to pipe0→pipe1:** Put the full comparator alongside the posit decoder → 1463ps delay, massive regression.
+- **Moving full CSA tree to pipe2→pipe3 stage:** Overloaded that stage (alignment + CSA) → delay increased to 937ps.
+- **Splitting CSA tree (18→6 before pipe3, 6→2 after):** Last attempt hit Verilog genvar scoping errors and ran out of steps. The structural idea was sound but implementation was incomplete.
+
+### Lessons Learned
+1. **Pipeline retiming is the key lever** — moving combinational logic across register boundaries to balance stage delays.
+2. **Deferring carry corrections** (two's complement → XOR + popcount) is a powerful pattern to remove wide incrementers from critical paths.
+3. **Folding corrections into CSA trees** as extra operands eliminates extra adder stages.
+4. **Genvar scoping in generate-for loops** is error-prone; declare loop variables as `genvar` at module scope, not inside the generate block.
+5. **Incremental edits via `edit_file`** are safer than large block replacements — the latter often fail due to whitespace mismatches.
+6. Budget more steps for debugging complex structural changes — the CSA split attempt needed more iterations than remaining steps allowed.
+
+### Files
+- `starting_point.v`: Current working design (cost 876K, PASS). Has the two's complement deferral, pre-computed comparator L1, and neg_count folded into CSA tree. The last failed CSA-split edit left some dead code (`csa2_s3`/`csa2_c3` declarations were removed but the genvar issue in level-2 loop needs fixing).
+- The **best passing version** is the one from eval step 11 (cost 875,728) — this is the version *before* the CSA split attempt. If `starting_point.v` currently has the broken CSA split, the previous best version should be restored by reverting the last 3 edits.

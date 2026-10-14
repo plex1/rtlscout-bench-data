@@ -1,0 +1,28 @@
+## Summary
+
+**Final state:** best passing design = **eval 8, cost 7.974e+05 ADP** (PASS, 0/1,999,992 mismatches). ⚠️ **Important caveat: `design.sv` on disk is NOT that design.** My last few edits (splitting the exponent comparator tree across pipeline stages) were still in flight when the step limit hit — `pipe1_cmp`/`pipe2_rg_exp_max` wiring is incomplete and `pipe1_signs`/`pipe1_cmp` register connections are inconsistent. **Revert `design.sv` before trusting it.**
+
+### What I tried
+1. **Baseline** (`starting_point.v`): 968,045 ADP, 910 ps critical path. Booth multipliers + barrel shifters + CSA tree + 2-level comparator tree.
+2. **Rewrote all arithmetic behaviorally** (`*` instead of radix-4 Booth, `>>`/`<<` instead of `barrel_shifter`, priority-encoder `lzc`, `+` instead of `csa_tree`). First version: 925,006.
+3. **Moved the two's-complement** out of the shift stage into the sum stage (registration as magnitude + sign instead of pre-negated operands): 859,551.
+4. **Replaced the 19-bit negation ripple with constant popcount**: used `-x = ~x + 1`, folding all the per-lane `+1`s into one popcount of the sign bits (a tree, computed in parallel with the shifter). 840,166.
+5. **Moved the sign-XOR from S3 into S2** so S3 became purely a reduction + final add: **797,404 — the best result.**
+6. **Narrow-lane restructure**: register only `ALIGN_WIDTH+1` bits per product lane (the top bits are structurally zero after the fixed left shift) and `MANT_WIDTH_O+3+1` for the accumulator lane, dropping a lot of flops. Also wrote a `csa_reduce` Wallace 3:2 tree. Regressed: 917,006 (with `add_tree`), 825,510 (with `csa_reduce`).
+
+### What mattered most
+- Straight behavioral arithmetic was a solid win over the hand-built Booth/CSA/barrel structures at this operand width (**4×4-bit multiplies** — a dedicated Booth multiplier is pure overhead).
+- The **popcount trick** for the negation was the single best delay lever: it eliminated a 19-bit carry ripple that was the top critical path.
+- **Moving cheap logic (XOR) across a register boundary in the cheap direction** — sign-XOR is 19 XORs and belongs wherever there's slack.
+
+### What didn't work / regressions
+- `csa_reduce` (Wallace) **never beat** the plain balanced `add_tree` here. Structurally different but not faster, and it costs more cells. Worth keeping in the toolbox but not a win for a 17-input, 19-bit sum.
+- The narrow-lane register narrowing **regressed** (917k/825k vs 797k). The flop savings were real but Yosys re-mapped the wider-fanout/shallower shifter network worse. Lesson: don't assume fewer flops = lower ADP.
+- I **lost verified state** by overwriting `design.sv` rather than writing variants to new files. My own instructions said to use different filenames; I didn't.
+- Fixed block on the **comparator tree**: the reference `comparator` is not associative for negative exponents (it keeps the larger magnitude), so tree shape is functionally significant. Any restructuring must reproduce `comp_tree(17)`'s exact node order. This is the one remaining untapped lever — the exp-compare tree was the critical path in eval 8's report.
+
+### If I had more steps
+1. Reconstruct the eval-8 variant (full-width `product_shifted`, sign-XOR in S2, `add_tree(N+2)`, popcount in S2) and bank it as `best.sv`.
+2. Split the **comparator tree exactly along `comp_tree(17)`'s 8/9 boundary** — the level-1 pairs are cheap and depend only on decoded inputs, so they can be pushed before pipe1 with the exact node order preserved. That removes the exp-compare tree from the S1→S2 critical path, which was the limiter in eval 8.
+3. Try moving the accumulator lane's first comparator level (lane15 vs acc) behind pipe1 since `acc` decode is on the input side anyway.
+4. Only then re-tune `target_delay` (2000 ps gave no benefit: 862k vs 840k).

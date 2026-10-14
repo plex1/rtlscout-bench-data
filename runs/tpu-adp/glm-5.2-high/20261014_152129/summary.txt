@@ -1,0 +1,30 @@
+## Summary
+
+### Best Design: `design_csa3.sv` — 2,844,919 area_delay_product (PASS)
+
+**Starting point cost: 4,624,409** → **Final cost: 2,844,919** (38% reduction)
+
+### What Worked Best (in order of impact)
+
+1. **Narrow internal accumulator (32→19 bits):** Reduced psum registers and adders from 32 to 19 bits. This alone dropped cost from 4.62M to 3.24M. The exact minimum is 19 bits (8 products of 8×8 signed max = ±131072 = 2^17, needs 18-bit signed + sign = 19 bits).
+
+2. **Carry-save accumulation:** Replaced the carry-propagate adder in each PE with a 3:2 compressor (XOR for sum, majority for carry). The final carry-propagate add only happens once at the bottom of each column. This eliminated the carry chain from the per-PE critical path, reducing delay from 820ps to 660ps. Cost: 3.24M → 2.84M.
+
+3. **Removing resets from data-path registers:** Since `rst` is only asserted before streaming begins and Verilator initializes registers to 0, removing async reset from psum/weight/skew/deskew registers (keeping it only on the 15-bit vpipe) saved area. Cost: 2.98M → 2.84M.
+
+### What Didn't Work / Caused Regressions
+
+- **18-bit and 17-bit CSA:** Overflowed on random soak tests — carry information was lost, causing incorrect results.
+- **CPA after deskew (design_csa2.sv):** Doubled deskew registers (sum + carry), increasing area.
+- **Split multiplier (4×8 partial products):** Added complexity, made delay worse (694ps vs 660ps).
+- **Always-registering a_east (no en gate):** Broke correctness — activations shifted during weight loading.
+- **Higher target_delay:** Consistently worse — the tool relaxes to slower cells.
+- **Lower target_delay (300ps):** No effect — already using fastest cells.
+- **Synchronous reset on vpipe:** Slightly worse than async.
+
+### Lessons Learned
+
+- Carry-save accumulation is the single biggest lever for systolic array PPA — it converts a per-PE carry chain into a single end-of-column CPA.
+- Narrowing internal datapath width to the exact mathematical minimum (with sign extension only at the output boundary) is highly effective.
+- Target_delay sweeping is largely ineffective when the synthesis tool is already at the fastest available cells — RTL structure matters far more.
+- CSA width must account for carry propagation: the sum and carry registers each need enough bits that the final CPA produces a correct result. Going below 19 bits for 8×8×8 loses carry information.

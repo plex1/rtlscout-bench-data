@@ -1,0 +1,26 @@
+## Summary
+
+**Final: PASS, area_delay_product = 120,911** (`design.sv`, area 86.14, delay 1403.7 ps) — vs. the provided starting point's 145,429 (108.69 / 1338 ps): **−16.9% product**, −20.8% area for +4.9% delay.
+
+### 1. Approaches tried
+- **Baseline**: `starting_point.v` copied to `design.sv` → 145,429.
+- **Unified-datapath line** (v2–v5, v7–v12, v16–v20, v23): one branch decision, one shifter/rounder, muxed selection. v2 exposed an msb-encoder bug (fixed), then v3 landed at 123,426.
+- **Parallel two-branch line** (v6): baseline-style independent normal/subnormal shift+round paths with all the v3-era cuts → fastest measured (1225 ps) but fat (103 area) → 126,275.
+- **v8** (v3 + early `(n0−35)/(n0−35)+1` exponent selection): 122,457. **v13** (v8 + cheap bit-test comparators for `sub`/overflow): **120,911 — the winner**.
+- ~20 variants total; best few: v13 (120,911) > v15 (121,264) > v8 (122,457) > v3 (123,426) > v6 (126,275).
+
+### 2. Optimizations with the most impact
+- **Carry-free branch decision**: `N0 = exp_sum + msb(prod) ≤ 35` selects the subnormal path without the rounding carry; I proved the single ambiguous case (N0=35 with carry) yields identical bits from the subnormal path (min-normal). This broke the circular dependency in the original.
+- **Balanced mux-tree msb encoder** (32-bit padded) replacing a 22-deep priority chain — the single biggest delay cut.
+- **Fast rounding carry-out** `carry = round_up & (window == all ones)` so the exponent path never waits for the sum adder.
+- **Cheap comparator forms**: `sub = ~n0[6]&(~n0[5]|~|n0[4:2])`, `gt65 = n0[6]&|n0[5:1]`, `eq65 = ...` — v13's decisive gain (area −2 at neutral delay).
+- **Kogge-Stone prefix-OR** for sticky; **dead left-shift path removed** (normal results always have msb ≥ 10; wrapped amounts produce carry=0 garbage that's provably discarded).
+
+### 3. What regressed (all measured worse despite being logically exact)
+Prefix-AND rounding (v9), carry-select sum (v17), shifter dropped-bit sticky taps (v5, +9 area from full-width stages), single pre-muxed shifter (v10, +94 ps), single sticky mux (v18), Sklansky prefix (v21, fanout → 1607 ps), frac-pack flattening (v12), `is_subf→sub` pack change (v23), OR-form exponent operands (v19), 5-bit `npre` (cost 8k on v13's base!), range-restricted shifters (v16). Effects **don't compose**: v15's combo ≈ v13 despite containing two regressing parts.
+
+### 4. Lessons
+- **The flow is deterministic per RTL content, and mapping is chaotic at ±3%**: logically-equivalent or strictly-simpler rewrites routinely moved cost by ±5–10%. Isolate **one change per evaluation**; combinatorial stacking is meaningless.
+- A key catch: I nearly shipped `design.sv` with a v15 leftover (5-bit `npre`) that silently cost 8k product — re-evaluating the final canonical file caught it. Always re-verify the exact shipped file.
+- `target_delay` had **zero effect** (identical netlists at 150/500/1200) — RTL structure is the only lever here.
+- Next time: establish the parallel-vs-serial tradeoff curve early (v6 vs v3: ~10.5 ps saved per area unit — anything cheaper than that on the critical path wins), then hill-climb one edit at a time and treat any unexplained metric jump as a red flag to bisect.

@@ -1,0 +1,36 @@
+## Summary
+
+### Best Design
+**`design_v3.v`** — cost 143,316 (area=107.6, delay=1332ps). This was the consistently best variant.
+
+### What Approaches Did I Try?
+
+1. **Baseline (`design.v`)**: Direct copy of `starting_point.v`. Cost: 145,429.
+
+2. **V3 (`design_v3.v`)**: Replaced `casez`-based LZ with if-else priority encoder, and replaced `casex` with explicit `if-else` to pass lint. **Best result: 143,316.**
+
+3. **V4 (`design_v4.v`)**: Binary-tree CLZ + Kogge-Stone parallel-prefix OR for `below`. Worse (156,883) — the parallel structures added area without reducing delay.
+
+4. **V7 (`design_v7.v`)**: Pure unsigned-shift guard/sticky (no `bit_at` function). Passed but worse (158,994) — large unsigned shifters for negative cases.
+
+5. **V11/V12 (`design_v11.v`)**: Padded-vector indexing for normal path guard/sticky, `bit_at` for subnormal. Passed but slightly worse (143,874).
+
+6. **V22 (`design_v22.v`)**: Padded-vector indexing for both paths. Still failing at session end due to padding offset bugs — hard to get exactly right without more debug cycles.
+
+### What Had the Most Impact?
+- **Replacing `casez` with if-else** for the LZ encoder: passed lint (required) and gave a small cost improvement.
+- Keeping the **`bit_at` function** for boundary-safe indexing proved reliable and area-efficient vs. padded vector approaches.
+
+### What Didn't Work / Caused Regressions?
+- **Parallel-prefix OR** for `below` (V4): increased area without delay benefit — Yosys already optimizes the linear chain well.
+- **Binary-tree CLZ** (V4, V18): muxing intermediate halves added delay and area.
+- **Narrower exponent arithmetic** (V5, V8): 6/7-bit paths were slightly worse than 8-bit.
+- **Single `always` block** (V20): the for-loop LZ was worse than if-else.
+- **Padded-vector indexing** (V11, V22): consistently worse or buggy — the `bit_at` function synthesizes to efficient muxes.
+
+### Lessons Learned
+1. **Yosys is good at restructuring linear chains** — don't manually unroll/pipeline what it can already optimize.
+2. **`bit_at` function is hard to beat** — it synthesizes to clean 22:1 muxes; padded vector approaches add width and complexity.
+3. **Padded vector indexing is error-prone** — off-by-one in padding direction is subtle and hard to debug in limited steps.
+4. **The critical path is fundamentally long** (multiply → LZ → shift → round → exponent → output mux ≈ 1332ps); reducing it would require architectural changes (e.g., pipelining, which isn't allowed in a combinational design).
+5. **Next time**: Focus on reducing the *number of distinct datapaths* (merge normal/subnormal into one shift path) and verify padded-vector approaches more carefully before evaluating.

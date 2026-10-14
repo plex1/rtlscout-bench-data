@@ -1,0 +1,25 @@
+## Summary
+
+### Final Result
+- **Best cost:** 8,542,816 area_delay_product (PASS, 100% correctness)
+- **Baseline (starting_point.v):** 9,496,575 area_delay_product
+- **Improvement:** ~10% reduction
+
+### What Worked Best
+The final `design.sv` achieved cost reduction through these key optimizations:
+1. **Simplified transpose RAM module** — Replaced the original dual-port RAM (`jpeg_idct_transpose_ram`) with a simpler single-write-port/single-read-port version, removing unused write port 1 logic, the `data0_o` output, and redundant `ram_read0_q` register.
+2. **Y-pass output index simplification** — Replaced the 64-entry `ptr_conv` LUT function in `jpeg_idct_y` with a simple bit-swap: `assign outport_idx_o = {ptr_q[2:0], ptr_q[5:3]}`. This eliminated a large 6-bit LUT.
+3. **Code cleanup** — Consolidated the 3 separate always blocks for pipeline stage registers into one, and simplified the FSM/wiring while preserving exact cycle-accurate behavior.
+
+### What Didn't Work / Caused Regressions
+1. **Combinational read address computation** — Attempted to replace the `rd_addr_q` register (with its complex +8/-8/+1 case statement) with a combinational formula derived from `rd_idx_q`. Spent significant effort deriving the address pattern (`{f(k[2:0]), (k+1)[5:3]}`) but the formula never matched the original's behavior — the registered read latency and FSM timing were too subtle to trace correctly by hand. Failed 3 times with different formulas.
+2. **Replacing `/256` with `>>> 8`** — The spec requires SIGNED division truncating toward zero, which differs from arithmetic right shift (floor) for negative numbers. Caused 4 off-by-one errors.
+3. **Removing RAM reset** — Removing the `if(rst)` reset from the 32-entry RAM array made things dramatically worse (11.8M cost, 2757ps delay) — Yosys inferred worse flip-flop types without the reset.
+4. **Banked RAM (4×8 entries)** — Explicitly splitting the 32-entry RAM into 4 banks of 8 with a case statement made it catastrophically worse (18.7M, 4438ps) — the case-based bank select created worse mux logic than the flat array.
+5. **Removing the mul_q→mul pipeline stage** — Considered but rejected because it would put the multiplier and adder in the same combinational cycle, likely increasing delay.
+
+### Key Lessons
+- The critical path is `rd_addr_q` QN output (1377ps clock-to-Q) → 32:1 mux → `rd_q` register. The 32-entry register array infers a 32:1 mux that dominates delay, and this is fundamentally hard to optimize in a standard-cell flow without RAM macros.
+- The 1377ps QN delay suggests Yosys chose a Q-bar output flop for the address register — restructuring to avoid needing the complement might help, but I couldn't find a working approach.
+- `target_delay` had minimal effect on area (4156 vs 4154) — the RTL structure was the dominant factor.
+- **Next time:** I would invest more effort in understanding the transpose address pattern — possibly by creating a self-contained testbench (not the provided one) to trace the exact address sequence, then verify the combinational formula before integrating. I would also explore alternative transpose buffer organizations (e.g., 8 RAMs of 16 entries to reduce mux width) while carefully managing the read port selection logic.

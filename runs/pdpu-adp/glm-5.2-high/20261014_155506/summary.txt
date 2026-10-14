@@ -1,0 +1,30 @@
+## Summary
+
+### 1. Approaches Tried
+- **Starting point**: `starting_point.v` — full Booth multiplier + CSA tree + barrel_shifter modules everywhere. Cost: 968K.
+- **Simple `*` multiplier** (`design.v`): Replaced radix-4 Booth multiplier with Verilog `*` for 4-bit×4-bit mantissa multiply. Cost: 872K. Biggest single win.
+- **Direct `>>` for alignment shift**: Replaced barrel_shifter module with `>>` operator in alignment stage. Minor improvement (~870K).
+- **Removed unused modules**: Deleted CSA tree, compressors, fulladders, counters after switching to adder tree. Cost: 846K.
+- **Conditional invert + sign-correction in adder tree** (`design.v` final): Replaced two's complement (`~x+1`) with just `~x`, pipelining the sign bits to stage 3 and adding popcount(signs) as a correction term to the adder tree. Cost: **780K** — the best result.
+- **Target delay sweep**: Tried 500 (default), 800, 1500 ps. Default 500 was best.
+- **Simplified comparator** (plain `>`): Passed but slightly worse cost than original sign-aware comparator.
+- **Pipeline rebalancing** (moving exp_diff computation to stage 1→2): Made things much worse (1045K) because comp_tree + exp_diff + shift_amount all landed in one stage.
+
+### 2. Most Impactful Optimizations
+1. **Booth → `*`** (~96K saved): 4-bit multiply is trivial; Booth encoding machinery was pure overhead.
+2. **Conditional invert + deferred correction** (~66K saved): Removing `+1` from the two's complement shortened the critical path through stage 2→3, and the popcount correction merged cheaply into the adder tree in stage 3→4.
+3. **Simple adder tree instead of CSA tree** (~12K saved): Yosys optimizes plain `+` trees better than the hand-structured CSA hierarchy.
+4. **Removing dead modules** (~12K saved): Eliminated synthesis overhead from unused compressor/CSA modules.
+
+### 3. What Didn't Work / Regressions
+- **Moving exp_diff to stage 1→2**: Created a longer combinational path (comp_tree + subtraction + saturation logic) — cost ballooned to 1045K.
+- **Replacing barrel_shifter with `>>` in posit_decoder/encoder/mantissa_norm**: Yosys's structural barrel shifter was better optimized than raw `>>` for those widths — cost increased to 911K.
+- **Simplified signed comparator** (`>` instead of sign-aware case): Correct but slightly slower, 784K vs 780K.
+- **Higher target_delay** (1500 ps): Area didn't shrink enough to compensate for increased delay.
+
+### 4. Lessons Learned
+- **Pipeline balancing is the primary lever** for area-delay product — moving logic between stages (e.g., deferring `+1` correction) can shift the critical path and unlock large gains.
+- **Let the synthesizer do arithmetic**: Simple `*` and `+` operators are better optimized by Yosys than hand-structured Booth/CSA hierarchies, especially for narrow operands.
+- **Dead module elimination matters**: Even if Yosys prunes unused logic, keeping the source clean avoids synthesis overhead.
+- **Conditional invert + deferred correction** is a classic CSA/operand-signedness trick worth remembering: separate the bitwise complement from the +1, defer the +1 as a scalar addition.
+- Next time, I would explore deeper pipeline rebalancing (e.g., splitting the comp_tree across a register) and try a wider range of target_delay values early to calibrate.

@@ -1,0 +1,27 @@
+## Summary
+
+### 1. Approaches Tried
+
+- **`starting_point.v`** (baseline): Loop-based LZ priority encoder, dual-path (normal + subnormal) with `bit_at` function and `below` OR-tree. Cost: **145,429**.
+- **`design_v4.v`** (best): Replaced loop-based LZ with tree-structured priority encoder — split 22-bit product into two 11-bit halves, each encoded by an `enc11` function (if-else chain). Cost: **144,463**.
+- **`design_v2.v`**: Attempted custom LZ with group-based encoding — had subtle off-by-one bugs in the lz computation that took multiple iterations to debug, never fully fixed.
+- **`design_v6.v`**: Tried extracting guard/sticky from barrel-shifted result — fundamentally wrong because guard/sticky bits are the bits *shifted out* (below mantissa), not extractable from the shifted result.
+- **`design_v10.v`**: Precomputed exponent for both carry=0 and carry=1 — increased area more than it reduced delay.
+- **`design_v14.v`**: Flat 4-way output mux instead of priority chain — worse delay and area.
+- **`design_v11.v`**: Simplified classification (`|f_a` instead of `f_a == 0`) — marginal regression.
+
+### 2. Most Impactful Optimization
+The **tree-structured LZ** (splitting 22-bit into two 11-bit halves with separate priority encoders) was the only change that improved cost (~0.7% reduction). It reduced delay from 1338ps to 1308ps while keeping area nearly the same.
+
+### 3. What Didn't Work
+- **Guard/sticky from barrel shift output**: The shifted result only contains kept bits; guard/sticky are the lost bits below the mantissa, requiring the `below` OR-tree.
+- **Precomputing both carry paths**: Extra area dominated any delay savings.
+- **Flat output mux**: Created longer paths through the select logic.
+- **Fixed-width `total_shift`**: Variable indexing with 6-bit unsigned created more complex logic than the integer-based approach.
+- **`casez`/`casex` for LZ**: Lint failure — X/Z literals not allowed.
+
+### 4. Lessons Learned
+- The design is dominated by the 11×11 multiplier and two barrel shifters — hard to optimize further without changing the algorithm fundamentally.
+- Unifying the normal/subnormal paths into a single shift+round path is the most promising unexplored direction but requires careful handling of the different shift directions and exponent calculations.
+- Small structural changes (LZ encoder) can help, but the synthesis tool is fairly insensitive to RTL micro-optimizations at this level.
+- `target_delay` had no effect — Yosys always produced the same netlist regardless of constraint.

@@ -1,0 +1,2487 @@
+================================================================================
+BENCHMARK : fpmul_f16_verilog
+MODEL     : z-ai/glm-5.3-flash
+METRIC    : area_delay_product
+RESULT    : PASS  |  best cost: 1.169e+05 area_delay_product  (eval 16)
+STEPS: 60  |  duration: 11979.18s
+================================================================================
+
+[SYSTEM]
+You are an RTL (Register Transfer Level) design agent. Your task is to create a Verilog/SystemVerilog design that satisfies the given specification, is functionally correct, and has minimal cost (area_delay_product).
+
+**Cost metric `area_delay_product`:** area × achieved critical-path delay — the classic area-delay product. Does NOT include simulation cycle count (contrast with the 'area_runtime_product' metric). Cost is measured on your design alone. The testbench and everything it owns (checking logic, the external memories, etc.) is not synthesized and contributes nothing to area, delay, power, or energy.
+
+## Specification
+Design a module named fp_mul_e5f10 that multiplies two floating-point numbers. Format: 16-bit (1 sign + 5 exponent + 10 fraction). Inputs: a and b (16-bit each). Output: y (16-bit). Subnormal numbers must be supported.
+
+Required behaviour, bit-exact: subnormal inputs are used at their true value; results are rounded to nearest, ties to even, including results in the subnormal range; a NaN input and inf x 0 give the canonical quiet NaN 16'h7E00; inf x finite gives inf with the product's sign; an overflowing product gives inf; a zero product gives a signed zero. The testbench enumerates about 18.9 million operand pairs against a reference implementation.
+
+A working starting point is provided: `starting_point.v` in your workspace, a plain readable implementation (unpack, significand multiply, normalise, round, pack) that is correct. Optimize from there.
+
+## Tools
+- create_file: Create a new file in your working directory
+- replace_file: Replace the entire contents of an existing file
+- apply_diff: Apply a unified diff to modify a file
+- edit_file: Edit a file by replacing an exact string match with new content. Provide old_string (must match exactly once) and new_string.
+- ls: List files in your working directory
+- read_file: Read the contents of a file
+- run_evaluation(filename[, target_delay]): Run evaluation on the given design file. Returns correctness (Verilator simulation) + cost (Yosys area_delay_product). The filename must be your main design file (e.g. 'design.sv'). Optionally pass target_delay (ps) to override the synthesis timing constraint.
+
+## Strategy
+1. Lay out an action plan. Try to cover a diverse set of approaches in your plan to increase the chances of finding a good solution within the step limit. Also once you find a new best solution, explore close solutions. Trade off exploration with exploitation.
+2. First, create a simple, straightforward design that is functionally correct. Focus on getting 100% correctness first.
+3. Run evaluation to confirm correctness and get the initial cost (area_delay_product).
+4. ONLY after achieving 100% correctness, try to optimize the design to reduce the area_delay_product.
+5. After each optimization, run evaluation to verify correctness is maintained and check the new cost.
+6. If an optimization breaks correctness, revert and try a different approach.
+7. Keep iterating until you run out of steps — use every step to try improvements. The run ends automatically at the step limit; your best passing design is kept.
+
+In general, be creative and take risk. At least after you have a correct design, try bold optimizations to reduce area_delay_product, even if they might break correctness. You can always revert if it doesn't work.
+The best results you obtain which is 100% correctness counts.
+Try to beat at least the straightforward implementation.
+
+Running evaluation is crucial after every change to ensure correctness and track cost. Do not skip evaluations.
+
+You may do some 'thinking' alongside with your tool calling responses to explain your reasoning, but always remember to call a tool in every response.
+
+## Important
+- Always call a tool in every response.
+- You have a maximum of **60 steps** (LLM turns). Budget them wisely: get a correct design first, then optimise. You may batch tool calls in one response --- at most 8, and only one `run_evaluation`.
+- The best result is the one with lowest cost among designs that pass 100% of testbench checks.
+- Use different filenames for different design variants so you can retrieve them later.
+- If context files (e.g. component source files) are in your workspace, you can modify them directly using edit_file or replace_file to optimize the design. Make targeted, incremental changes rather than rewriting files from scratch — small edits are less likely to introduce bugs.
+- Write clean, synthesizable RTL code.
+- You can pass `target_delay` (ps) to `run_evaluation` to try different synthesis timing constraints; experimenting with this may improve PPA results (lower target delay may reduce delay, higher target delay may reduce area/transistor count). target_delay must be > 0.
+- Do not spend too many steps sweeping `target_delay` — basically if you want to minimize delay choose a low value,if you want to minimize area/transistor count choose a high value. That's it.A few targeted experiments are more productive than an exhaustive sweep.
+
+## Delay Optimization Tips
+- `target_delay` trades area against delay (a lower value pressures toward faster logic, a higher value lets Yosys re-map to smaller cells). Do not overly iterate on different target delays; often the RTL structure is the real lever, target_delay is only a minor secondary knob.
+- After getting a correct design, try different accumulation orderings (sequential vs. tree) and compare results — Yosys synthesis can produce noticeably different delays (~10 ps) from structurally similar descriptions.
+- For designs dominated by a multiply-accumulate chain, the critical path is the multiplier followed by the adder tree. Reducing the adder depth or splitting into parallel partial sums can help.
+
+## Reference Implementations
+The following are reference implementations for inspiration. Study them for patterns and techniques, but do not copy them directly — adapt ideas to your specific design.
+
+### Parallel-prefix adder (ripple-carry / carry-lookahead) (Add.sv)
+```systemverilog
+// Copyright 2024 ETH Zurich and University of Bologna.
+// Solderpad Hardware License, Version 0.51, see LICENSE for details.
+// SPDX-License-Identifier: SHL-0.51
+//
+// Based on the work by Reto Zimmermann 1998 - ETH Zürich
+// Originally written in VHDL, available under: 
+// https://iis-people.ee.ethz.ch/~zimmi/arith_lib.html#library
+//
+// Authors:
+// - Thomas Benz <tbenz@iis.ee.ethz.ch>
+// - Philippe Sauter <phsauter@iis.ee.ethz.ch>
+// - Paul Scheffler <paulsc@iis.ee.ethz.ch>
+//
+// Description :
+// Binary adder using ripple-carry or parallel-prefix carry-lookahead logic.
+// S = A+B
+
+module Add #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] A,  // operands
+	input  logic [width-1:0] B,
+	output logic [width-1:0] S   // sum
+);
+
+	// Function: Binary adder using parallel-prefix carry-lookahead logic.
+
+	logic [width-1:0] GI, PI;  // prefix gen./prop. in
+	logic [width-1:0] GO, PO;  // prefix gen./prop. out
+	logic [width-1:0] PT;  // adder propagate temp
+
+	// Internal signals for unsigned operands
+	logic [width-1:0] Auns, Buns, Suns;
+
+	// default ripple-carry adder as slow implementation
+	if (speed == lau_pkg::SLOW) begin
+		// type conversion: std_logic_vector -> unsigned
+		assign Auns = A;
+		assign Buns = B;
+
+		// addition
+		assign Suns = Auns + Buns;
+
+		// type conversion: unsigned -> std_logic_vector
+		assign S = Suns;
+	end else begin
+		// parallel-prefix adders as medium and fast implementations
+
+		// calculate prefix input generate/propagate signals
+		assign GI = A & B;
+		assign PI = A | B;
+		// calculate adder propagate signals (PT = A xor B)
+		assign PT = ~GI & PI;
+
+		// calculate prefix output generate/propagate signals
+		PrefixAndOr #(
+			.width(width),
+			.speed(speed)
+		) prefix (
+			.GI(GI),
+			.PI(PI),
+			.GO(GO),
+			.PO(PO)
+		);
+
+		// calculate sum bits
+		assign S = PT ^ {GO[width-2:0], 1'b0};
+	end
+endmodule
+
+
+
+module behavioural_Add #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] A,  // operands
+	input  logic [width-1:0] B,
+	output logic [width-1:0] S   // sum
+);
+	assign S = A + B;
+endmodule
+```
+
+### Prefix AND-OR structures (Sklansky, Brent-Kung, serial) (PrefixAndOr.sv)
+```systemverilog
+// Copyright 2024 ETH Zurich and University of Bologna.
+// Solderpad Hardware License, Version 0.51, see LICENSE for details.
+// SPDX-License-Identifier: SHL-0.51
+//
+// Based on the work by Reto Zimmermann 1998 - ETH Zürich
+// Originally written in VHDL, available under: 
+// https://iis-people.ee.ethz.ch/~zimmi/arith_lib.html#library
+//
+// Authors:
+// - Thomas Benz <tbenz@iis.ee.ethz.ch>
+// - Philippe Sauter <phsauter@iis.ee.ethz.ch>
+// - Paul Scheffler <paulsc@iis.ee.ethz.ch>
+//
+// Description :
+// Prefix structures of different depth (i.e. speed) for carry calculation
+// in binary adders. Compute in m levels new generate/propagate signal pairs
+// for always larger groups of bits. Generate signals of the last level correspond
+// to carries in binary addition. Basic logic operations: AND-OR for generate
+// signals, AND for propagate signals.
+
+module PrefixAndOr #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] GI,  // gen./prop. in
+	input  logic [width-1:0] PI,  // gen./prop. in
+	output logic [width-1:0] GO,  // gen./prop. out
+	output logic [width-1:0] PO   // gen./prop. out
+);
+
+	// Constants
+	localparam int n = width;  // prefix structure width
+	localparam int m = $clog2(width);  // prefix structure depth
+
+	// Sklansky parallel-prefix carry-lookahead structure
+	if (speed == lau_pkg::FAST) begin : fastPrefix
+		logic [(m+1)*n-1:0] GT, PT;  // gen./prop. temp
+			assign GT[n-1:0] = GI;
+			assign PT[n-1:0] = PI;
+			for (genvar l = 1; l <= m; l++) begin : levels
+				for (genvar k = 0; k < 2 ** (m - l); k++) begin : groups
+					for (genvar i = 0; i < 2 ** (l - 1); i++) begin : bits
+						// pass prop and gen to following nodes
+						if ((k * 2 ** l + i) < n) begin : white
+							assign GT[l*n+k*2**l+i] = GT[(l-1)*n+k*2**l+i];
+							assign PT[l*n+k*2**l+i] = PT[(l-1)*n+k*2**l+i];
+						end
+						// calculate new propagate and generate
+						if ((k * 2 ** l + 2 ** (l - 1) + i) < n) begin : black
+							assign GT[l*n + k*2**l + 2**(l-1) + i] = 
+												GT[(l-1)*n + k*2**l + 2**(l-1) + i]
+											  | (  PT[(l-1)*n + k*2**l + 2**(l-1) + i]
+												 & GT[(l-1)*n + k*2**l + 2**(l-1) - 1] );
+							assign PT[l*n + k*2**l + 2**(l-1) + i] = 
+													PT[(l-1)*n + k*2**l + 2**(l-1) + i]
+												  & PT[(l-1)*n + k*2**l + 2**(l-1) - 1];
+						end
+					end
+				end
+			end
+			assign GO = GT[(m+1)*n-1 : m*n];
+			assign PO = PT[(m+1)*n-1 : m*n];
+	end
+
+	// Brent-Kung parallel-prefix carry-lookahead structure
+	if (speed == lau_pkg::MEDIUM) begin : mediumPrefix
+		logic [(2*m)*n -1:0] GT, PT;  // gen./prop. temp
+		assign GT[n-1:0] = GI;
+		assign PT[n-1:0] = PI;
+
+		for (genvar l = 1; l <= m; l++) begin : levels1
+			for (genvar k = 0; k < 2**(m-l); k++) begin : groups
+				for (genvar i = 0; i < 2**l -1; i++) begin : bits
+					if ((k* 2**l +i) < n) begin : white
+						assign GT[l*n + k* 2**l +i] = GT[(l-1)*n + k* 2**l +i];
+						assign PT[l*n + k* 2**l +i] = PT[(l-1)*n + k* 2**l +i];
+					end // white
+				end // bits
+				if ((k* 2**l + 2**l -1) < n) begin : black
+					assign GT[l*n + k* 2**l + 2**l -1] =
+								GT[(l-1)*n + k* 2**l + 2**l - 1] |
+							  | (  PT[(l-1)*n + k* 2**l + 2**l     -1] 
+							     & GT[(l-1)*n + k* 2**l + 2**(l-1) -1]);
+					assign PT[l*n + k* 2**l + 2**l -1] =
+								PT[(l-1)*n + k*2**l + 2**l     -1] 
+							  & PT[(l-1)*n + k*2**l + 2**(l-1) -1];
+				end // black
+			end
+		end // level1
+		for (genvar l = m +1; l < 2*m; l++) begin : levels2
+			for (genvar i = 0; i < 2**(2*m -l); i++) begin : bits
+				if (i < n) begin : white
+					assign GT[l*n +i] = GT[(l-1)*n +i];
+					assign PT[l*n +i] = PT[(l-1)*n +i];
+				end // white
+			end // bits
+			for (genvar k = 1; k < 2**(l-m); k++) begin : groups
+				if (l < 2*m -1) begin : empty
+					for (genvar i = 0; i < 2**(2*m -l -1) -1; i++) begin : bits
+						if ((k* 2**(2*m -l) +i) < n) begin : white
+							assign GT[l*n + k* 2**(2*m -l) +i] = GT[(l-1)*n + k* 2**(2*m -l) +i];
+							assign PT[l*n + k* 2**(2*m -l) +i] = PT[(l-1)*n + k* 2**(2*m -l) +i];
+						end // white
+					end
+				end // empty
+				if ((k* 2**(2*m -l) + 2**(2*m -l -1) -1) < n) begin : black
+					assign GT[l*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1] = 
+								GT[(l-1)*n + k* 2**(2*m-l) + 2**(2*m -l-1) -1]
+							  | (  PT[(l-1)*n + k* 2**(2*m-l) + 2**(2*m-l-1) -1] 
+								 & GT[(l-1)*n + k* 2**(2*m-l) -1] );
+					assign PT[l*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1] = 
+								PT[(l-1)*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1]
+							  & PT[(l-1)*n + k* 2**(2*m -l) -1];
+				end // black
+				for (genvar i = 2**(2*m -l-1); i < 2**(2*m -l); i++) begin : bits
+					if ((k* 2**(2*m -l) +i) < n) begin : white
+						assign GT[l*n + k* 2**(2*m -l) +i] = GT[(l-1)*n + k* 2**(2*m -l) +i];
+						assign PT[l*n + k* 2**(2*m -l) +i] = PT[(l-1)*n + k* 2**(2*m -l) +i];
+					end // white
+				end
+			end
+		end // level2
+		assign GO = GT[2*m*n -1 : (2*m -1) * n];
+		assign PO = PT[2*m*n -1 : (2*m -1) * n];
+	end  // Serial-prefix carry-lookahead structure
+	else if (speed == lau_pkg::SLOW) begin : slowPrefix
+		logic [n-1:0] GT, PT;  // gen./prop. temp
+		assign GT[0] = GI[0];
+		assign PT[0] = PI[0];
+		
+		for (genvar i = 1; i < n; i++) begin : bits
+			assign GT[i] = GI[i] | (PI[i] & GT[i-1]);
+			assign PT[i] = PI[i] & PT[i-1];
+		end
+		assign GO = GT;
+		assign PO = PT;
+	end
+
+endmodule
+
+```
+
+
+[USER]
+Please create the design according to the specification. Start with a simple correct implementation, evaluate it, then optimize.
+
+[ASSISTANT]
+  -> read_file(filename='starting_point.v')
+  -> ls()
+
+[TOOL RESULT]
+[Step 1/60]
+// fp_mul_e5f10 -- IEEE binary16 multiplier (1 sign, 5 exponent, 10 fraction bits) with subnormal support.
+
+module fp_mul_e5f10 (a, b, y);
+  input  [15:0] a;
+  input  [15:0] b;
+  output [15:0] y;
+
+  localparam BIAS         = 15;
+  localparam MAX_E        = 31;   // inf / NaN
+  localparam MAX_FINITE_E = 30;
+  localparam PROD_W       = 22;   // 11 x 11 bit significand product
+
+  // 1. unpack
+  wire       s_a = a[15];
+  wire       s_b = b[15];
+  wire [4:0] e_a = a[14:10];
+  wire [4:0] e_b = b[14:10];
+  wire [9:0] f_a = a[9:0];
+  wire [9:0] f_b = b[9:0];
+
+  // 2. classify
+  wire e_a_zero = (e_a == 5'd0);
+  wire e_b_zero = (e_b == 5'd0);
+  wire e_a_ones = (e_a == MAX_E);
+  wire e_b_ones = (e_b == MAX_E);
+  wire zero_a   = e_a_zero & (f_a == 10'd0);
+  wire zero_b   = e_b_zero & (f_b == 10'd0);
+  wire nan_a    = e_a_ones & (f_a != 10'd0);
+  wire nan_b    = e_b_ones & (f_b != 10'd0);
+  wire inf_a    = e_a_ones & (f_a == 10'd0);
+  wire inf_b    = e_b_ones & (f_b == 10'd0);
+
+  wire nan_in  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);
+  wire inf_in  = inf_a | inf_b;
+  wire zero_in = zero_a | zero_b;
+  wire s_y     = s_a ^ s_b;
+
+  // 3. effective significands and exponents (subnormal: no hidden one, exponent 1)
+  wire [10:0] m_a    = {~e_a_zero, f_a};
+  wire [10:0] m_b    = {~e_b_zero, f_b};
+  wire [4:0]  ea_eff = e_a_zero ? 5'd1 : e_a;
+  wire [4:0]  eb_eff = e_b_zero ? 5'd1 : e_b;
+
+  // 4. significand product, its leading-zero count (0 for a zero product), below[k] = |prod[k:0]
+  wire [PROD_W-1:0] prod = m_a * m_b;
+
+  reg [4:0] lz;
+  integer   i;
+  always @* begin
+    lz = 5'd0;
+    for (i = 0; i < PROD_W; i = i + 1)
+      if (prod[i]) lz = 5'd21 - i[4:0];
+  end
+
+  wire [PROD_W-1:0] below;
+  genvar k;
+  generate
+    for (k = 0; k < PROD_W; k = k + 1) begin : g_below
+      assign below[k] = |prod[k:0];
+    end
+  endgenerate
+
+  function bit_at;   // v[idx], 0 outside the vector
+    input [PROD_W-1:0] v;
+    input integer      idx;
+    begin
+      bit_at = (idx >= 0 && idx < PROD_W) ? v[idx] : 1'b0;
+    end
+  endfunction
+
+  // 5. normalise and round a normal result: leading one onto bit 10
+  wire              need_right = (lz <= 5'd11);
+  wire [4:0]        sr         = 5'd11 - lz;   // right shift (wide product)
+  wire [4:0]        sl         = lz - 5'd11;   // left shift (narrow product)
+  wire [PROD_W-1:0] shifted    = need_right ? (prod >> sr) : (prod << sl);
+  wire [10:0]       mant_pre   = shifted[10:0];
+
+  wire guard    = need_right ? bit_at(prod,  sr - 1) : 1'b0;   // first bit shifted out
+  wire sticky   = need_right ? bit_at(below, sr - 2) : 1'b0;   // any bit below the guard
+  wire round_up = guard & (sticky | mant_pre[0]);              // round to nearest, ties to even
+
+  wire [11:0] mant_round = {1'b0, mant_pre} + {11'd0, round_up};
+  wire        carry      = mant_round[11];   // rounded up to a new leading one
+  wire [10:0] mant_post  = carry ? mant_round[11:1] : mant_round[10:0];
+  wire [9:0]  frac_norm  = mant_post[9:0];
+
+  // 6. exponent of a normal result
+  wire [7:0] exp_sum     = {3'd0, ea_eff} + {3'd0, eb_eff};
+  wire [7:0] lhs         = exp_sum + 8'd1 + {7'd0, carry};
+  wire [7:0] limit_under = BIAS + {3'd0, lz};
+  wire [7:0] limit_over  = BIAS + MAX_FINITE_E + {3'd0, lz};
+  wire       underflow   = (lhs <= limit_under);   // subnormal (or zero) result
+  wire       overflow    = (lhs >  limit_over);    // past the largest finite number
+  wire [7:0] e_norm      = lhs - limit_under;
+  wire [4:0] exp_norm    = e_norm[4:0];
+
+  // 7. subnormal result: shift the raw product onto the subnormal grid, round once
+  integer           total_shift;
+  reg [PROD_W-1:0]  sub_shifted;
+  always @* begin
+    total_shift = (BIAS + 10 + 1) - $signed({1'b0, exp_sum});
+    sub_shifted = (total_shift >= 0 && total_shift < PROD_W) ? (prod >> total_shift) : {PROD_W{1'b0}};
+  end
+  wire [9:0]  frac_trunc = sub_shifted[9:0];
+  wire        guard_s    = bit_at(prod,  total_shift - 1);
+  wire        sticky_s   = bit_at(below, total_shift - 2);
+  wire        round_s    = guard_s & (sticky_s | frac_trunc[0]);
+  wire [10:0] frac_sum   = {1'b0, frac_trunc} + {10'd0, round_s};
+  wire        carry_s    = frac_sum[10];   // rounded up to the smallest normal
+  wire [9:0]  frac_sub   = frac_sum[9:0];
+  wire [4:0]  exp_sub    = {4'd0, carry_s};
+
+  // 8. pack
+  wire is_nan      = nan_in;
+  wire is_inf      = ~is_nan & (inf_in | (overflow & ~zero_in));
+  wire is_sub      = ~is_nan & ~is_inf & underflow;
+  wire sub_is_zero = is_sub & (exp_sub == 5'd0) & (frac_sub == 10'd0);
+  wire is_zero     = ~is_nan & ~is_inf & (zero_in | sub_is_zero);
+
+  wire [4:0] exp_y  = (is_nan | is_inf) ? 5'd31 : is_zero ? 5'd0 : is_sub ? exp_sub : exp_norm;
+  wire [9:0] frac_y = is_nan ? 10'h200 : (is_inf | is_zero) ? 10'd0 : is_sub ? frac_sub : frac_norm;
+  wire       sign_y = is_nan ? 1'b0 : s_y;
+
+  assign y = {sign_y, exp_y, frac_y};
+endmodule
+
+
+[TOOL RESULT]
+[Step 1/60]
+Files:
+starting_point.v
+tb.sv
+
+[ASSISTANT]
+  -> read_file(filename='tb.sv', limit=80)
+  -> run_evaluation(filename='starting_point.v')
+
+[TOOL RESULT]
+[Step 2/60]
+`timescale 1ns/10ps
+// exhaustive-directed tb (fpmul_run)
+// Golden-referenced directed testbench: compares the DUT against the embedded
+// golden reference (fp_mul_e5f10_ref, generated from context/starting_point.py)
+// over ~18.9M enumerated vectors — no stimuli file. Structure:
+//   1. the 3 known subnormal-boundary regression pairs (+ golden self-checks)
+//   2. every subnormal/zero a (2^11 sign+mantissa patterns) x 4096 structured b
+//   3. 4096 structured a x every subnormal/zero b
+//   4. 2^21 LFSR-driven broad pairs
+// Structured operands: both signs x all 32 exponents x 64 mantissas
+// (8 corners + 56 LFSR-derived). The retired file-driven testbench is kept at
+// tb_vectors.sv (+ vectors.dat) for cross-checking; it is not compiled.
+module tb;
+  logic [15:0] a, b, y, y_ref;
+  int errors;
+  longint total;
+
+  fp_mul_e5f10 dut (.a(a), .b(b), .y(y));
+  fp_mul_e5f10_ref refm (.a(a), .b(b), .y(y_ref));
+
+  function automatic [15:0] lfsr_next(input [15:0] s);
+    lfsr_next = (s >> 1) ^ (s[0] ? 16'hB400 : 16'h0000);
+  endfunction
+
+  logic [15:0] structured [0:4095];
+  localparam logic [9:0] MANT_CORNERS [0:7] =
+      '{10'h000, 10'h001, 10'h002, 10'h003, 10'h3FF, 10'h3FE, 10'h2AA, 10'h155};
+
+  task automatic check();
+    #1;
+    total = total + 1;
+    if (y !== y_ref) begin
+      if (errors < 10)
+        $display("TB_ERROR a=%0d b=%0d expected_y=%0d actual_y=%0d", a, b, y_ref, y);
+      errors = errors + 1;
+    end
+  endtask
+
+  logic [15:0] lfsr, ra, rb;
+  logic [9:0] mant;
+  int idx;
+
+  initial begin
+    errors = 0; total = 0;
+
+    lfsr = 16'hACE1;
+    idx = 0;
+    for (int s = 0; s < 2; s++)
+      for (int e = 0; e < 32; e++)
+        for (int m = 0; m < 64; m++) begin
+          if (m < 8) mant = MANT_CORNERS[m];
+          else begin lfsr = lfsr_next(lfsr); mant = lfsr[9:0]; end
+          structured[idx] = {s[0], e[4:0], mant};
+          idx = idx + 1;
+        end
+
+    a = 16'h0003; b = 16'h6801; check();
+    if (y_ref !== 16'h0E02) begin errors++; $display("TB_ERROR golden self-check 1"); end
+    a = 16'h8003; b = 16'h6479; check();
+    if (y_ref !== 16'h8AB6) begin errors++; $display("TB_ERROR golden self-check 2"); end
+    a = 16'h7521; b = 16'h0003; check();
+    if (y_ref !== 16'h1BB2) begin errors++; $display("TB_ERROR golden self-check 3"); end
+
+    for (int sa = 0; sa < 2048; sa++) begin
+      a = {sa[10], 5'b00000, sa[9:0]};
+      for (int i = 0; i < 4096; i++) begin b = structured[i]; check(); end
+    end
+    for (int i = 0; i < 4096; i++) begin
+      a = structured[i];
+      for (int sb = 0; sb < 2048; sb++) begin b = {sb[10], 5'b00000, sb[9:0]}; check(); end
+    end
+    ra = 16'h0001; rb = 16'hBEEF;
+    for (int k = 0; k < (1 << 21); k++) begin
+      ra = lfsr_next(ra); rb = lfsr_next(lfsr_next(rb));
+      a = ra; b = rb; check();
+    end
+
+    $display("TB_SUMMARY total=%0d errors=%0d", total, errors);
+    if (errors != 0) $fatal(1, "FAIL");
+    $display("PASS");
+
+... (showing lines 1-80 of 1276; use offset/limit for more)
+
+[TOOL RESULT]
+[Step 2/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/18874371
+Cost: OK
+  area_delay_product: 145429.23320427086
+  Metrics:
+    area_delay_product: 145429.23320427086
+    delay: 1337.9705
+    area: 108.69390110190835
+    power_probabilistic_fixed_clock: 0.00756
+    target_delay: 500.0
+    worst_slack: -837.97
+  Worst timing path:
+    Startpoint: a[10] (input port clocked by VCLK)
+    Endpoint: y[1] (output port clocked by VCLK)
+    Path Group: VCLK
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock VCLK (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 v input external delay
+       0.00    0.00 v a[10] (in)
+      59.76   59.76 v _2075_/Y (OR5x1_ASAP7_75t_R)
+      22.31   82.07 ^ _2076_/Y (NAND2xp5_ASAP7_75t_R)
+      24.06  106.13 v _2078_/Y (MAJIxp5_ASAP7_75t_R)
+      26.65  132.78 v _2082_/Y (XOR2xp5_ASAP7_75t_R)
+      36.62  169.40 v _2083_/Y (XNOR2xp5_ASAP7_75t_R)
+      35.39  204.79 v _2084_/Y (XOR2x1_ASAP7_75t_R)
+      26.58  231.36 v _2085_/Y (XNOR2x1_ASAP7_75t_R)
+      26.32  257.69 v _2198_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.33  289.01 v _2199_/Y (XNOR2xp5_ASAP7_75t_R)
+      32.01  321.02 v _2200_/Y (XOR2x1_ASAP7_75t_R)
+      28.84  349.86 v _2375_/Y (XNOR2xp5_ASAP7_75t_R)
+      39.98  389.85 ^ _2376_/Y (XOR2x2_ASAP7_75t_R)
+      30.74  420.59 v _2378_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.67  448.26 ^ _1290_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.22  482.48 v _1297_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      41.20  523.68 ^ _1300_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      40.16  563.84 v _1309_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      27.34  591.18 ^ _1311_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      30.44  621.63 ^ _1312_/Y (BUFx3_ASAP7_75t_R)
+      35.50  657.13 v _1380_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      32.56  689.69 ^ _1390_/Y (OAI211xp5_ASAP7_75t_R)
+      36.28  725.97 ^ _1391_/Y (BUFx2_ASAP7_75t_R)
+      29.57  755.54 v _1401_/Y (OAI211xp5_ASAP7_75t_R)
+      22.66  778.20 ^ _1402_/Y (NAND2xp5_ASAP7_75t_R)
+      46.40  824.60 ^ _1403_/Y (HB1xp67_ASAP7_75t_R)
+      23.53  848.13 v _1514_/Y (AOI31xp33_ASAP7_75t_R)
+      36.93  885.06 ^ _1515_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      50.77  935.83 ^ _1516_/Y (AND5x2_ASAP7_75t_R)
+      51.92  987.75 v _1569_/Y (NAND5xp2_ASAP7_75t_R)
+      47.74 1035.49 ^ _1603_/Y (NOR4xp75_ASAP7_75t_R)
+      46.41 1081.90 v _1617_/Y (OAI211xp5_ASAP7_75t_R)
+      42.55 1124.46 ^ _1639_/Y (XNOR2x2_ASAP7_75t_R)
+      31.62 1156.08 ^ _1656_/Y (XOR2xp5_ASAP7_75t_R)
+      27.55 1183.62 v _1657_/Y (NAND5xp2_ASAP7_75t_R)
+      36.93 1220.55 v _1658_/Y (OR3x1_ASAP7_75t_R)
+      27.28 1247.83 ^ _1910_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      54.58 1302.41 ^ _1929_/Y (AO211x2_ASAP7_75t_R)
+      15.63 1318.05 v _1953_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      19.92 1337.97 v _1954_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1337.97 v y[1] (out)
+            1337.97   data arrival time
+    
+     500.00  500.00   clock VCLK (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+       0.00  500.00   output external delay
+             500.00   data required time
+    ---------------------------------------------------------
+             500.00   data required time
+            -1337.97   data arrival time
+    ---------------------------------------------------------
+            -837.97   slack (VIOLATED)
+
+Best so far: 145429.23320427086 area_delay_product (eval 1)
+
+[ASSISTANT]
+The starting point passes with cost 145429 (area 108.7 × delay 1338). The critical path runs through the multiplier → 22-bit LZ priority encoder → 22-bit barrel shifters → rounding. My optimization plan:
+
+**Architecture change:** Pre-normalize subnormal fractions (shift the 10-bit fraction left so its leading one sits at bit 10, adjusting the exponent by `1-nlz`). Then *every* non-zero significand has its leading one at bit 10, so the product's leading one is always at bit 21 or 20 — no 22-bit LZ counter, and the normal path needs only a 2:1 shift. Subnormal results are produced by right-shifting the raw product by `t = 26 - (ea_adj+eb_adj)` (available early, parallel to the multiplier), rounded once (no double rounding).
+  -> create_file(content="// fp_mul_e5f10 -- IEEE binary16 (E5M10) multiplier with full subnormal support.\n//\n// Architecture:\n//   * Subnormal fractions are pre-normalised: the 10-bit fraction is shifted\n//     left so its leading one sits at bit 10, with the exponent adjusted by\n//     (1 - nlz).  Every non-zero significand therefore has its leading one in\n//     bit 10, so the 22-bit product always has its leading one in bit 21 or\n//     bit 20.  The normal path needs no leading-zero counter and only a 2:1\n//     shift, with guard/sticky taken from two fixed bit positions.\n//   * A subnormal result is produced by right-shifting the raw product by\n//     t = 26 - (ea_adj + eb_adj) and rounding once (round-to-nearest-even),\n//     so no double rounding occurs.  t >= 23 yields zero; the select value\n//     depends only on the exponents and is available early, so it merely\n//     muxes product slices at the end.\n//   value = (m_a * m_b) * 2^(ea_adj + eb_adj - 50)\n\nmodule fp_mul_e5f10 (a, b, y);\n  input  [15:0] a;\n  input  [15:0] b;\n  output [15:0] y;\n\n  // ------------------------------------------------------------- unpack\n  wire        s_a = a[15];\n  wire        s_b = b[15];\n  wire [4:0]  e_a = a[14:10];\n  wire [4:0]  e_b = b[14:10];\n  wire [9:0]  f_a = a[9:0];\n  wire [9:0]  f_b = b[9:0];\n\n  // ------------------------------------------------------------- classify\n  wire e_a_zero = ~|e_a;\n  wire e_b_zero = ~|e_b;\n  wire e_a_max  =  &e_a;\n  wire e_b_max  =  &e_b;\n  wire f_a_zero = ~|f_a;\n  wire f_b_zero = ~|f_b;\n\n  wire zero_a = e_a_zero &  f_a_zero;\n  wire zero_b = e_b_zero &  f_b_zero;\n  wire nan_a  = e_a_max  & ~f_a_zero;\n  wire nan_b  = e_b_max  & ~f_b_zero;\n  wire inf_a  = e_a_max  &  f_a_zero;\n  wire inf_b  = e_b_max  &  f_b_zero;\n\n  wire nan_in  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);\n  wire inf_in  = inf_a | inf_b;\n  wire zero_in = zero_a | zero_b;\n  wire s_y     = s_a ^ s_b;\n\n  // ------------------------------------- normalise subnormal fractions\n  // leading-zero count within the 10-bit fraction field\n  function [3:0] nlz10;\n    input [9:0] f;\n    begin\n      casez (f)\n        10'b1?????????: nlz10 = 4'd0;\n        10'b01????????: nlz10 = 4'd1;\n        10'b001???????: nlz10 = 4'd2;\n        10'b0001??????: nlz10 = 4'd3;\n        10'b00001?????: nlz10 = 4'd4;\n        10'b000001????: nlz10 = 4'd5;\n        10'b0000001???: nlz10 = 4'd6;\n        10'b00000001??: nlz10 = 4'd7;\n        10'b000000001?: nlz10 = 4'd8;\n        10'b0000000001: nlz10 = 4'd9;\n        default:        nlz10 = 4'd10;\n      endcase\n    end\n  endfunction\n\n  wire [3:0] nlz_a = e_a_zero ? nlz10(f_a) : 4'd0;\n  wire [3:0] nlz_b = e_b_zero ? nlz10(f_b) : 4'd0;\n\n  // 11-bit significands, leading one in bit 10; value = m * 2^(e_adj - 25)\n  wire [10:0] m_a = e_a_zero ? ({1'b0, f_a} << nlz_a) : {1'b1, f_a};\n  wire [10:0] m_b = e_b_zero ? ({1'b0, f_b} << nlz_b) : {1'b1, f_b};\n\n  wire [5:0] ea_adj = e_a_zero ? (6'd1 - {2'b0, nlz_a}) : {1'b0, e_a};\n  wire [5:0] eb_adj = e_b_zero ? (6'd1 - {2'b0, nlz_b}) : {1'b0, e_b};\n\n  wire signed [7:0] s_adj = $signed({{2{ea_adj[5]}}, ea_adj})\n                          + $signed({{2{eb_adj[5]}}, eb_adj});\n\n  // ------------------------------------------------- significand product\n  wire [21:0] prod = m_a * m_b;\n  wire        p21  = prod[21];\n\n  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)\n  wire [21:0] or1 = prod | {prod[20:0], 1'b0};\n  wire [21:0] or2 = or1  | {or1[21:2],  2'b0};\n  wire [21:0] or4 = or2  | {or2[21:4],  4'b0};\n  wire [21:0] or8 = or4  | {or4[21:8],  8'b0};\n  wire [21:0] below = or8 | {or8[21:16], 16'b0};\n\n  // ---------------------------------------------- early shift machinery\n  // subnormal result iff e_pre = s_adj - 15 + p21 <= 0\n  wire        sub_res = p21 ? ($signed(s_adj) <= 8'sd14)\n                            : ($signed(s_adj) <= 8'sd15);\n  wire signed [7:0] t_full = 8'sd26 - $signed(s_adj);   // >= 11 if sub_res\n  wire [5:0]  t_sel = (t_full > 8'sd22) ? 6'd23 : t_full[5:0];\n\n  // ------------------------- normal path (result >= 2^-14), 2:1 shift\n  wire [10:0] mant_pre = p21 ? prod[21:11] : prod[20:10];\n  wire        guard_n  = p21 ? prod[10]    : prod[9];\n  wire        sticky_n = p21 ? below[10]   : below[9];\n  wire        round_n  = guard_n & (sticky_n | mant_pre[0]);\n  wire [11:0] mant_rnd = {1'b0, mant_pre} + {11'd0, round_n};\n  wire        carry_n  = mant_rnd[11];\n  wire [9:0]  frac_nrm = carry_n ? mant_rnd[10:1] : mant_rnd[9:0];\n\n  wire signed [7:0] e_pre = $signed(s_adj) - 8'sd15 + $signed({7'b0, p21});\n  wire signed [7:0] e_nrm = e_pre + $signed({7'b0, carry_n});\n  wire        overflow = e_nrm > 8'sd30;\n\n  // -------------------- subnormal path: fraction = RNE(prod * 2^(s_adj-26))\n  wire [31:0] prodz = {10'b0, prod};\n  reg  [9:0]  frac_pre;\n  reg         guard_s, sticky_s;\n  integer     ti;\n  always @* begin\n    frac_pre = 10'd0;\n    guard_s  = 1'b0;\n    sticky_s = 1'b0;\n    for (ti = 11; ti <= 22; ti = ti + 1) begin\n      if (t_sel == ti) begin\n        frac_pre = prodz[ti +: 10];\n        guard_s  = prodz[ti-1];\n        sticky_s = below[ti-2];\n      end\n    end\n  end\n\n  wire        round_s  = guard_s & (sticky_s | frac_pre[0]);\n  wire [10:0] frac_sum = {1'b0, frac_pre} + {10'd0, round_s};\n  wire        carry_s  = frac_sum[10];\n  wire [9:0]  frac_sub = carry_s ? 10'd0 : frac_sum[9:0];\n  wire [4:0]  exp_sub  = {4'd0, carry_s};\n\n  // ------------------------------------------------------------- pack\n  wire sub_zero = sub_res & (frac_sum[9:0] == 10'd0);  // incl. t >= 23\n  wire is_nan   = nan_in;\n  wire is_inf   = inf_in | (overflow & ~zero_in);\n  wire is_zero  = zero_in | sub_zero;\n\n  wire [4:0] exp_y = is_nan  ? 5'd31 :\n                     is_inf  ? 5'd31 :\n                     is_zero ? 5'd0  :\n                     sub_res ? exp_sub :\n                               e_nrm[4:0];\n  wire [9:0] frac_y = is_nan ? 10'h200 :\n                      (is_inf | is_zero) ? 10'd0 :\n                      sub_res ? frac_sub :\n                                frac_nrm;\n\n  assign y = {(is_nan ? 1'b0 : s_y), exp_y, frac_y};\nendmodule\n", filename='design.v')
+
+[TOOL RESULT]
+[Step 3/60]
+Created file: design.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.v')
+
+[TOOL RESULT]
+[Step 4/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: FAIL
+  Sim:  FAIL
+  Checks (fails/tot): 3817376/18874371
+  Lint errors: X/Z don't-care lint failed: designs must not use X/Z literals or casex/casez. 2-state simulation folds X to a constant (so vectors can still pass) while synthesis treats X as a don't-care and may im ..  60: 10'b00001?????: nlz10 = 4'd4;
+  line 61: 10'b000001????: nlz10 = 4'd5;
+  line 62: 10'b0000001???: nlz10 = 4'd6;
+  line 63: 10'b00000001??: nlz10 = 4'd7;
+  line 64: 10'b000000001?: nlz10 = 4'd8;
+  Sim output: TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4865
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36699
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=8153
+TB_ERROR a=1 b=14337 expected_y=1 actua .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4865
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36699
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=8153
+TB_ERROR a=1 b=14337 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14338 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14339 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14504 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14514 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14425 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14475 expected_y=1 actual_y=0
+TB_SUMMARY total=18874371 errors=3817376
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_qab1lpyr/verilator_netlist_out.log
+
+Best so far: 145429.23320427086 area_delay_product (eval 1)
+
+[ASSISTANT]
+Found the bugs: the subnormal pre-normalization shift must be `nlz+1` (leading one at bit 10, exponent adjusted by `-nlz`), and `casez` is banned by lint. Fixing both:
+  -> edit_file(filename='design.v', new_string="  function [3:0] nlz10;\n    input [9:0] f;\n    integer i;\n    reg [3:0] c;\n    begin\n      c = 4'd10;\n      for (i = 9; i >= 0; i = i - 1)\n        if (f[i]) c = 4'd9 - i[3:0];\n      nlz10 = c;\n    end\n  endfunction\n\n  wire [3:0] nlz_a = e_a_zero ? nlz10(f_a) : 4'd0;\n  wire [3:0] nlz_b = e_b_zero ? nlz10(f_b) : 4'd0;\n\n  // 11-bit significands, leading one in bit 10; value = m * 2^(e_adj - 25)\n  wire [10:0] m_a = e_a_zero ? ({1'b0, f_a} << (nlz_a + 4'd1)) : {1'b1, f_a};\n  wire [10:0] m_b = e_b_zero ? ({1'b0, f_b} << (nlz_b + 4'd1)) : {1'b1, f_b};\n\n  wire [5:0] ea_adj = e_a_zero ? (6'd0 - {2'b0, nlz_a}) : {1'b0, e_a};\n  wire [5:0] eb_adj = e_b_zero ? (6'd0 - {2'b0, nlz_b}) : {1'b0, e_b};", old_string="  function [3:0] nlz10;\n    input [9:0] f;\n    begin\n      casez (f)\n        10'b1?????????: nlz10 = 4'd0;\n        10'b01????????: nlz10 = 4'd1;\n        10'b001???????: nlz10 = 4'd2;\n        10'b0001??????: nlz10 = 4'd3;\n        10'b00001?????: nlz10 = 4'd4;\n        10'b000001????: nlz10 = 4'd5;\n        10'b0000001???: nlz10 = 4'd6;\n        10'b00000001??: nlz10 = 4'd7;\n        10'b000000001?: nlz10 = 4'd8;\n        10'b0000000001: nlz10 = 4'd9;\n        default:        nlz10 = 4'd10;\n      endcase\n    end\n  endfunction\n\n  wire [3:0] nlz_a = e_a_zero ? nlz10(f_a) : 4'd0;\n  wire [3:0] nlz_b = e_b_zero ? nlz10(f_b) : 4'd0;\n\n  // 11-bit significands, leading one in bit 10; value = m * 2^(e_adj - 25)\n  wire [10:0] m_a = e_a_zero ? ({1'b0, f_a} << nlz_a) : {1'b1, f_a};\n  wire [10:0] m_b = e_b_zero ? ({1'b0, f_b} << nlz_b) : {1'b1, f_b};\n\n  wire [5:0] ea_adj = e_a_zero ? (6'd1 - {2'b0, nlz_a}) : {1'b0, e_a};\n  wire [5:0] eb_adj = e_b_zero ? (6'd1 - {2'b0, nlz_b}) : {1'b0, e_b};")
+
+[TOOL RESULT]
+[Step 5/60]
+Edited file: design.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.v')
+
+[TOOL RESULT]
+[Step 6/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 13431274/18874371
+  Sim output: TB_ERROR a=3 b=26625 expected_y=3586 actual_y=2049
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=33913
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=5409
+TB_ERROR a=1 b=14337 expected_y=1 actua .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=3 b=26625 expected_y=3586 actual_y=2049
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=33913
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=5409
+TB_ERROR a=1 b=14337 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14338 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14339 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14504 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14514 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14425 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14475 expected_y=1 actual_y=0
+TB_SUMMARY total=18874371 errors=13431274
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_lcanslt0/verilator_netlist_out.log
+
+Best so far: 145429.23320427086 area_delay_product (eval 1)
+
+[ASSISTANT]
+The nlz function finds the *lowest* set bit (last assignment wins) — the loop must run low→high so the highest set bit wins:
+  -> edit_file(filename='design.v', new_string="      c = 4'd10;\n      for (i = 0; i <= 9; i = i + 1)\n        if (f[i]) c = 4'd9 - i[3:0];", old_string="      c = 4'd10;\n      for (i = 9; i >= 0; i = i - 1)\n        if (f[i]) c = 4'd9 - i[3:0];")
+
+[TOOL RESULT]
+[Step 7/60]
+Edited file: design.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.v')
+
+[TOOL RESULT]
+[Step 8/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 529808/18874371
+  Sim output: TB_ERROR a=1 b=14337 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14338 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14339 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14504 expected_y=1 actual_y=0
+TB_ERROR a=1 b=145 .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=1 b=14337 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14338 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14339 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14504 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14514 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14425 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14475 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14556 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14518 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14546 expected_y=1 actual_y=0
+TB_SUMMARY total=18874371 errors=529808
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_owq01wxm/verilator_netlist_out.log
+
+Best so far: 145429.23320427086 area_delay_product (eval 1)
+
+[ASSISTANT]
+The subnormal-path slice was off: it needs `prod[t+9:t]` (I indexed the zero-padded vector wrong). Rewriting that block with a correct wide shifted view:
+  -> edit_file(filename='design.v', new_string="  // -------------------- subnormal path: fraction = RNE(prod * 2^(s_adj-26))\n  // (prod >> t)[9:0] via wide = {22'b0, prod, 10'b0}: wide[j] = prod[j-10]\n  wire [43:0] wide = {22'b0, prod, 10'b0};\n  reg  [9:0]  frac_pre;\n  reg         guard_s, sticky_s;\n  integer     ti;\n  always @* begin\n    frac_pre = 10'd0;\n    guard_s  = 1'b0;\n    sticky_s = 1'b0;\n    for (ti = 11; ti <= 23; ti = ti + 1) begin\n      if (t_sel == ti) begin\n        frac_pre = wide[ti + 19 -: 10];   // = prod[ti+9 : ti]\n        guard_s  = wide[ti + 9];          // = prod[ti-1]\n        sticky_s = below[ti - 2];\n      end\n    end\n  end", old_string="  // -------------------- subnormal path: fraction = RNE(prod * 2^(s_adj-26))\n  wire [31:0] prodz = {10'b0, prod};\n  reg  [9:0]  frac_pre;\n  reg         guard_s, sticky_s;\n  integer     ti;\n  always @* begin\n    frac_pre = 10'd0;\n    guard_s  = 1'b0;\n    sticky_s = 1'b0;\n    for (ti = 11; ti <= 22; ti = ti + 1) begin\n      if (t_sel == ti) begin\n        frac_pre = prodz[ti +: 10];\n        guard_s  = prodz[ti-1];\n        sticky_s = below[ti-2];\n      end\n    end\n  end")
+
+[TOOL RESULT]
+[Step 9/60]
+Edited file: design.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.v')
+
+[TOOL RESULT]
+[Step 10/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 529808/18874371
+  Sim output: TB_ERROR a=1 b=14337 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14338 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14339 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14504 expected_y=1 actual_y=0
+TB_ERROR a=1 b=145 .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=1 b=14337 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14338 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14339 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14504 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14514 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14425 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14475 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14556 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14518 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14546 expected_y=1 actual_y=0
+TB_SUMMARY total=18874371 errors=529808
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_h07xhsne/verilator_netlist_out.log
+
+Best so far: 145429.23320427086 area_delay_product (eval 1)
+
+[ASSISTANT]
+The remaining failures are all subnormal-result cases. Let me re-read the current file to find the bug:
+  -> read_file(filename='design.v')
+
+[TOOL RESULT]
+[Step 11/60]
+// fp_mul_e5f10 -- IEEE binary16 (E5M10) multiplier with full subnormal support.
+//
+// Architecture:
+//   * Subnormal fractions are pre-normalised: the 10-bit fraction is shifted
+//     left so its leading one sits at bit 10, with the exponent adjusted by
+//     (1 - nlz).  Every non-zero significand therefore has its leading one in
+//     bit 10, so the 22-bit product always has its leading one in bit 21 or
+//     bit 20.  The normal path needs no leading-zero counter and only a 2:1
+//     shift, with guard/sticky taken from two fixed bit positions.
+//   * A subnormal result is produced by right-shifting the raw product by
+//     t = 26 - (ea_adj + eb_adj) and rounding once (round-to-nearest-even),
+//     so no double rounding occurs.  t >= 23 yields zero; the select value
+//     depends only on the exponents and is available early, so it merely
+//     muxes product slices at the end.
+//   value = (m_a * m_b) * 2^(ea_adj + eb_adj - 50)
+
+module fp_mul_e5f10 (a, b, y);
+  input  [15:0] a;
+  input  [15:0] b;
+  output [15:0] y;
+
+  // ------------------------------------------------------------- unpack
+  wire        s_a = a[15];
+  wire        s_b = b[15];
+  wire [4:0]  e_a = a[14:10];
+  wire [4:0]  e_b = b[14:10];
+  wire [9:0]  f_a = a[9:0];
+  wire [9:0]  f_b = b[9:0];
+
+  // ------------------------------------------------------------- classify
+  wire e_a_zero = ~|e_a;
+  wire e_b_zero = ~|e_b;
+  wire e_a_max  =  &e_a;
+  wire e_b_max  =  &e_b;
+  wire f_a_zero = ~|f_a;
+  wire f_b_zero = ~|f_b;
+
+  wire zero_a = e_a_zero &  f_a_zero;
+  wire zero_b = e_b_zero &  f_b_zero;
+  wire nan_a  = e_a_max  & ~f_a_zero;
+  wire nan_b  = e_b_max  & ~f_b_zero;
+  wire inf_a  = e_a_max  &  f_a_zero;
+  wire inf_b  = e_b_max  &  f_b_zero;
+
+  wire nan_in  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);
+  wire inf_in  = inf_a | inf_b;
+  wire zero_in = zero_a | zero_b;
+  wire s_y     = s_a ^ s_b;
+
+  // ------------------------------------- normalise subnormal fractions
+  // leading-zero count within the 10-bit fraction field
+  function [3:0] nlz10;
+    input [9:0] f;
+    integer i;
+    reg [3:0] c;
+    begin
+      c = 4'd10;
+      for (i = 0; i <= 9; i = i + 1)
+        if (f[i]) c = 4'd9 - i[3:0];
+      nlz10 = c;
+    end
+  endfunction
+
+  wire [3:0] nlz_a = e_a_zero ? nlz10(f_a) : 4'd0;
+  wire [3:0] nlz_b = e_b_zero ? nlz10(f_b) : 4'd0;
+
+  // 11-bit significands, leading one in bit 10; value = m * 2^(e_adj - 25)
+  wire [10:0] m_a = e_a_zero ? ({1'b0, f_a} << (nlz_a + 4'd1)) : {1'b1, f_a};
+  wire [10:0] m_b = e_b_zero ? ({1'b0, f_b} << (nlz_b + 4'd1)) : {1'b1, f_b};
+
+  wire [5:0] ea_adj = e_a_zero ? (6'd0 - {2'b0, nlz_a}) : {1'b0, e_a};
+  wire [5:0] eb_adj = e_b_zero ? (6'd0 - {2'b0, nlz_b}) : {1'b0, e_b};
+
+  wire signed [7:0] s_adj = $signed({{2{ea_adj[5]}}, ea_adj})
+                          + $signed({{2{eb_adj[5]}}, eb_adj});
+
+  // ------------------------------------------------- significand product
+  wire [21:0] prod = m_a * m_b;
+  wire        p21  = prod[21];
+
+  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)
+  wire [21:0] or1 = prod | {prod[20:0], 1'b0};
+  wire [21:0] or2 = or1  | {or1[21:2],  2'b0};
+  wire [21:0] or4 = or2  | {or2[21:4],  4'b0};
+  wire [21:0] or8 = or4  | {or4[21:8],  8'b0};
+  wire [21:0] below = or8 | {or8[21:16], 16'b0};
+
+  // ---------------------------------------------- early shift machinery
+  // subnormal result iff e_pre = s_adj - 15 + p21 <= 0
+  wire        sub_res = p21 ? ($signed(s_adj) <= 8'sd14)
+                            : ($signed(s_adj) <= 8'sd15);
+  wire signed [7:0] t_full = 8'sd26 - $signed(s_adj);   // >= 11 if sub_res
+  wire [5:0]  t_sel = (t_full > 8'sd22) ? 6'd23 : t_full[5:0];
+
+  // ------------------------- normal path (result >= 2^-14), 2:1 shift
+  wire [10:0] mant_pre = p21 ? prod[21:11] : prod[20:10];
+  wire        guard_n  = p21 ? prod[10]    : prod[9];
+  wire        sticky_n = p21 ? below[10]   : below[9];
+  wire        round_n  = guard_n & (sticky_n | mant_pre[0]);
+  wire [11:0] mant_rnd = {1'b0, mant_pre} + {11'd0, round_n};
+  wire        carry_n  = mant_rnd[11];
+  wire [9:0]  frac_nrm = carry_n ? mant_rnd[10:1] : mant_rnd[9:0];
+
+  wire signed [7:0] e_pre = $signed(s_adj) - 8'sd15 + $signed({7'b0, p21});
+  wire signed [7:0] e_nrm = e_pre + $signed({7'b0, carry_n});
+  wire        overflow = e_nrm > 8'sd30;
+
+  // -------------------- subnormal path: fraction = RNE(prod * 2^(s_adj-26))
+  // (prod >> t)[9:0] via wide = {22'b0, prod, 10'b0}: wide[j] = prod[j-10]
+  wire [43:0] wide = {22'b0, prod, 10'b0};
+  reg  [9:0]  frac_pre;
+  reg         guard_s, sticky_s;
+  integer     ti;
+  always @* begin
+    frac_pre = 10'd0;
+    guard_s  = 1'b0;
+    sticky_s = 1'b0;
+    for (ti = 11; ti <= 23; ti = ti + 1) begin
+      if (t_sel == ti) begin
+        frac_pre = wide[ti + 19 -: 10];   // = prod[ti+9 : ti]
+        guard_s  = wide[ti + 9];          // = prod[ti-1]
+        sticky_s = below[ti - 2];
+      end
+    end
+  end
+
+  wire        round_s  = guard_s & (sticky_s | frac_pre[0]);
+
+... (showing lines 1-127 of 150; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='design.v', offset=127)
+
+[TOOL RESULT]
+[Step 12/60]
+  wire        round_s  = guard_s & (sticky_s | frac_pre[0]);
+  wire [10:0] frac_sum = {1'b0, frac_pre} + {10'd0, round_s};
+  wire        carry_s  = frac_sum[10];
+  wire [9:0]  frac_sub = carry_s ? 10'd0 : frac_sum[9:0];
+  wire [4:0]  exp_sub  = {4'd0, carry_s};
+
+  // ------------------------------------------------------------- pack
+  wire sub_zero = sub_res & (frac_sum[9:0] == 10'd0);  // incl. t >= 23
+  wire is_nan   = nan_in;
+  wire is_inf   = inf_in | (overflow & ~zero_in);
+  wire is_zero  = zero_in | sub_zero;
+
+  wire [4:0] exp_y = is_nan  ? 5'd31 :
+                     is_inf  ? 5'd31 :
+                     is_zero ? 5'd0  :
+                     sub_res ? exp_sub :
+                               e_nrm[4:0];
+  wire [9:0] frac_y = is_nan ? 10'h200 :
+                      (is_inf | is_zero) ? 10'd0 :
+                      sub_res ? frac_sub :
+                                frac_nrm;
+
+  assign y = {(is_nan ? 1'b0 : s_y), exp_y, frac_y};
+endmodule
+
+... (showing lines 127-150 of 150; use offset/limit for more)
+
+[ASSISTANT]
+The failing vectors contradict my hand-analysis, so let me carefully re-read the exact current file contents to spot a discrepancy:
+  -> read_file(filename='design.v', offset=40, limit=75)
+
+[TOOL RESULT]
+[Step 13/60]
+  wire nan_a  = e_a_max  & ~f_a_zero;
+  wire nan_b  = e_b_max  & ~f_b_zero;
+  wire inf_a  = e_a_max  &  f_a_zero;
+  wire inf_b  = e_b_max  &  f_b_zero;
+
+  wire nan_in  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);
+  wire inf_in  = inf_a | inf_b;
+  wire zero_in = zero_a | zero_b;
+  wire s_y     = s_a ^ s_b;
+
+  // ------------------------------------- normalise subnormal fractions
+  // leading-zero count within the 10-bit fraction field
+  function [3:0] nlz10;
+    input [9:0] f;
+    integer i;
+    reg [3:0] c;
+    begin
+      c = 4'd10;
+      for (i = 0; i <= 9; i = i + 1)
+        if (f[i]) c = 4'd9 - i[3:0];
+      nlz10 = c;
+    end
+  endfunction
+
+  wire [3:0] nlz_a = e_a_zero ? nlz10(f_a) : 4'd0;
+  wire [3:0] nlz_b = e_b_zero ? nlz10(f_b) : 4'd0;
+
+  // 11-bit significands, leading one in bit 10; value = m * 2^(e_adj - 25)
+  wire [10:0] m_a = e_a_zero ? ({1'b0, f_a} << (nlz_a + 4'd1)) : {1'b1, f_a};
+  wire [10:0] m_b = e_b_zero ? ({1'b0, f_b} << (nlz_b + 4'd1)) : {1'b1, f_b};
+
+  wire [5:0] ea_adj = e_a_zero ? (6'd0 - {2'b0, nlz_a}) : {1'b0, e_a};
+  wire [5:0] eb_adj = e_b_zero ? (6'd0 - {2'b0, nlz_b}) : {1'b0, e_b};
+
+  wire signed [7:0] s_adj = $signed({{2{ea_adj[5]}}, ea_adj})
+                          + $signed({{2{eb_adj[5]}}, eb_adj});
+
+  // ------------------------------------------------- significand product
+  wire [21:0] prod = m_a * m_b;
+  wire        p21  = prod[21];
+
+  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)
+  wire [21:0] or1 = prod | {prod[20:0], 1'b0};
+  wire [21:0] or2 = or1  | {or1[21:2],  2'b0};
+  wire [21:0] or4 = or2  | {or2[21:4],  4'b0};
+  wire [21:0] or8 = or4  | {or4[21:8],  8'b0};
+  wire [21:0] below = or8 | {or8[21:16], 16'b0};
+
+  // ---------------------------------------------- early shift machinery
+  // subnormal result iff e_pre = s_adj - 15 + p21 <= 0
+  wire        sub_res = p21 ? ($signed(s_adj) <= 8'sd14)
+                            : ($signed(s_adj) <= 8'sd15);
+  wire signed [7:0] t_full = 8'sd26 - $signed(s_adj);   // >= 11 if sub_res
+  wire [5:0]  t_sel = (t_full > 8'sd22) ? 6'd23 : t_full[5:0];
+
+  // ------------------------- normal path (result >= 2^-14), 2:1 shift
+  wire [10:0] mant_pre = p21 ? prod[21:11] : prod[20:10];
+  wire        guard_n  = p21 ? prod[10]    : prod[9];
+  wire        sticky_n = p21 ? below[10]   : below[9];
+  wire        round_n  = guard_n & (sticky_n | mant_pre[0]);
+  wire [11:0] mant_rnd = {1'b0, mant_pre} + {11'd0, round_n};
+  wire        carry_n  = mant_rnd[11];
+  wire [9:0]  frac_nrm = carry_n ? mant_rnd[10:1] : mant_rnd[9:0];
+
+  wire signed [7:0] e_pre = $signed(s_adj) - 8'sd15 + $signed({7'b0, p21});
+  wire signed [7:0] e_nrm = e_pre + $signed({7'b0, carry_n});
+  wire        overflow = e_nrm > 8'sd30;
+
+  // -------------------- subnormal path: fraction = RNE(prod * 2^(s_adj-26))
+  // (prod >> t)[9:0] via wide = {22'b0, prod, 10'b0}: wide[j] = prod[j-10]
+  wire [43:0] wide = {22'b0, prod, 10'b0};
+  reg  [9:0]  frac_pre;
+  reg         guard_s, sticky_s;
+  integer     ti;
+  always @* begin
+
+... (showing lines 40-114 of 150; use offset/limit for more)
+
+[ASSISTANT]
+The subnormal-path mux (always block with `t_sel == ti`) appears to never match in simulation — every failing vector outputs exactly 0, which only happens when the mux defaults. I also spotted a real bug in my `below` prefix-OR chain (the last stage doesn't actually shift). Let me rewrite the subnormal path structurally with pure continuous assignments (barrel-shift based) and fix the OR chain:
+  -> replace_file(content="// fp_mul_e5f10 -- IEEE binary16 (E5M10) multiplier with full subnormal support.\n//\n// Architecture:\n//   * Subnormal fractions are pre-normalised: the 10-bit fraction is shifted\n//     left so its leading one sits at bit 10, with the exponent adjusted by\n//     (-nlz).  Every non-zero significand therefore has its leading one in\n//     bit 10, so the 22-bit product always has its leading one in bit 21 or\n//     bit 20.  The normal path needs no leading-zero counter and only a 2:1\n//     shift, with guard/sticky taken from two fixed bit positions.\n//   * A subnormal result is produced by right-shifting the raw product by\n//     t = 26 - (ea_adj + eb_adj) and rounding once (round-to-nearest-even),\n//     so no double rounding occurs.\n//   value = (m_a * m_b) * 2^(ea_adj + eb_adj - 50)\n\nmodule fp_mul_e5f10 (a, b, y);\n  input  [15:0] a;\n  input  [15:0] b;\n  output [15:0] y;\n\n  // ------------------------------------------------------------- unpack\n  wire        s_a = a[15];\n  wire        s_b = b[15];\n  wire [4:0]  e_a = a[14:10];\n  wire [4:0]  e_b = b[14:10];\n  wire [9:0]  f_a = a[9:0];\n  wire [9:0]  f_b = b[9:0];\n\n  // ------------------------------------------------------------- classify\n  wire e_a_zero = ~|e_a;\n  wire e_b_zero = ~|e_b;\n  wire e_a_max  =  &e_a;\n  wire e_b_max  =  &e_b;\n  wire f_a_zero = ~|f_a;\n  wire f_b_zero = ~|f_b;\n\n  wire zero_a = e_a_zero &  f_a_zero;\n  wire zero_b = e_b_zero &  f_b_zero;\n  wire nan_a  = e_a_max  & ~f_a_zero;\n  wire nan_b  = e_b_max  & ~f_b_zero;\n  wire inf_a  = e_a_max  &  f_a_zero;\n  wire inf_b  = e_b_max  &  f_b_zero;\n\n  wire nan_in  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);\n  wire inf_in  = inf_a | inf_b;\n  wire zero_in = zero_a | zero_b;\n  wire s_y     = s_a ^ s_b;\n\n  // ------------------------------------- normalise subnormal fractions\n  // leading-zero count within the 10-bit fraction field\n  function [3:0] nlz10;\n    input [9:0] f;\n    integer i;\n    reg [3:0] c;\n    begin\n      c = 4'd10;\n      for (i = 0; i <= 9; i = i + 1)\n        if (f[i]) c = 4'd9 - i[3:0];\n      nlz10 = c;\n    end\n  endfunction\n\n  wire [3:0] nlz_a = e_a_zero ? nlz10(f_a) : 4'd0;\n  wire [3:0] nlz_b = e_b_zero ? nlz10(f_b) : 4'd0;\n\n  // 11-bit significands, leading one in bit 10; value = m * 2^(e_adj - 25)\n  wire [10:0] m_a = e_a_zero ? ({1'b0, f_a} << (nlz_a + 4'd1)) : {1'b1, f_a};\n  wire [10:0] m_b = e_b_zero ? ({1'b0, f_b} << (nlz_b + 4'd1)) : {1'b1, f_b};\n\n  wire [5:0] ea_adj = e_a_zero ? (6'd0 - {2'b0, nlz_a}) : {1'b0, e_a};\n  wire [5:0] eb_adj = e_b_zero ? (6'd0 - {2'b0, nlz_b}) : {1'b0, e_b};\n\n  wire signed [7:0] s_adj = $signed({{2{ea_adj[5]}}, ea_adj})\n                          + $signed({{2{eb_adj[5]}}, eb_adj});\n\n  // ------------------------------------------------- significand product\n  wire [21:0] prod = m_a * m_b;\n  wire        p21  = prod[21];\n\n  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)\n  wire [21:0] or1 = prod | {prod[20:0], 1'b0};\n  wire [21:0] or2 = or1  | {or1[21:2],  2'b0};\n  wire [21:0] or4 = or2  | {or2[21:4],  4'b0};\n  wire [21:0] or8 = or4  | {or4[21:8],  8'b0};\n  wire [21:0] below = or8 | {or8[5:0], 16'b0};\n\n  // ---------------------------------------------- early shift machinery\n  // subnormal result iff e_pre = s_adj - 15 + p21 <= 0\n  wire        sub_res = p21 ? ($signed(s_adj) <= 8'sd14)\n                            : ($signed(s_adj) <= 8'sd15);\n  wire signed [7:0] t_full = 8'sd26 - $signed(s_adj);   // >= 11 if sub_res\n  wire        sub23  = (t_full > 8'sd22);   // t >= 23: product rounds to zero\n  wire [5:0]  t_sel  = sub23 ? 6'd22 : t_full[5:0];\n\n  // ------------------------- normal path (result >= 2^-14), 2:1 shift\n  wire [10:0] mant_pre = p21 ? prod[21:11] : prod[20:10];\n  wire        guard_n  = p21 ? prod[10]    : prod[9];\n  wire        sticky_n = p21 ? below[10]   : below[9];\n  wire        round_n  = guard_n & (sticky_n | mant_pre[0]);\n  wire [11:0] mant_rnd = {1'b0, mant_pre} + {11'd0, round_n};\n  wire        carry_n  = mant_rnd[11];\n  wire [9:0]  frac_nrm = carry_n ? mant_rnd[10:1] : mant_rnd[9:0];\n\n  wire signed [7:0] e_pre = $signed(s_adj) - 8'sd15 + $signed({7'b0, p21});\n  wire signed [7:0] e_nrm = e_pre + $signed({7'b0, carry_n});\n  wire        overflow = e_nrm > 8'sd30;\n\n  // -------------------- subnormal path: fraction = RNE(prod * 2^(s_adj-26))\n  // (prod << (22 - t))[31:22] = prod[t+9 : t]\n  wire [5:0]  sh_amt  = 6'd22 - t_sel;                  // 0..11 when sub_res\n  wire [32:0] pshift  = {11'b0, prod} << sh_amt;\n  wire [9:0]  frac_pre = sub23 ? 10'd0 : pshift[31:22];\n  wire        guard_s  = prod[t_sel - 6'd1];            // = prod[t-1]\n  wire        sticky_s = below[t_sel - 6'd2];           // = |prod[t-2:0]\n  wire        round_s  = guard_s & ~sub23 & (sticky_s | frac_pre[0]);\n  wire [10:0] frac_sum = {1'b0, frac_pre} + {10'd0, round_s};\n  wire        carry_s  = frac_sum[10];\n  wire [9:0]  frac_sub = carry_s ? 10'd0 : frac_sum[9:0];\n  wire [4:0]  exp_sub  = {4'd0, carry_s};\n\n  // ------------------------------------------------------------- pack\n  wire sub_zero = sub_res & (frac_sum[9:0] == 10'd0);  // incl. t >= 23\n  wire is_nan   = nan_in;\n  wire is_inf   = inf_in | (overflow & ~zero_in);\n  wire is_zero  = zero_in | sub_zero;\n\n  wire [4:0] exp_y = is_nan  ? 5'd31 :\n                     is_inf  ? 5'd31 :\n                     is_zero ? 5'd0  :\n                     sub_res ? exp_sub :\n                               e_nrm[4:0];\n  wire [9:0] frac_y = is_nan ? 10'h200 :\n                      (is_inf | is_zero) ? 10'd0 :\n                      sub_res ? frac_sub :\n                                frac_nrm;\n\n  assign y = {(is_nan ? 1'b0 : s_y), exp_y, frac_y};\nendmodule\n", filename='design.v')
+
+[TOOL RESULT]
+[Step 14/60]
+Replaced file: design.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.v')
+
+[TOOL RESULT]
+[Step 15/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 417664/18874371
+  Sim output: TB_ERROR a=1 b=14337 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14338 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14339 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14504 expected_y=1 actual_y=0
+TB_ERROR a=1 b=145 .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=1 b=14337 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14338 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14339 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14504 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14514 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14425 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14475 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14556 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14518 expected_y=1 actual_y=0
+TB_ERROR a=1 b=14546 expected_y=1 actual_y=0
+TB_SUMMARY total=18874371 errors=417664
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_voxfilg4/verilator_netlist_out.log
+
+Best so far: 145429.23320427086 area_delay_product (eval 1)
+
+[ASSISTANT]
+Found it — my prefix-OR chain is broken: in each level I shifted in the *high* bits (`{or4[21:8], 8'b0}`) instead of truncating the top (`{or4[13:0], 8'b0}`). The chain must OR in progressively lower slices. Fixing:
+  -> edit_file(filename='design.v', new_string="  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)\n  wire [21:0] or1  = prod | {prod[20:0], 1'b0};\n  wire [21:0] or2  = or1  | {or1[19:0],  2'b0};\n  wire [21:0] or4  = or2  | {or2[17:0],  4'b0};\n  wire [21:0] or8  = or4  | {or4[13:0],  8'b0};\n  wire [21:0] below = or8 | {or8[5:0],  16'b0};", old_string="  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)\n  wire [21:0] or1 = prod | {prod[20:0], 1'b0};\n  wire [21:0] or2 = or1  | {or1[21:2],  2'b0};\n  wire [21:0] or4 = or2  | {or2[21:4],  4'b0};\n  wire [21:0] or8 = or4  | {or4[21:8],  8'b0};\n  wire [21:0] below = or8 | {or8[5:0], 16'b0};")
+
+[TOOL RESULT]
+[Step 16/60]
+Edited file: design.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.v')
+
+[TOOL RESULT]
+[Step 17/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 52996/18874371
+  Sim output: TB_ERROR a=1 b=25599 expected_y=1024 actual_y=0
+TB_ERROR a=1 b=25599 expected_y=1024 actual_y=0
+TB_ERROR a=1 b=58367 expected_y=33792 actual_y=32768
+TB_ERROR a=2 b=24575 expected_y=1024 actual_y=0
+T .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=1 b=25599 expected_y=1024 actual_y=0
+TB_ERROR a=1 b=25599 expected_y=1024 actual_y=0
+TB_ERROR a=1 b=58367 expected_y=33792 actual_y=32768
+TB_ERROR a=2 b=24575 expected_y=1024 actual_y=0
+TB_ERROR a=2 b=57343 expected_y=33792 actual_y=32768
+TB_ERROR a=3 b=24574 expected_y=1534 actual_y=1535
+TB_ERROR a=3 b=23893 expected_y=1024 actual_y=0
+TB_ERROR a=3 b=24574 expected_y=1534 actual_y=1535
+TB_ERROR a=3 b=24542 expected_y=1510 actual_y=1511
+TB_ERROR a=3 b=24566 expected_y=1528 actual_y=1529
+TB_SUMMARY total=18874371 errors=52996
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_tjz7tlgt/verilator_netlist_out.log
+
+Best so far: 145429.23320427086 area_delay_product (eval 1)
+
+[ASSISTANT]
+Two real bugs identified: (1) `sticky_n` must cover bits strictly *below* the guard (`below[9]`/`below[8]`, not `below[10]`/`below[9]` which include the guard bit), and (2) `sub_zero` wrongly fires when the subnormal rounding carries up to the smallest normal (frac_sum = 11'b100_00000000):
+  -> edit_file(filename='design.v', new_string='  wire        sticky_n = p21 ? below[9]    : below[8];', old_string='  wire        sticky_n = p21 ? below[10]   : below[9];')
+  -> edit_file(filename='design.v', new_string="  wire sub_zero = sub_res & ~carry_s & (frac_sum[9:0] == 10'd0);  // incl. t >= 23", old_string="  wire sub_zero = sub_res & (frac_sum[9:0] == 10'd0);  // incl. t >= 23")
+
+[TOOL RESULT]
+[Step 18/60]
+Edited file: design.v
+
+[TOOL RESULT]
+[Step 18/60]
+Edited file: design.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design.v')
+
+[TOOL RESULT]
+[Step 19/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/18874371
+Cost: OK
+  area_delay_product: 145755.63868969298
+  Metrics:
+    area_delay_product: 145755.63868969298
+    delay: 1325.8564
+    area: 109.93320143093399
+    power_probabilistic_fixed_clock: 0.00557
+    target_delay: 500.0
+    worst_slack: -825.86
+  Worst timing path:
+    Startpoint: a[10] (input port clocked by VCLK)
+    Endpoint: y[9] (output port clocked by VCLK)
+    Path Group: VCLK
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock VCLK (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 v input external delay
+       0.00    0.00 v a[10] (in)
+      58.41   58.41 v _1339_/Y (OR5x1_ASAP7_75t_R)
+      35.13   93.54 v _1342_/Y (OR2x2_ASAP7_75t_R)
+      34.33  127.87 ^ _1343_/Y (AOI211x1_ASAP7_75t_R)
+      48.43  176.30 v _1356_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      29.04  205.34 ^ _1357_/Y (NOR2x1p5_ASAP7_75t_R)
+      32.42  237.76 v _1410_/Y (AOI211xp5_ASAP7_75t_R)
+      41.16  278.91 ^ _1753_/Y (AOI211xp5_ASAP7_75t_R)
+      35.84  314.76 ^ _1755_/Y (XOR2xp5_ASAP7_75t_R)
+      42.76  357.52 v _1757_/Y (XNOR2x2_ASAP7_75t_R)
+      24.69  382.21 v _1845_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.94  417.15 v _1846_/Y (XNOR2xp5_ASAP7_75t_R)
+      29.83  446.98 v _1847_/Y (XNOR2xp5_ASAP7_75t_R)
+      32.75  479.73 v _1853_/Y (XOR2x2_ASAP7_75t_R)
+      24.10  503.83 v _1855_/Y (XNOR2x1_ASAP7_75t_R)
+      29.24  533.07 v _1891_/Y (XOR2x1_ASAP7_75t_R)
+      29.01  562.07 v _1919_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.46  593.53 ^ _1920_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      28.01  621.55 v _1921_/Y (MAJIxp5_ASAP7_75t_R)
+      32.91  654.45 ^ _1922_/Y (MAJIxp5_ASAP7_75t_R)
+      30.13  684.58 v _1929_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      34.46  719.03 ^ _1939_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      32.03  751.06 v _1951_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      28.54  779.60 ^ _1959_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      29.98  809.58 v _1969_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      46.66  856.24 ^ _1976_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      29.18  885.42 v _1995_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      30.27  915.69 v _2008_/Y (BUFx3_ASAP7_75t_R)
+      23.54  939.23 ^ _2229_/Y (NOR3xp33_ASAP7_75t_R)
+      22.07  961.30 v _2293_/Y (AOI211xp5_ASAP7_75t_R)
+      43.20 1004.50 ^ _2296_/Y (OAI31xp33_ASAP7_75t_R)
+      28.85 1033.35 v _2304_/Y (NAND4xp75_ASAP7_75t_R)
+      63.20 1096.55 ^ _2314_/Y (NOR5xp2_ASAP7_75t_R)
+      55.78 1152.33 v _2324_/Y (NAND5xp2_ASAP7_75t_R)
+      43.58 1195.91 ^ _2393_/Y (XNOR2x2_ASAP7_75t_R)
+      42.30 1238.21 ^ _2394_/Y (AND5x1_ASAP7_75t_R)
+      16.77 1254.98 v _2395_/Y (AOI21x1_ASAP7_75t_R)
+      27.09 1282.07 ^ _2478_/Y (NAND3x1_ASAP7_75t_R)
+      19.00 1301.07 v _2489_/Y (OAI31xp33_ASAP7_75t_R)
+      24.78 1325.86 v _2490_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1325.86 v y[9] (out)
+            1325.86   data arrival time
+    
+     500.00  500.00   clock VCLK (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+       0.00  500.00   output external delay
+             500.00   data required time
+    ---------------------------------------------------------
+             500.00   data required time
+            -1325.86   data arrival time
+    ---------------------------------------------------------
+            -825.86   slack (VIOLATED)
+
+Best so far: 145429.23320427086 area_delay_product (eval 1)
+
+[ASSISTANT]
+The unified design passes now, but cost (145755) barely improved over the starting point (145429). Analysis of the critical path shows two problems: the priority-loop `nlz10` (≈10 mux levels) before the multiplier, and the 6-stage barrel shifter + duplicated rounding paths after it.
+
+**New plan — fully unified rounding:** Subnormal inputs still get pre-normalized (with a tree-structured nlz encoder instead of a priority chain). Then a *single* alignment position `S = clamp(max(26 - s_adj, 10 + p21), 10, 23)` covers both normal (S∈{10,11}) and subnormal (S∈{12..23}) results. One one-hot AND-OR plane extracts `F = (prod>>S)[9:0]`, guard, and sticky; one incrementer rounds; the exponent is `clamp(e_pre,0)+carry` which automatically yields 0 for zero/subnormal results and 1 for the round-up-to-min-normal case. This removes the second rounding path, the barrel shifter, and most pack muxing.
+  -> create_file(content="// fp_mul_e5f10 -- IEEE binary16 (E5M10) multiplier with full subnormal support.\n//\n// Architecture:\n//   * Subnormal input fractions are pre-normalised (balanced-tree leading-zero\n//     encoder + small barrel shift) so every non-zero significand has its\n//     leading one in bit 10 of an 11-bit significand m; the exponent is\n//     adjusted by (-nlz).  value(m) = m * 2^(e_adj - 25).\n//   * With that, the 22-bit product always has its leading one in bit 21 or 20.\n//     A single alignment position\n//         S = clamp(max(26 - s_adj, 10 + p21), 10, 23)\n//     (s_adj = ea_adj + eb_adj, p21 = prod[21]) serves both result classes:\n//       - normal results  (S = 10 + p21):  mantissa = {1'b1, F}\n//       - subnormal results (S = 26 - s_adj >= 12): mantissa = {1'b0, F}\n//     where F = (prod >> S)[9:0].  One round-to-nearest-even step (guard =\n//     prod[S-1], sticky = |prod[S-2:0]) is applied -- no double rounding.\n//   * F, guard and sticky come from a one-hot AND-OR plane over S in [10,23];\n//     the one-hot codes are constant comparisons of s_adj, so they are ready\n//     long before the multiplier finishes.\n//   * exp = clamp(e_pre, 0) + carry with e_pre = s_adj - 15 + p21; this yields\n//     0 for subnormal/zero results and 1 when a subnormal rounds up to the\n//     smallest normal.  Overflow (exp > 30) gives inf.\n\nmodule fp_mul_e5f10 (a, b, y);\n  input  [15:0] a;\n  input  [15:0] b;\n  output [15:0] y;\n\n  // ------------------------------------------------------------- unpack\n  wire [4:0] e_a = a[14:10];\n  wire [4:0] e_b = b[14:10];\n  wire [9:0] f_a = a[9:0];\n  wire [9:0] f_b = b[9:0];\n  wire       s_y = a[15] ^ b[15];\n\n  // ------------------------------------------------------------- classify\n  wire e_a_zero = ~|e_a;\n  wire e_b_zero = ~|e_b;\n  wire e_a_max  =  &e_a;\n  wire e_b_max  =  &e_b;\n  wire f_a_zero = ~|f_a;\n  wire f_b_zero = ~|f_b;\n\n  wire zero_a = e_a_zero & f_a_zero;\n  wire zero_b = e_b_zero & f_b_zero;\n  wire nan_a  = e_a_max  & ~f_a_zero;\n  wire nan_b  = e_b_max  & ~f_b_zero;\n  wire inf_a  = e_a_max  &  f_a_zero;\n  wire inf_b  = e_b_max  &  f_b_zero;\n\n  wire is_nan  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);\n  wire is_inf  = inf_a | inf_b;\n  wire zero_in = zero_a | zero_b;\n\n  // ------------------------------------- normalise subnormal fractions\n  // nlz5: number of leading zeros of a 5-bit vector (0..5), balanced logic\n  function [2:0] nlz5;\n    input [4:0] x;\n    begin\n      nlz5[2] = ~x[4] & ~x[3] & ~x[2] & ~x[1];\n      nlz5[1] = ~x[4] & ~x[3] & (x[2] | x[1]);\n      nlz5[0] = (~x[4] & (x[3] | (~x[2] & x[1]))) | ~|x;\n    end\n  endfunction\n\n  // nlz10: leading zeros of a 10-bit vector (0..10), two-level structure\n  function [3:0] nlz10;\n    input [9:0] f;\n    begin\n      nlz10 = (|f[9:5]) ? {1'b0, nlz5(f[9:5])}\n                        : (4'd5 + {1'b0, nlz5(f[4:0])});\n    end\n  endfunction\n\n  wire [3:0] nlz_a = e_a_zero ? nlz10(f_a) : 4'd0;\n  wire [3:0] nlz_b = e_b_zero ? nlz10(f_b) : 4'd0;\n\n  // 11-bit significands with the leading one in bit 10\n  wire [10:0] m_a = e_a_zero ? ({1'b0, f_a} << (nlz_a + 4'd1)) : {1'b1, f_a};\n  wire [10:0] m_b = e_b_zero ? ({1'b0, f_b} << (nlz_b + 4'd1)) : {1'b1, f_b};\n\n  wire [5:0] ea_adj = e_a_zero ? (6'd0 - {2'b0, nlz_a}) : {1'b0, e_a};\n  wire [5:0] eb_adj = e_b_zero ? (6'd0 - {2'b0, nlz_b}) : {1'b0, e_b};\n\n  wire signed [6:0] s_adj = $signed({1'b0, ea_adj}) + $signed({1'b0, eb_adj});\n\n  // ------------------------------------------------- significand product\n  wire [21:0] prod = m_a * m_b;\n  wire        p21  = prod[21];\n\n  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)\n  wire [21:0] or1   = prod | {prod[20:0], 1'b0};\n  wire [21:0] or2   = or1  | {or1[19:0],  2'b0};\n  wire [21:0] or4   = or2  | {or2[17:0],  4'b0};\n  wire [21:0] or8   = or4  | {or4[13:0],  8'b0};\n  wire [21:0] below = or8  | {or8[5:0],  16'b0};\n\n  // --------------------------------------- alignment position, one-hot\n  // S = clamp(max(26 - s_adj, 10 + p21), 10, 23)\n  wire oh10 = (s_adj >= 7'sd16) & ~p21;                       // S = 10\n  wire oh11 = (s_adj == 7'sd15) | (p21 & (s_adj >= 7'sd16));  // S = 11\n  wire oh23 = (s_adj <= 7'sd3);                               // S = 23\n\n  wire [23:10] oh;\n  assign oh[10] = oh10;\n  assign oh[11] = oh11;\n  assign oh[23] = oh23;\n\n  genvar gk;\n  generate\n    for (gk = 12; gk <= 22; gk = gk + 1) begin : g_oh\n      assign oh[gk] = (s_adj == (26 - gk));\n    end\n  endgenerate\n\n  // implicit leading one (normal result) and exponent clamp flag\n  wire imp = oh[10] | (oh[11] & p21);\n\n  // ------------------------------------ one-hot AND-OR extraction plane\n  wire [9:0] F;\n  wire       guard, sticky;\n\n  genvar gj;\n  generate\n    for (gj = 0; gj < 10; gj = gj + 1) begin : g_f\n      wire [23:10] terms;\n      for (gk = 10; gk <= 23; gk = gk + 1) begin : g_t\n        if (gk + gj <= 21)\n          assign terms[gk] = oh[gk] & prod[gk + gj];   // F[j] = prod[S+j]\n        else\n          assign terms[gk] = 1'b0;\n      end\n      assign F[gj] = |terms;\n    end\n\n    wire [23:10] tg, ts;\n    for (gk = 10; gk <= 23; gk = gk + 1) begin : g_gs\n      if (gk <= 22)\n        assign tg[gk] = oh[gk] & prod[gk - 1];         // guard = prod[S-1]\n      else\n        assign tg[gk] = 1'b0;                          // S = 23: guard = 0\n      assign ts[gk] = oh[gk] & below[gk - 2];          // sticky = |prod[S-2:0]\n    end\n    assign guard  = |tg;\n    assign sticky = |ts;\n  endgenerate\n\n  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  wire [11:0] mant_rnd = {imp, F} + {11'd0, round};\n  wire        carry    = imp ? mant_rnd[11] : mant_rnd[10];\n  wire [9:0]  frac_pre = (carry & imp) ? mant_rnd[10:1] : mant_rnd[9:0];\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c   = imp ? ec7[5:0] : 6'd0;      // clamp(e_pre, 0)\n  wire [5:0] exp6  = e_c + {4'b0, carry};\n  wire       ovf   = (ec7 >= 7'sd31) | (exp6 > 6'd30);\n\n  // ------------------------------------------------------------- pack\n  wire is_inf_y = is_inf | ovf;\n\n  wire [4:0] exp_y = (is_nan | is_inf_y) ? 5'd31 :\n                     zero_in             ? 5'd0  :\n                                           exp6[4:0];\n  wire [9:0] frac_y = is_nan ? 10'h200 :\n                      (is_inf_y | zero_in) ? 10'd0 :\n                                             frac_pre;\n\n  assign y = {(is_nan ? 1'b0 : s_y), exp_y, frac_y};\nendmodule\n", filename='design_v2.v')
+
+[TOOL RESULT]
+[Step 20/60]
+Created file: design_v2.v
+
+[ASSISTANT]
+Before evaluating, I spotted a width bug: `exp6` must be 7 bits so the carry-out of `e_c == 31` isn't truncated before the overflow check:
+  -> edit_file(filename='design_v2.v', new_string="  wire [5:0] e_c   = imp ? ec7[5:0] : 6'd0;      // clamp(e_pre, 0)\n  wire [6:0] exp6  = {1'b0, e_c} + {6'b0, carry};\n  wire       ovf   = (ec7 >= 7'sd31) | (exp6 > 7'd30);", old_string="  wire [5:0] e_c   = imp ? ec7[5:0] : 6'd0;      // clamp(e_pre, 0)\n  wire [5:0] exp6  = e_c + {4'b0, carry};\n  wire       ovf   = (ec7 >= 7'sd31) | (exp6 > 6'd30);")
+
+[TOOL RESULT]
+[Step 21/60]
+Edited file: design_v2.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v2.v')
+
+[TOOL RESULT]
+[Step 22/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 8185863/18874371
+  Sim output: TB_ERROR a=3 b=26625 expected_y=3586 actual_y=0
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=32768
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=0
+TB_ERROR a=0 b=1023 expected_y=0 actual_y=317 .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=3 b=26625 expected_y=3586 actual_y=0
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=32768
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=0
+TB_ERROR a=0 b=1023 expected_y=0 actual_y=31744
+TB_ERROR a=0 b=1022 expected_y=0 actual_y=31744
+TB_ERROR a=0 b=682 expected_y=0 actual_y=31744
+TB_ERROR a=0 b=624 expected_y=0 actual_y=31744
+TB_ERROR a=0 b=551 expected_y=0 actual_y=31744
+TB_ERROR a=0 b=787 expected_y=0 actual_y=31744
+TB_ERROR a=0 b=708 expected_y=0 actual_y=31744
+TB_SUMMARY total=18874371 errors=8185863
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_a_fz6yx7/verilator_netlist_out.log
+
+Best so far: 145429.23320427086 area_delay_product (eval 1)
+
+[ASSISTANT]
+Classic sign-extension bug: `{1'b0, ea_adj}` doesn't sign-extend the 6-bit two's-complement value. Fixing `s_adj`:
+  -> edit_file(filename='design_v2.v', new_string='  wire signed [6:0] s_adj = {{1{ea_adj[5]}}, ea_adj}\n                          + {{1{eb_adj[5]}}, eb_adj};', old_string="  wire signed [6:0] s_adj = $signed({1'b0, ea_adj}) + $signed({1'b0, eb_adj});")
+
+[TOOL RESULT]
+[Step 23/60]
+Edited file: design_v2.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v2.v')
+
+[TOOL RESULT]
+[Step 24/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/18874371
+Cost: OK
+  area_delay_product: 127272.04777652767
+  Metrics:
+    area_delay_product: 127272.04777652767
+    delay: 1364.7938
+    area: 93.2536825537511
+    power_probabilistic_fixed_clock: 0.00403
+    target_delay: 500.0
+    worst_slack: -864.79
+  Worst timing path:
+    Startpoint: a[0] (input port clocked by VCLK)
+    Endpoint: y[8] (output port clocked by VCLK)
+    Path Group: VCLK
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock VCLK (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 v input external delay
+       0.00    0.00 v a[0] (in)
+      49.90   49.90 ^ _1090_/Y (NOR5xp2_ASAP7_75t_R)
+      38.08   87.98 v _1091_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      59.41  147.39 ^ _1104_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      49.36  196.74 v _1188_/Y (XNOR2x2_ASAP7_75t_R)
+      27.80  224.54 v _1189_/Y (BUFx2_ASAP7_75t_R)
+      16.39  240.93 ^ _1193_/Y (NAND2xp33_ASAP7_75t_R)
+      13.44  254.38 v _1194_/Y (OAI21xp33_ASAP7_75t_R)
+      56.63  311.01 ^ _1207_/Y (OAI32xp33_ASAP7_75t_R)
+      26.73  337.74 v _1346_/Y (AOI21x1_ASAP7_75t_R)
+      29.20  366.95 v _1429_/Y (XOR2xp5_ASAP7_75t_R)
+      36.80  403.75 v _1496_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.72  435.48 v _1497_/Y (XNOR2xp5_ASAP7_75t_R)
+      29.57  465.05 ^ _1502_/Y (XNOR2xp5_ASAP7_75t_R)
+      32.84  497.89 ^ _1594_/Y (XOR2xp5_ASAP7_75t_R)
+      43.64  541.53 v _1595_/Y (XNOR2x2_ASAP7_75t_R)
+      26.11  567.64 v _1676_/Y (XOR2x1_ASAP7_75t_R)
+      32.25  599.89 v _1677_/Y (XNOR2xp5_ASAP7_75t_R)
+      29.78  629.67 v _1678_/Y (XNOR2xp5_ASAP7_75t_R)
+      26.87  656.54 ^ _1679_/Y (XNOR2xp5_ASAP7_75t_R)
+      27.53  684.07 v _1762_/Y (NOR2xp33_ASAP7_75t_R)
+      47.10  731.17 ^ _1769_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      31.08  762.26 v _1771_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.07  796.33 ^ _1780_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      27.27  823.60 v _1784_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      40.66  864.26 ^ _1792_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      41.00  905.26 v _1795_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.14  939.40 ^ _1803_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      32.90  972.30 ^ _1804_/Y (BUFx3_ASAP7_75t_R)
+      27.78 1000.07 ^ _1874_/Y (AND3x1_ASAP7_75t_R)
+      20.71 1020.78 ^ _1881_/Y (OR4x1_ASAP7_75t_R)
+      37.22 1058.01 ^ _1891_/Y (AND3x2_ASAP7_75t_R)
+      33.51 1091.52 ^ _1929_/Y (AND3x4_ASAP7_75t_R)
+      32.66 1124.17 ^ _1936_/Y (AND3x4_ASAP7_75t_R)
+      13.80 1137.97 v _1937_/Y (NAND3x1_ASAP7_75t_R)
+      57.20 1195.17 v _1947_/Y (OR5x1_ASAP7_75t_R)
+      41.00 1236.18 ^ _1955_/Y (OAI22xp33_ASAP7_75t_R)
+      34.59 1270.77 v _1962_/Y (NAND4xp75_ASAP7_75t_R)
+      27.22 1297.99 ^ _1972_/Y (NAND3x1_ASAP7_75t_R)
+      29.92 1327.91 ^ _1973_/Y (BUFx6f_ASAP7_75t_R)
+      14.40 1342.31 v _1995_/Y (AOI211xp5_ASAP7_75t_R)
+      22.48 1364.79 v _1996_/Y (BUFx2_ASAP7_75t_R)
+       0.00 1364.79 v y[8] (out)
+            1364.79   data arrival time
+    
+     500.00  500.00   clock VCLK (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+       0.00  500.00   output external delay
+             500.00   data required time
+    ---------------------------------------------------------
+             500.00   data required time
+            -1364.79   data arrival time
+    ---------------------------------------------------------
+            -864.79   slack (VIOLATED)
+
+Best so far: 127272.04777652767 area_delay_product (eval 10)
+
+[ASSISTANT]
+v2 passes with cost 127272 (area 93.3, delay 1365) — a 12.5% improvement. The critical path tail is: extraction plane → rounding incrementer → exponent adder → pack muxes. Three targeted cuts:
+
+1. `frac_pre = mant_rnd[9:0]` unconditionally (when the mantissa overflows to `0x800`, the low 10 bits are already 0 — the post-carry shift is a no-op on those bits).
+2. `carry = round & &F` computed in parallel with the incrementer instead of rippling out of it.
+3. Slimmer pack muxing.
+  -> edit_file(filename='design_v2.v', new_string="  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  wire [11:0] mant_rnd = {imp, F} + {11'd0, round};\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & &F;\n  wire [9:0]  frac_pre = mant_rnd[9:0];   // correct in all carry cases too\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c   = imp ? ec7[5:0] : 6'd0;      // clamp(e_pre, 0)\n  wire [6:0] exp6  = {1'b0, e_c} + {6'b0, carry};\n  wire       ovf   = (ec7 >= 7'sd31) | (exp6 > 7'd30);", old_string="  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  wire [11:0] mant_rnd = {imp, F} + {11'd0, round};\n  wire        carry    = imp ? mant_rnd[11] : mant_rnd[10];\n  wire [9:0]  frac_pre = (carry & imp) ? mant_rnd[10:1] : mant_rnd[9:0];\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c   = imp ? ec7[5:0] : 6'd0;      // clamp(e_pre, 0)\n  wire [6:0] exp6  = {1'b0, e_c} + {6'b0, carry};\n  wire       ovf   = (ec7 >= 7'sd31) | (exp6 > 7'd30);")
+
+[TOOL RESULT]
+[Step 25/60]
+Edited file: design_v2.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v2.v')
+
+[TOOL RESULT]
+[Step 26/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/18874371
+Cost: OK
+  area_delay_product: 121514.22528560163
+  Metrics:
+    area_delay_product: 121514.22528560163
+    delay: 1293.9464
+    area: 93.90978272794115
+    power_probabilistic_fixed_clock: 0.00369
+    target_delay: 500.0
+    worst_slack: -793.95
+  Worst timing path:
+    Startpoint: a[0] (input port clocked by VCLK)
+    Endpoint: y[8] (output port clocked by VCLK)
+    Path Group: VCLK
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock VCLK (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 v input external delay
+       0.00    0.00 v a[0] (in)
+      49.52   49.52 ^ _1094_/Y (NOR5xp2_ASAP7_75t_R)
+      26.62   76.14 v _1113_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      74.75  150.89 ^ _1117_/Y (OAI211xp5_ASAP7_75t_R)
+      61.25  212.14 v _1170_/Y (XNOR2x2_ASAP7_75t_R)
+      38.26  250.41 v _1257_/Y (OA211x2_ASAP7_75t_R)
+      23.97  274.38 ^ _1260_/Y (OAI31xp33_ASAP7_75t_R)
+      42.83  317.20 v _1262_/Y (OAI21xp5_ASAP7_75t_R)
+      36.82  354.02 ^ _1458_/Y (NAND2xp5_ASAP7_75t_R)
+      22.50  376.52 v _1459_/Y (XOR2xp5_ASAP7_75t_R)
+      33.51  410.03 v _1460_/Y (XNOR2xp5_ASAP7_75t_R)
+      36.40  446.42 v _1553_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.27  476.69 v _1554_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.84  511.53 v _1561_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.27  541.80 v _1637_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.28  572.09 v _1638_/Y (XNOR2xp5_ASAP7_75t_R)
+      25.37  597.45 ^ _1642_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.74  632.20 ^ _1816_/Y (XOR2xp5_ASAP7_75t_R)
+      35.59  667.78 ^ _1817_/Y (XOR2xp5_ASAP7_75t_R)
+      37.75  705.54 v _1819_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.70  733.23 ^ _1821_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      29.46  762.70 v _1828_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      33.61  796.30 ^ _1830_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.80  831.11 v _1834_/Y (OAI311xp33_ASAP7_75t_R)
+      71.23  902.34 ^ _1851_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      39.97  942.30 v _1854_/Y (NOR2x1_ASAP7_75t_R)
+      34.52  976.83 v _1855_/Y (BUFx3_ASAP7_75t_R)
+      18.50  995.33 ^ _1947_/Y (OAI221xp5_ASAP7_75t_R)
+      33.44 1028.77 v _1948_/Y (NOR3xp33_ASAP7_75t_R)
+      31.45 1060.23 ^ _1974_/Y (NOR5xp2_ASAP7_75t_R)
+      41.74 1101.96 v _2018_/Y (NAND4xp25_ASAP7_75t_R)
+      49.35 1151.31 ^ _2025_/Y (NOR3xp33_ASAP7_75t_R)
+      42.10 1193.41 v _2029_/Y (NOR2xp67_ASAP7_75t_R)
+      26.55 1219.95 ^ _2056_/Y (OAI211xp5_ASAP7_75t_R)
+      35.96 1255.92 ^ _2057_/Y (BUFx3_ASAP7_75t_R)
+      13.65 1269.56 v _2079_/Y (AOI211x1_ASAP7_75t_R)
+      24.39 1293.95 v _2080_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1293.95 v y[8] (out)
+            1293.95   data arrival time
+    
+     500.00  500.00   clock VCLK (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+       0.00  500.00   output external delay
+             500.00   data required time
+    ---------------------------------------------------------
+             500.00   data required time
+            -1293.95   data arrival time
+    ---------------------------------------------------------
+            -793.95   slack (VIOLATED)
+
+Best so far: 121514.22528560163 area_delay_product (eval 11)
+
+[ASSISTANT]
+v2 is correct at cost 121514 (area 93.9 × delay 1294). Since the design massively violates the 500ps default constraint (slack -794), synthesis is stuck in pure delay mode. Before more RTL surgery, let me check how the area/delay tradeoff responds to a relaxed timing target:
+  -> run_evaluation(filename='design_v2.v', target_delay=1300)
+
+[TOOL RESULT]
+[Step 27/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/18874371
+Cost: OK
+  area_delay_product: 121514.22528560163
+  Metrics:
+    area_delay_product: 121514.22528560163
+    delay: 1293.9464
+    area: 93.90978272794115
+    power_probabilistic_fixed_clock: 0.00176
+    target_delay: 1300
+    worst_slack: 6.05
+  Worst timing path:
+    Startpoint: a[0] (input port clocked by VCLK)
+    Endpoint: y[8] (output port clocked by VCLK)
+    Path Group: VCLK
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock VCLK (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 v input external delay
+       0.00    0.00 v a[0] (in)
+      49.52   49.52 ^ _1094_/Y (NOR5xp2_ASAP7_75t_R)
+      26.62   76.14 v _1113_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      74.75  150.89 ^ _1117_/Y (OAI211xp5_ASAP7_75t_R)
+      61.25  212.14 v _1170_/Y (XNOR2x2_ASAP7_75t_R)
+      38.26  250.41 v _1257_/Y (OA211x2_ASAP7_75t_R)
+      23.97  274.38 ^ _1260_/Y (OAI31xp33_ASAP7_75t_R)
+      42.83  317.20 v _1262_/Y (OAI21xp5_ASAP7_75t_R)
+      36.82  354.02 ^ _1458_/Y (NAND2xp5_ASAP7_75t_R)
+      22.50  376.52 v _1459_/Y (XOR2xp5_ASAP7_75t_R)
+      33.51  410.03 v _1460_/Y (XNOR2xp5_ASAP7_75t_R)
+      36.40  446.42 v _1553_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.27  476.69 v _1554_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.84  511.53 v _1561_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.27  541.80 v _1637_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.28  572.09 v _1638_/Y (XNOR2xp5_ASAP7_75t_R)
+      25.37  597.45 ^ _1642_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.74  632.20 ^ _1816_/Y (XOR2xp5_ASAP7_75t_R)
+      35.59  667.78 ^ _1817_/Y (XOR2xp5_ASAP7_75t_R)
+      37.75  705.54 v _1819_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.70  733.23 ^ _1821_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      29.46  762.70 v _1828_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      33.61  796.30 ^ _1830_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.80  831.11 v _1834_/Y (OAI311xp33_ASAP7_75t_R)
+      71.23  902.34 ^ _1851_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      39.97  942.30 v _1854_/Y (NOR2x1_ASAP7_75t_R)
+      34.52  976.83 v _1855_/Y (BUFx3_ASAP7_75t_R)
+      18.50  995.33 ^ _1947_/Y (OAI221xp5_ASAP7_75t_R)
+      33.44 1028.77 v _1948_/Y (NOR3xp33_ASAP7_75t_R)
+      31.45 1060.23 ^ _1974_/Y (NOR5xp2_ASAP7_75t_R)
+      41.74 1101.96 v _2018_/Y (NAND4xp25_ASAP7_75t_R)
+      49.35 1151.31 ^ _2025_/Y (NOR3xp33_ASAP7_75t_R)
+      42.10 1193.41 v _2029_/Y (NOR2xp67_ASAP7_75t_R)
+      26.55 1219.95 ^ _2056_/Y (OAI211xp5_ASAP7_75t_R)
+      35.96 1255.92 ^ _2057_/Y (BUFx3_ASAP7_75t_R)
+      13.65 1269.56 v _2079_/Y (AOI211x1_ASAP7_75t_R)
+      24.39 1293.95 v _2080_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1293.95 v y[8] (out)
+            1293.95   data arrival time
+    
+    1300.00 1300.00   clock VCLK (rise edge)
+       0.00 1300.00   clock network delay (ideal)
+       0.00 1300.00   clock reconvergence pessimism
+       0.00 1300.00   output external delay
+            1300.00   data required time
+    ---------------------------------------------------------
+            1300.00   data required time
+            -1293.95   data arrival time
+    ---------------------------------------------------------
+               6.05   slack (MET)
+
+Best so far: 121514.22528560163 area_delay_product (eval 11)
+
+[ASSISTANT]
+Same area and delay at target 1300 — the achieved path is what it is. Let me test a higher target to see if area can shrink:
+  -> run_evaluation(filename='design_v2.v', target_delay=2200)
+
+[TOOL RESULT]
+[Step 28/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/18874371
+Cost: OK
+  area_delay_product: 131031.00173346426
+  Metrics:
+    area_delay_product: 131031.00173346426
+    delay: 1430.829
+    area: 91.57698210859877
+    power_probabilistic_fixed_clock: 0.001
+    target_delay: 2200
+    worst_slack: 769.17
+  Worst timing path:
+    Startpoint: b[0] (input port clocked by VCLK)
+    Endpoint: y[8] (output port clocked by VCLK)
+    Path Group: VCLK
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock VCLK (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 v input external delay
+       0.00    0.00 v b[0] (in)
+      49.52   49.52 ^ _1087_/Y (NOR5xp2_ASAP7_75t_R)
+      41.26   90.78 v _1142_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      51.11  141.89 v _1164_/Y (OA211x2_ASAP7_75t_R)
+      43.27  185.16 v _1165_/Y (HB1xp67_ASAP7_75t_R)
+      31.77  216.93 ^ _1166_/Y (XNOR2xp5_ASAP7_75t_R)
+      48.85  265.78 ^ _1167_/Y (HB1xp67_ASAP7_75t_R)
+      24.42  290.19 v _1239_/Y (NOR2xp33_ASAP7_75t_R)
+      27.63  317.83 ^ _1240_/Y (AOI211xp5_ASAP7_75t_R)
+      26.04  343.87 v _1245_/Y (OAI21xp33_ASAP7_75t_R)
+      44.28  388.15 v _1246_/Y (HB1xp67_ASAP7_75t_R)
+      46.48  434.63 ^ _1615_/Y (NAND2xp33_ASAP7_75t_R)
+      26.38  461.00 v _1651_/Y (XOR2xp5_ASAP7_75t_R)
+      32.11  493.11 v _1652_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.30  524.41 v _1659_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.70  556.12 v _1680_/Y (XNOR2xp5_ASAP7_75t_R)
+      22.55  578.66 ^ _1698_/Y (NAND3xp33_ASAP7_75t_R)
+      36.11  614.77 v _1720_/Y (NAND3xp33_ASAP7_75t_R)
+      31.64  646.41 ^ _1752_/Y (AOI21xp33_ASAP7_75t_R)
+      30.57  676.98 v _1753_/Y (NOR3xp33_ASAP7_75t_R)
+      48.27  725.25 v _1808_/Y (OR5x1_ASAP7_75t_R)
+      29.61  754.86 ^ _1812_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      35.29  790.15 v _1819_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      30.93  821.08 ^ _1821_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      29.46  850.54 v _1828_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      43.47  894.01 ^ _1830_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      37.53  931.54 v _1834_/Y (OAI311xp33_ASAP7_75t_R)
+      60.50  992.04 ^ _1851_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      53.19 1045.23 v _1854_/Y (NOR2xp33_ASAP7_75t_R)
+      57.69 1102.92 v _1855_/Y (HB1xp67_ASAP7_75t_R)
+      34.32 1137.24 ^ _1924_/Y (OAI21xp33_ASAP7_75t_R)
+      27.99 1165.23 v _1928_/Y (AOI211xp5_ASAP7_75t_R)
+      48.13 1213.36 v _2033_/Y (OR5x1_ASAP7_75t_R)
+      46.85 1260.21 ^ _2034_/Y (NOR5xp2_ASAP7_75t_R)
+      24.24 1284.45 v _2035_/Y (XNOR2xp5_ASAP7_75t_R)
+      45.92 1330.37 v _2036_/Y (OR4x1_ASAP7_75t_R)
+      18.15 1348.52 ^ _2056_/Y (OAI211xp5_ASAP7_75t_R)
+      41.92 1390.45 ^ _2057_/Y (HB1xp67_ASAP7_75t_R)
+      19.33 1409.77 v _2079_/Y (AOI211xp5_ASAP7_75t_R)
+      21.06 1430.83 v _2080_/Y (HB1xp67_ASAP7_75t_R)
+       0.00 1430.83 v y[8] (out)
+            1430.83   data arrival time
+    
+    2200.00 2200.00   clock VCLK (rise edge)
+       0.00 2200.00   clock network delay (ideal)
+       0.00 2200.00   clock reconvergence pessimism
+       0.00 2200.00   output external delay
+            2200.00   data required time
+    ---------------------------------------------------------
+            2200.00   data required time
+            -1430.83   data arrival time
+    ---------------------------------------------------------
+             769.17   slack (MET)
+
+Best so far: 121514.22528560163 area_delay_product (eval 11)
+
+[ASSISTANT]
+v2 is correct at 121514. Now I'll optimize the tail: replace the rounding ripple-incrementer with a prefix-OR based increment (`F+1 = F ^ {belowF,1}`), compute `carry = round & &F` in parallel, and precompute `e_c+1` so the exponent path ends in a 2:1 mux instead of a 6-bit ripple add:
+  -> edit_file(filename='design_v2.v', new_string="  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  // F+1 via prefix-OR of F (5 OR2 levels) + XOR, instead of a 10-bit ripple\n  wire [8:0] orF1 = F[8:0];\n  wire [8:0] orF2 = orF1 | {orF1[7:0], 1'b0};\n  wire [8:0] orF4 = orF2 | {orF2[5:0], 3'b0};\n  wire [8:0] belowF = orF4 | {orF4[1:0], 7'b0};   // belowF[m] = |F[m:0]\n  wire [9:0] Fp1 = F ^ {belowF, 1'b1};\n\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & &F;\n  wire [9:0]  frac_pre = round ? Fp1 : F;\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c   = imp ? ec7[5:0] : 6'd0;      // clamp(e_pre, 0)\n  wire [5:0] e_c_p1 = e_c + 6'd1;\n  wire [5:0] exp6   = carry ? e_c_p1 : e_c;\n  wire       ovf    = (ec7 >= 7'sd31) | (carry & (e_c == 6'd30));", old_string="  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  wire [11:0] mant_rnd = {imp, F} + {11'd0, round};\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & &F;\n  wire [9:0]  frac_pre = mant_rnd[9:0];   // correct in all carry cases too\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c   = imp ? ec7[5:0] : 6'd0;      // clamp(e_pre, 0)\n  wire [6:0] exp6  = {1'b0, e_c} + {6'b0, carry};\n  wire       ovf   = (ec7 >= 7'sd31) | (exp6 > 7'd30);")
+
+[TOOL RESULT]
+[Step 29/60]
+Edited file: design_v2.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v2.v')
+
+[TOOL RESULT]
+[Step 30/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 6948838/18874371
+  Sim output: TB_ERROR a=3 b=26625 expected_y=3586 actual_y=3382
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=35146
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=6214
+TB_ERROR a=1 b=16383 expected_y=2 actua .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=3 b=26625 expected_y=3586 actual_y=3382
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=35146
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=6214
+TB_ERROR a=1 b=16383 expected_y=2 actual_y=822
+TB_ERROR a=1 b=16382 expected_y=2 actual_y=822
+TB_ERROR a=1 b=16042 expected_y=2 actual_y=822
+TB_ERROR a=1 b=15911 expected_y=2 actual_y=822
+TB_ERROR a=1 b=15940 expected_y=2 actual_y=822
+TB_ERROR a=1 b=16017 expected_y=2 actual_y=822
+TB_ERROR a=1 b=16200 expected_y=2 actual_y=822
+TB_SUMMARY total=18874371 errors=6948838
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_xts_y4nh/verilator_netlist_out.log
+
+Best so far: 121514.22528560163 area_delay_product (eval 11)
+
+[ASSISTANT]
+The prefix-OR "increment" scheme was wrong (an increment needs a masked XOR, not a plain one). Reverting to the ripple incrementer:
+  -> edit_file(filename='design_v2.v', new_string="  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  wire [10:0] mant_rnd = {imp, F} + {10'd0, round};\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & &F;\n  wire [9:0]  frac_pre = mant_rnd[9:0];\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c   = imp ? ec7[5:0] : 6'd0;      // clamp(e_pre, 0)\n  wire [5:0] e_c_p1 = e_c + 6'd1;\n  wire [5:0] exp6   = carry ? e_c_p1 : e_c;\n  wire       ovf    = (ec7 >= 7'sd31) | (carry & (e_c == 6'd30));", old_string="  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  // F+1 via prefix-OR of F (5 OR2 levels) + XOR, instead of a 10-bit ripple\n  wire [8:0] orF1 = F[8:0];\n  wire [8:0] orF2 = orF1 | {orF1[7:0], 1'b0};\n  wire [8:0] orF4 = orF2 | {orF2[5:0], 3'b0};\n  wire [9:0] belowF = orF4 | {orF4[1:0], 7'b0};   // belowF[m] = |F[m:0]\n  wire [9:0] Fp1 = F ^ {belowF, 1'b1};\n\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & &F;\n  wire [9:0]  frac_pre = round ? Fp1 : F;\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c   = imp ? ec7[5:0] : 6'd0;      // clamp(e_pre, 0)\n  wire [5:0] e_c_p1 = e_c + 6'd1;\n  wire [5:0] exp6   = carry ? e_c_p1 : e_c;\n  wire       ovf    = (ec7 >= 7'sd31) | (carry & (e_c == 6'd30));")
+
+[TOOL RESULT]
+[Step 31/60]
+Error: old_string not found in file
+
+[ASSISTANT]
+  -> read_file(filename='design_v2.v', offset=120, limit=45)
+
+[TOOL RESULT]
+[Step 32/60]
+  wire [9:0] F;
+  wire       guard, sticky;
+
+  genvar gj;
+  generate
+    for (gj = 0; gj < 10; gj = gj + 1) begin : g_f
+      wire [23:10] terms;
+      for (gk = 10; gk <= 23; gk = gk + 1) begin : g_t
+        if (gk + gj <= 21)
+          assign terms[gk] = oh[gk] & prod[gk + gj];   // F[j] = prod[S+j]
+        else
+          assign terms[gk] = 1'b0;
+      end
+      assign F[gj] = |terms;
+    end
+
+    wire [23:10] tg, ts;
+    for (gk = 10; gk <= 23; gk = gk + 1) begin : g_gs
+      if (gk <= 22)
+        assign tg[gk] = oh[gk] & prod[gk - 1];         // guard = prod[S-1]
+      else
+        assign tg[gk] = 1'b0;                          // S = 23: guard = 0
+      assign ts[gk] = oh[gk] & below[gk - 2];          // sticky = |prod[S-2:0]
+    end
+    assign guard  = |tg;
+    assign sticky = |ts;
+  endgenerate
+
+  // ---------------------------------------- round to nearest, ties even
+  wire round = guard & (sticky | F[0]);
+
+  // F+1 via prefix-OR of F (5 OR2 levels) + XOR, instead of a 10-bit ripple
+  wire [8:0] orF1 = F[8:0];
+  wire [8:0] orF2 = orF1 | {orF1[7:0], 1'b0};
+  wire [8:0] orF4 = orF2 | {orF2[5:0], 3'b0};
+  wire [8:0] belowF = orF4 | {orF4[1:0], 7'b0};   // belowF[m] = |F[m:0]
+  wire [9:0] Fp1 = F ^ {belowF, 1'b1};
+
+  // carry happens exactly when the 11-bit significand field is all ones
+  wire        carry    = round & &F;
+  wire [9:0]  frac_pre = round ? Fp1 : F;
+
+  // ------------------------------------------------------- exponent path
+  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});
+  wire [5:0] e_c   = imp ? ec7[5:0] : 6'd0;      // clamp(e_pre, 0)
+
+... (showing lines 120-164 of 180; use offset/limit for more)
+
+[ASSISTANT]
+  -> edit_file(filename='design_v2.v', new_string="  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  wire [10:0] mant_rnd = {imp, F} + {10'd0, round};\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & &F;\n  wire [9:0]  frac_pre = mant_rnd[9:0];", old_string="  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  // F+1 via prefix-OR of F (5 OR2 levels) + XOR, instead of a 10-bit ripple\n  wire [8:0] orF1 = F[8:0];\n  wire [8:0] orF2 = orF1 | {orF1[7:0], 1'b0};\n  wire [8:0] orF4 = orF2 | {orF2[5:0], 3'b0};\n  wire [8:0] belowF = orF4 | {orF4[1:0], 7'b0};   // belowF[m] = |F[m:0]\n  wire [9:0] Fp1 = F ^ {belowF, 1'b1};\n\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & &F;\n  wire [9:0]  frac_pre = round ? Fp1 : F;")
+
+[TOOL RESULT]
+[Step 33/60]
+Edited file: design_v2.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v2.v')
+
+[TOOL RESULT]
+[Step 34/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/18874371
+Cost: OK
+  area_delay_product: 121829.1043671299
+  Metrics:
+    area_delay_product: 121829.1043671299
+    delay: 1278.639
+    area: 95.28029754068967
+    power_probabilistic_fixed_clock: 0.00411
+    target_delay: 500.0
+    worst_slack: -778.64
+  Worst timing path:
+    Startpoint: a[5] (input port clocked by VCLK)
+    Endpoint: y[10] (output port clocked by VCLK)
+    Path Group: VCLK
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock VCLK (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 v input external delay
+       0.00    0.00 v a[5] (in)
+     113.18  113.18 ^ _1065_/Y (NOR5xp2_ASAP7_75t_R)
+      30.63  143.81 v _1094_/Y (OAI31xp67_ASAP7_75t_R)
+      49.71  193.52 v _1097_/Y (OA211x2_ASAP7_75t_R)
+      35.52  229.04 ^ _1153_/Y (XNOR2x2_ASAP7_75t_R)
+      21.93  250.97 ^ _1154_/Y (BUFx6f_ASAP7_75t_R)
+      14.87  265.84 v _1228_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      32.27  298.11 ^ _1231_/Y (AOI31xp33_ASAP7_75t_R)
+      55.93  354.04 v _1241_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      39.54  393.58 ^ _1471_/Y (NAND2x1_ASAP7_75t_R)
+      46.46  440.04 v _1475_/Y (XNOR2x2_ASAP7_75t_R)
+      27.61  467.65 v _1547_/Y (XOR2x1_ASAP7_75t_R)
+      27.16  494.81 v _1548_/Y (XNOR2x1_ASAP7_75t_R)
+      30.20  525.01 v _1632_/Y (XOR2x1_ASAP7_75t_R)
+      27.09  552.10 v _1633_/Y (XNOR2x1_ASAP7_75t_R)
+      27.67  579.77 v _1634_/Y (XNOR2xp5_ASAP7_75t_R)
+      33.30  613.07 v _1641_/Y (XNOR2xp5_ASAP7_75t_R)
+      27.25  640.32 v _1678_/Y (XOR2xp5_ASAP7_75t_R)
+      30.20  670.52 v _1679_/Y (XNOR2xp5_ASAP7_75t_R)
+      35.93  706.45 v _1680_/Y (XNOR2xp5_ASAP7_75t_R)
+      25.35  731.80 ^ _1766_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      28.90  760.70 v _1772_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      28.90  789.60 ^ _1776_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      29.68  819.28 v _1784_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      39.26  858.54 ^ _1786_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.01  892.55 v _1794_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      51.65  944.20 ^ _1801_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      38.17  982.37 ^ _1861_/Y (OR2x2_ASAP7_75t_R)
+      18.78 1001.15 ^ _1862_/Y (BUFx6f_ASAP7_75t_R)
+       9.41 1010.56 v _1957_/Y (NOR3xp33_ASAP7_75t_R)
+      82.68 1093.24 ^ _1965_/Y (NOR5xp2_ASAP7_75t_R)
+      51.28 1144.52 ^ _1966_/Y (OR5x1_ASAP7_75t_R)
+      24.81 1169.33 ^ _1978_/Y (OR3x2_ASAP7_75t_R)
+      18.17 1187.50 v _1990_/Y (OAI311xp33_ASAP7_75t_R)
+      29.16 1216.66 v _1991_/Y (BUFx3_ASAP7_75t_R)
+      22.91 1239.58 v _1992_/Y (BUFx12f_ASAP7_75t_R)
+      22.01 1261.59 v _2032_/Y (AO21x1_ASAP7_75t_R)
+      17.05 1278.64 v _2033_/Y (BUFx2_ASAP7_75t_R)
+       0.00 1278.64 v y[10] (out)
+            1278.64   data arrival time
+    
+     500.00  500.00   clock VCLK (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+       0.00  500.00   output external delay
+             500.00   data required time
+    ---------------------------------------------------------
+             500.00   data required time
+            -1278.64   data arrival time
+    ---------------------------------------------------------
+            -778.64   slack (VIOLATED)
+
+Best so far: 121514.22528560163 area_delay_product (eval 11)
+
+[ASSISTANT]
+The prefix-OR attempt failed earlier because an increment needs the *AND*-prefix (all lower bits 1), not OR. Implementing a proper 4-level prefix-AND incrementer:
+  -> edit_file(filename='design_v2.v', new_string="  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  // increment F by `round` via a 4-level prefix-AND (mask[j] = &F[j-1:0]):\n  // F+1 toggles exactly those bits below (and including) the first zero\n  wire [9:0] q1 = F  & {F[8:0],   1'b1};\n  wire [9:0] q2 = q1 & {q1[7:0],  2'b11};\n  wire [9:0] q4 = q2 & {q2[5:0],  4'b1111};\n  wire [9:0] q8 = q4 & {q4[1:0],  8'b11111111};   // q8[j] = &F[j:0]\n\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & q8[9];\n  wire [9:0]  frac_pre = F ^ (round ? {q8[8:0], 1'b1} : 10'b0);", old_string="  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  wire [10:0] mant_rnd = {imp, F} + {10'd0, round};\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & &F;\n  wire [9:0]  frac_pre = mant_rnd[9:0];")
+
+[TOOL RESULT]
+[Step 35/60]
+Edited file: design_v2.v
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v2.v')
+
+[TOOL RESULT]
+[Step 36/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/18874371
+Cost: OK
+  area_delay_product: 116905.83438837831
+  Metrics:
+    area_delay_product: 116905.83438837831
+    delay: 1260.5302
+    area: 92.74338241826996
+    power_probabilistic_fixed_clock: 0.00444
+    target_delay: 500.0
+    worst_slack: -760.53
+  Worst timing path:
+    Startpoint: b[5] (input port clocked by VCLK)
+    Endpoint: y[12] (output port clocked by VCLK)
+    Path Group: VCLK
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock VCLK (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 v input external delay
+       0.00    0.00 v b[5] (in)
+     107.19  107.19 ^ _1046_/Y (NOR5xp2_ASAP7_75t_R)
+      75.34  182.53 v _1060_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      41.25  223.78 ^ _1159_/Y (NOR2xp33_ASAP7_75t_R)
+      33.50  257.28 v _1191_/Y (NOR2xp33_ASAP7_75t_R)
+      59.69  316.97 ^ _1316_/Y (AOI32xp33_ASAP7_75t_R)
+      37.93  354.90 v _1389_/Y (NOR2xp67_ASAP7_75t_R)
+      30.58  385.48 ^ _1390_/Y (MAJIxp5_ASAP7_75t_R)
+      37.33  422.81 ^ _1395_/Y (XOR2xp5_ASAP7_75t_R)
+      34.22  457.03 ^ _1477_/Y (XOR2xp5_ASAP7_75t_R)
+      26.47  483.50 ^ _1478_/Y (XNOR2xp5_ASAP7_75t_R)
+      43.85  527.35 v _1485_/Y (XNOR2x2_ASAP7_75t_R)
+      24.51  551.85 v _1549_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.95  586.81 v _1550_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.27  617.08 v _1698_/Y (XNOR2xp5_ASAP7_75t_R)
+      28.68  645.76 ^ _1699_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.45  676.21 ^ _1700_/Y (XOR2x1_ASAP7_75t_R)
+      34.03  710.25 v _1702_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      30.64  740.88 ^ _1705_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      29.78  770.66 v _1712_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      33.88  804.54 ^ _1715_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      32.74  837.28 v _1724_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      48.13  885.41 v _1728_/Y (OA211x2_ASAP7_75t_R)
+      46.97  932.38 ^ _1731_/Y (OAI31xp67_ASAP7_75t_R)
+      34.78  967.16 ^ _1732_/Y (BUFx6f_ASAP7_75t_R)
+      20.33  987.48 v _1778_/Y (AOI21xp5_ASAP7_75t_R)
+      52.66 1040.15 ^ _1835_/Y (OAI211xp5_ASAP7_75t_R)
+      29.75 1069.90 v _1909_/Y (NAND3x1_ASAP7_75t_R)
+      40.67 1110.56 v _1910_/Y (OR3x1_ASAP7_75t_R)
+      76.10 1186.67 ^ _1918_/Y (NOR5xp2_ASAP7_75t_R)
+      30.86 1217.53 v _1950_/Y (OAI21xp33_ASAP7_75t_R)
+      23.19 1240.71 ^ _1951_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      19.82 1260.53 ^ _1952_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1260.53 ^ y[12] (out)
+            1260.53   data arrival time
+    
+     500.00  500.00   clock VCLK (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+       0.00  500.00   output external delay
+             500.00   data required time
+    ---------------------------------------------------------
+             500.00   data required time
+            -1260.53   data arrival time
+    ---------------------------------------------------------
+            -760.53   slack (VIOLATED)
+
+Best so far: 116905.83438837831 area_delay_product (eval 16)
+
+[ASSISTANT]
+v2 is correct at 116906. The critical path is now dominated by Yosys's default array multiplier (~790ps of ripple-carry rows). I'll replace `m_a * m_b` with a hand-built Wallace CSA tree (5 compressor passes, counts computed at elaboration by a constant function) followed by a Kogge-Stone carry-propagate adder — much shallower logic:
+  -> create_file(content="// fp_mul_e5f10 -- IEEE binary16 (E5M10) multiplier with full subnormal support.\n//\n// Architecture:\n//   * Subnormal input fractions are pre-normalised (tree leading-zero encoder\n//     + small barrel shift) so every non-zero significand has its leading one\n//     in bit 10 of an 11-bit significand m; the exponent is adjusted by (-nlz).\n//     value(m) = m * 2^(e_adj - 25).\n//   * The 11x11 significand product is built from a Wallace CSA tree\n//     (compressor counts computed at elaboration) plus a Kogge-Stone CPA,\n//     instead of a ripple array multiplier.\n//   * A single alignment position S = clamp(max(26 - s_adj, 10 + p21), 10, 23)\n//     serves normal and subnormal results; F = (prod >> S)[9:0] comes from a\n//     one-hot AND-OR plane (one-hot codes are early exponent compares).\n//     One round-to-nearest-even step (guard = prod[S-1], sticky = |prod[S-2:0]).\n//   * exp = clamp(e_pre, 0) + carry with e_pre = s_adj - 15 + p21.\n\nmodule fp_mul_e5f10 (a, b, y);\n  input  [15:0] a;\n  input  [15:0] b;\n  output [15:0] y;\n\n  // ------------------------------------------------------------- unpack\n  wire [4:0] e_a = a[14:10];\n  wire [4:0] e_b = b[14:10];\n  wire [9:0] f_a = a[9:0];\n  wire [9:0] f_b = b[9:0];\n  wire       s_y = a[15] ^ b[15];\n\n  // ------------------------------------------------------------- classify\n  wire e_a_zero = ~|e_a;\n  wire e_b_zero = ~|e_b;\n  wire e_a_max  =  &e_a;\n  wire e_b_max  =  &e_b;\n  wire f_a_zero = ~|f_a;\n  wire f_b_zero = ~|f_b;\n\n  wire zero_a = e_a_zero & f_a_zero;\n  wire zero_b = e_b_zero & f_b_zero;\n  wire nan_a  = e_a_max  & ~f_a_zero;\n  wire nan_b  = e_b_max  & ~f_b_zero;\n  wire inf_a  = e_a_max  &  f_a_zero;\n  wire inf_b  = e_b_max  &  f_b_zero;\n\n  wire is_nan  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);\n  wire is_inf  = inf_a | inf_b;\n  wire zero_in = zero_a | zero_b;\n\n  // ------------------------------------- normalise subnormal fractions\n  function [2:0] nlz5;\n    input [4:0] x;\n    begin\n      nlz5[2] = ~x[4] & ~x[3] & ~x[2] & ~x[1];\n      nlz5[1] = ~x[4] & ~x[3] & (x[2] | x[1]);\n      nlz5[0] = (~x[4] & (x[3] | (~x[2] & x[1]))) | ~|x;\n    end\n  endfunction\n\n  function [3:0] nlz10;\n    input [9:0] f;\n    begin\n      nlz10 = (|f[9:5]) ? {1'b0, nlz5(f[9:5])}\n                        : (4'd5 + {1'b0, nlz5(f[4:0])});\n    end\n  endfunction\n\n  wire [3:0] nlz_a = e_a_zero ? nlz10(f_a) : 4'd0;\n  wire [3:0] nlz_b = e_b_zero ? nlz10(f_b) : 4'd0;\n\n  wire [10:0] m_a = e_a_zero ? ({1'b0, f_a} << (nlz_a + 4'd1)) : {1'b1, f_a};\n  wire [10:0] m_b = e_b_zero ? ({1'b0, f_b} << (nlz_b + 4'd1)) : {1'b1, f_b};\n\n  wire [5:0] ea_adj = e_a_zero ? (6'd0 - {2'b0, nlz_a}) : {1'b0, e_a};\n  wire [5:0] eb_adj = e_b_zero ? (6'd0 - {2'b0, nlz_b}) : {1'b0, e_b};\n\n  wire signed [6:0] s_adj = {{1{ea_adj[5]}}, ea_adj}\n                          + {{1{eb_adj[5]}}, eb_adj};\n\n  // ------------------- 11x11 unsigned product: Wallace CSA tree + KS CPA\n  localparam int NC = 24;   // columns 0..23 (22,23 are constant zero)\n  localparam int SS = 12;   // slots per column\n  localparam int NP = 5;    // CSA reduction passes\n\n  // height of column k at the moment it is processed in pass p (0-based)\n  function automatic int h_in(input int p, input int k);\n    reg [NC*5-1:0] c;\n    int h, nfa, nha, tmp;\n    tmp = 0;\n    for (int kk = 0; kk < NC; kk++) begin\n      int hh = 0;\n      for (int jb = 0; jb <= 10; jb++)\n        if (kk >= jb && kk - jb <= 10) hh = hh + 1;\n      c[kk*5 +: 5] = hh;\n    end\n    for (int pp = 0; pp <= p; pp++)\n      for (int kk = 0; kk < NC; kk++) begin\n        h   = c[kk*5 +: 5];\n        if (pp == p && kk == k) tmp = h;\n        nfa = h/3;\n        nha = (h%3)/2;\n        c[kk*5 +: 5]      = h - 2*nfa - nha;\n        if (kk+1 < NC) c[(kk+1)*5 +: 5] = c[(kk+1)*5 +: 5] + nfa + nha;\n      end\n    h_in = tmp;\n  endfunction\n\n  // W[stage][column][slot], stage 0 = partial products, 1..5 = after passes\n  wire [(NP+1)*NC*SS-1:0] W;\n\n  genvar p, k, j;\n  generate\n    // partial products: column k, slot j <-> row jb, bit k-jb of m_a\n    for (k = 0; k < NC; k = k + 1) begin : g_pp\n      for (j = 0; j < SS; j = j + 1) begin : g_ppl\n        localparam int JB = ((k > 10) ? k - 10 : 0) + j;\n        if (JB <= 10 && JB <= k)\n          assign W[k*SS + j] = m_a[k - JB] & m_b[JB];\n        else\n          assign W[k*SS + j] = 1'b0;\n      end\n    end\n\n    // CSA passes (local Wallace rule: nfa = h/3, nha = (h%3)/2)\n    for (p = 0; p < NP; p = p + 1) begin : g_pass\n      for (k = 0; k < NC; k = k + 1) begin : g_col\n        localparam int H    = h_in(p, k);\n        localparam int NFA  = H/3;\n        localparam int NHA  = (H%3)/2;\n        localparam int INCO = H - 2*NFA - NHA;   // in-column output bits\n        localparam int HM1  = h_in(p, (k > 0) ? k-1 : 0);\n        localparam int RP   = (k > 0) ? (HM1/3 + (HM1%3)/2) : 0;\n        for (j = 0; j < SS; j = j + 1) begin : g_slot\n          if (j < NFA) begin : g_fa\n            wire x  = W[p*NC*SS + k*SS + 3*j];\n            wire yv = W[p*NC*SS + k*SS + 3*j + 1];\n            wire zv = W[p*NC*SS + k*SS + 3*j + 2];\n            assign W[(p+1)*NC*SS + k*SS + j] = x ^ yv ^ zv;\n            if (k + 1 < NC)\n              assign W[(p+1)*NC*SS + (k+1)*SS + INCO + j] =\n                     (x & yv) | (x & zv) | (yv & zv);\n          end else if (j < NFA + NHA) begin : g_ha\n            localparam int B = 3*NFA + 2*(j - NFA);\n            wire x  = W[p*NC*SS + k*SS + B];\n            wire yv = W[p*NC*SS + k*SS + B + 1];\n            assign W[(p+1)*NC*SS + k*SS + j] = x ^ yv;\n            if (k + 1 < NC)\n              assign W[(p+1)*NC*SS + (k+1)*SS + INCO + j] = x & yv;\n          end else if (j < INCO) begin : g_thru\n            localparam int T = 3*NFA + 2*NHA + (j - NFA - NHA);\n            assign W[(p+1)*NC*SS + k*SS + j] = W[p*NC*SS + k*SS + T];\n          end else if (j >= INCO + RP) begin : g_z\n            assign W[(p+1)*NC*SS + k*SS + j] = 1'b0;\n          end\n          // slots [INCO, INCO+RP) are driven by column k-1's carries\n        end\n      end\n    end\n\n    // final two rows (column total IN5 + RP5 <= 2 bits, compacted from 0)\n    for (k = 0; k < 22; k = k + 1) begin : g_rows\n      localparam int H5   = h_in(NP-1, k);\n      localparam int NFA5 = H5/3;\n      localparam int NHA5 = (H5%3)/2;\n      localparam int IN5  = H5 - 2*NFA5 - NHA5;\n      localparam int HM15 = h_in(NP-1, (k > 0) ? k-1 : 0);\n      localparam int RP5  = (k > 0) ? (HM15/3 + (HM15%3)/2) : 0;\n      wire [21:0] rowA, rowB;\n      assign rowA[k] = W[NP*NC*SS + k*SS];\n      assign rowB[k] = (IN5 >= 2) ? W[NP*NC*SS + k*SS + 1] :\n                       (RP5 >= 1) ? W[NP*NC*SS + k*SS + IN5] : 1'b0;\n    end\n  endgenerate\n\n  wire [21:0] rA;\n  wire [21:0] rB;\n  genvar kb;\n  generate\n    for (kb = 0; kb < 22; kb = kb + 1) begin : g_rw\n      assign rA[kb] = g_rows[kb].rowA[kb];\n      assign rB[kb] = g_rows[kb].rowB[kb];\n    end\n  endgenerate\n\n  // Kogge-Stone carry-propagate adder (22 bit)\n  wire [21:0] g0 = rA & rB;\n  wire [21:0] p0 = rA ^ rB;\n  wire [21:0] g1 = g0 | (p0 & {g0[20:0], 1'b0});\n  wire [21:0] p1 = p0 & {p0[20:0], 1'b0};\n  wire [21:0] g2 = g1 | (p1 & {g1[19:0], 2'b0});\n  wire [21:0] p2 = p1 & {p1[19:0], 2'b0};\n  wire [21:0] g3 = g2 | (p2 & {g2[17:0], 4'b0});\n  wire [21:0] p3 = p2 & {p2[17:0], 4'b0};\n  wire [21:0] g4 = g3 | (p3 & {g3[13:0], 8'b0});\n  wire [21:0] p4 = p3 & {p3[13:0], 8'b0};\n  wire [21:0] g5 = g4 | (p4 & {g4[5:0], 16'b0});\n  wire [21:0] p5 = p4 & {p4[5:0], 16'b0};\n  wire [21:0] prod = p0 ^ {g5[20:0], 1'b0};\n\n  wire        p21  = prod[21];\n\n  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)\n  wire [21:0] or1   = prod | {prod[20:0], 1'b0};\n  wire [21:0] or2   = or1  | {or1[19:0],  2'b0};\n  wire [21:0] or4   = or2  | {or2[17:0],  4'b0};\n  wire [21:0] or8   = or4  | {or4[13:0],  8'b0};\n  wire [21:0] below = or8  | {or8[5:0],  16'b0};\n\n  // --------------------------------------- alignment position, one-hot\n  wire oh10 = (s_adj >= 7'sd16) & ~p21;                       // S = 10\n  wire oh11 = (s_adj == 7'sd15) | (p21 & (s_adj >= 7'sd16));  // S = 11\n  wire oh23 = (s_adj <= 7'sd3);                               // S = 23\n\n  wire [23:10] oh;\n  assign oh[10] = oh10;\n  assign oh[11] = oh11;\n  assign oh[23] = oh23;\n\n  genvar gk;\n  generate\n    for (gk = 12; gk <= 22; gk = gk + 1) begin : g_oh\n      assign oh[gk] = (s_adj == (26 - gk));\n    end\n  endgenerate\n\n  wire imp = oh[10] | (oh[11] & p21);\n\n  // ------------------------------------ one-hot AND-OR extraction plane\n  wire [9:0] F;\n  wire       guard, sticky;\n\n  genvar gj;\n  generate\n    for (gj = 0; gj < 10; gj = gj + 1) begin : g_f\n      wire [23:10] terms;\n      for (gk = 10; gk <= 23; gk = gk + 1) begin : g_t\n        if (gk + gj <= 21)\n          assign terms[gk] = oh[gk] & prod[gk + gj];   // F[j] = prod[S+j]\n        else\n          assign terms[gk] = 1'b0;\n      end\n      assign F[gj] = |terms;\n    end\n\n    wire [23:10] tg, ts;\n    for (gk = 10; gk <= 23; gk = gk + 1) begin : g_gs\n      if (gk <= 22)\n        assign tg[gk] = oh[gk] & prod[gk - 1];         // guard = prod[S-1]\n      else\n        assign tg[gk] = 1'b0;                          // S = 23: guard = 0\n      assign ts[gk] = oh[gk] & below[gk - 2];          // sticky = |prod[S-2:0]\n    end\n    assign guard  = |tg;\n    assign sticky = |ts;\n  endgenerate\n\n  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  // increment F by `round` via a 4-level prefix-AND (q8[j] = &F[j:0])\n  wire [9:0] q1 = F  & {F[8:0],   1'b1};\n  wire [9:0] q2 = q1 & {q1[7:0],  2'b11};\n  wire [9:0] q4 = q2 & {q2[5:0],  4'b1111};\n  wire [9:0] q8 = q4 & {q4[1:0],  8'b11111111};\n\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & q8[9];\n  wire [9:0]  frac_pre = F ^ (round ? {q8[8:0], 1'b1} : 10'b0);\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c    = imp ? ec7[5:0] : 6'd0;     // clamp(e_pre, 0)\n  wire [5:0] e_c_p1 = e_c + 6'd1;\n  wire [5:0] exp6   = carry ? e_c_p1 : e_c;\n  wire       ovf    = (ec7 >= 7'sd31) | (carry & (e_c == 6'd30));\n\n  // ------------------------------------------------------------- pack\n  wire is_inf_y = is_inf | ovf;\n\n  wire [4:0] exp_y = (is_nan | is_inf_y) ? 5'd31 :\n                     zero_in             ? 5'd0  :\n                                           exp6[4:0];\n  wire [9:0] frac_y = is_nan ? 10'h200 :\n                      (is_inf_y | zero_in) ? 10'd0 :\n                                             frac_pre;\n\n  assign y = {(is_nan ? 1'b0 : s_y), exp_y, frac_y};\nendmodule\n", filename='design_v3.sv')
+
+[TOOL RESULT]
+[Step 37/60]
+Created file: design_v3.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.sv')
+
+[TOOL RESULT]
+[Step 38/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 13090868/18874371
+  Sim output: TB_ERROR a=3 b=26625 expected_y=3586 actual_y=3584
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=35518
+TB_ERROR a=1 b=21503 expected_y=64 actual_y=63
+TB_ERROR a=1 b=21502 expected_y=64 actual_y .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Yosys synthesis failed to produce a netlist (netlist.v missing/empty; yosys exit=256). A common cause is an inferred latch in an always_comb block (incomplete assignment) or another synthesis error. Yosys error:
+/scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/design_v3.sv:89: ERROR: Unsupported language construct in constant function
+
+Best so far: 116905.83438837831 area_delay_product (eval 16)
+
+[ASSISTANT]
+The constant function isn't supported — I'll compute the compressor schedule in Python and hardcode the resulting counts:
+  -> create_file(content='NC = 24\nSS = 12\nNP = 5\n\nc = [[0]*NC for _ in range(NP+1)]\nfor k in range(NC):\n    h = 0\n    for jb in range(11):\n        if jb <= k and k - jb <= 10:\n            h += 1\n    c[0][k] = h\n\nsched = []   # sched[p][k] = (nfa, nha, inco, rp)\nfor p in range(NP):\n    nxt = [0]*NC\n    for k in range(NC):\n        h = c[p][k]\n        nfa = h//3\n        nha = (h % 3)//2\n        inco = h - 2*nfa - nha\n        rp = 0\n        if k > 0:\n            hm = c[p][k-1]\n            rp = hm//3 + (hm % 3)//2\n        sched.append((p, k, nfa, nha, inco, rp))\n        nxt[k] = inco\n        if k+1 < NC:\n            nxt[k+1] += nfa + nha\n    c[p+1] = nxt\n\n# final height per column after last pass (for row selection)\nfinal = c[NP]\nprint("// final heights:", final)\n# sanity: total bits per column <= 2?\nprint("// max final:", max(final))\nfor p in range(NP):\n    for k in range(NC):\n        nfa, nha, inco, rp = sched[p*NC + k][2:]\n        # sanity: inco + rp <= SS\n        assert inco + rp <= SS, (p, k, inco, rp)\nprint("// schedule ok")\n\n# Also print the schedule as compact verilog localparams\nlines = []\nfor p in range(NP):\n    vals = []\n    for k in range(NC):\n        nfa, nha, inco, rp = sched[p*NC + k][2:]\n        vals.append((nfa, nha, inco, rp))\n    lines.append(vals)\n\nimport json\nwith open(\'/tmp/sched.json\',\'w\') as fh:\n    json.dump(lines, fh)\nprint("// wrote /tmp/sched.json")\n', filename='gen_sched.py')
+
+[TOOL RESULT]
+[Step 39/60]
+Created file: gen_sched.py
+
+[ASSISTANT]
+  -> edit_file(filename='design_v3.sv', new_string='  // height of column k at the moment it is processed in pass p (0-based)\n  // (precomputed externally; NFA/NHA/INCO/RP localparams below are the result)\n', old_string='  // height of column k at the moment it is processed in pass p (0-based)\n  function automatic int h_in(input int p, input int k);\n    reg [NC*5-1:0] c;\n    int h, nfa, nha, tmp;\n    tmp = 0;\n    for (int kk = 0; kk < NC; kk++) begin\n      int hh = 0;\n      for (int jb = 0; jb <= 10; jb++)\n        if (kk >= jb && kk - jb <= 10) hh = hh + 1;\n      c[kk*5 +: 5] = hh;\n    end\n    for (int pp = 0; pp <= p; pp++)\n      for (int kk = 0; kk < NC; kk++) begin\n        h   = c[kk*5 +: 5];\n        if (pp == p && kk == k) tmp = h;\n        nfa = h/3;\n        nha = (h%3)/2;\n        c[kk*5 +: 5]      = h - 2*nfa - nha;\n        if (kk+1 < NC) c[(kk+1)*5 +: 5] = c[(kk+1)*5 +: 5] + nfa + nha;\n      end\n    h_in = tmp;\n  endfunction\n')
+
+[TOOL RESULT]
+[Step 40/60]
+Edited file: design_v3.sv
+
+[ASSISTANT]
+Now replace the `h_in` calls with hardcoded schedule arrays:
+  -> edit_file(filename='design_v3.sv', new_string="  // CSA passes (local Wallace rule: nfa = h/3, nha = (h%3)/2)\n  // NFA/NHA/INCO/RP tables precomputed externally (gen_sched.py)\n  localparam int unsigned NFA_T [NP] = '{...};\n\n", old_string='  // CSA passes (local Wallace rule: nfa = h/3, nha = (h%3)/2)\n')
+
+[TOOL RESULT]
+[Step 41/60]
+Edited file: design_v3.sv
+
+[ASSISTANT]
+The constant-function approach isn't synthesizable. I'll restructure the multiplier as a **regular row-grouped Wallace tree** (rows grouped in threes per level: 11→8→6→4→3→2) which needs no schedule tables — every level is a uniform per-column FA on fixed row triples, followed by a Kogge-Stone CPA. This is much shallower than Yosys's default ripple array:
+  -> replace_file(content="// fp_mul_e5f10 -- IEEE binary16 (E5M10) multiplier with full subnormal support.\n//\n// Architecture:\n//   * Subnormal input fractions are pre-normalised (tree leading-zero encoder\n//     + small barrel shift) so every non-zero significand has its leading one\n//     in bit 10 of an 11-bit significand m; the exponent is adjusted by (-nlz).\n//     value(m) = m * 2^(e_adj - 25).\n//   * The 11x11 significand product uses a row-grouped Wallace CSA tree\n//     (11 -> 8 -> 6 -> 4 -> 3 -> 2 rows, uniform FA per column) followed by a\n//     Kogge-Stone carry-propagate adder.\n//   * A single alignment position S = clamp(max(26 - s_adj, 10 + p21), 10, 23)\n//     serves normal and subnormal results; F = (prod >> S)[9:0] comes from a\n//     one-hot AND-OR plane (one-hot codes are early exponent compares).\n//     One round-to-nearest-even step (guard = prod[S-1], sticky = |prod[S-2:0]).\n//   * exp = clamp(e_pre, 0) + carry with e_pre = s_adj - 15 + p21.\n\nmodule fp_mul_e5f10 (a, b, y);\n  input  [15:0] a;\n  input  [15:0] b;\n  output [15:0] y;\n\n  // ------------------------------------------------------------- unpack\n  wire [4:0] e_a = a[14:10];\n  wire [4:0] e_b = b[14:10];\n  wire [9:0] f_a = a[9:0];\n  wire [9:0] f_b = b[9:0];\n  wire       s_y = a[15] ^ b[15];\n\n  // ------------------------------------------------------------- classify\n  wire e_a_zero = ~|e_a;\n  wire e_b_zero = ~|e_b;\n  wire e_a_max  =  &e_a;\n  wire e_b_max  =  &e_b;\n  wire f_a_zero = ~|f_a;\n  wire f_b_zero = ~|f_b;\n\n  wire zero_a = e_a_zero & f_a_zero;\n  wire zero_b = e_b_zero & f_b_zero;\n  wire nan_a  = e_a_max  & ~f_a_zero;\n  wire nan_b  = e_b_max  & ~f_b_zero;\n  wire inf_a  = e_a_max  &  f_a_zero;\n  wire inf_b  = e_b_max  &  f_b_zero;\n\n  wire is_nan  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);\n  wire is_inf  = inf_a | inf_b;\n  wire zero_in = zero_a | zero_b;\n\n  // ------------------------------------- normalise subnormal fractions\n  function [2:0] nlz5;\n    input [4:0] x;\n    begin\n      nlz5[2] = ~x[4] & ~x[3] & ~x[2] & ~x[1];\n      nlz5[1] = ~x[4] & ~x[3] & (x[2] | x[1]);\n      nlz5[0] = (~x[4] & (x[3] | (~x[2] & x[1]))) | ~|x;\n    end\n  endfunction\n\n  function [3:0] nlz10;\n    input [9:0] f;\n    begin\n      nlz10 = (|f[9:5]) ? {1'b0, nlz5(f[9:5])}\n                        : (4'd5 + {1'b0, nlz5(f[4:0])});\n    end\n  endfunction\n\n  wire [3:0] nlz_a = e_a_zero ? nlz10(f_a) : 4'd0;\n  wire [3:0] nlz_b = e_b_zero ? nlz10(f_b) : 4'd0;\n\n  wire [10:0] m_a = e_a_zero ? ({1'b0, f_a} << (nlz_a + 4'd1)) : {1'b1, f_a};\n  wire [10:0] m_b = e_b_zero ? ({1'b0, f_b} << (nlz_b + 4'd1)) : {1'b1, f_b};\n\n  wire [5:0] ea_adj = e_a_zero ? (6'd0 - {2'b0, nlz_a}) : {1'b0, e_a};\n  wire [5:0] eb_adj = e_b_zero ? (6'd0 - {2'b0, nlz_b}) : {1'b0, e_b};\n\n  wire signed [6:0] s_adj = {{1{ea_adj[5]}}, ea_adj}\n                          + {{1{eb_adj[5]}}, eb_adj};\n\n  // ------------- 11x11 unsigned product: row-grouped Wallace tree + KS CPA\n  localparam int CW = 26;   // row width in columns\n\n  // initial rows: row i = m_a << i, i = 0..10\n  wire [CW-1:0] R0 [0:10];\n  genvar gi, gk;\n  generate\n    for (gi = 0; gi <= 10; gi = gi + 1) begin : g_r0\n      assign R0[gi] = {{(15-gi){1'b0}}, m_a, {gi{1'b0}}};\n    end\n  endgenerate\n\n  // FA of one column triple: sum -> same column, carry -> next column\n  // (row-level grouping: 11 -> 8 -> 6 -> 4 -> 3 -> 2 rows over 5 levels)\n  wire [CW-1:0] R1 [0:7];\n  wire [CW-1:0] R2 [0:5];\n  wire [CW-1:0] R3 [0:3];\n  wire [CW-1:0] R4 [0:2];\n  wire [CW-1:0] R5 [0:1];\n\n  generate\n    // ---- level 1: groups (0,1,2) (3,4,5) (6,7,8), leftover 9,10\n    for (gk = 0; gk < CW; gk = gk + 1) begin : g_l1\n      wire [2:0] g0 = R0[0][gk] & 3'b111 & {3{1'b1}};  // placeholder\n    end\n  endgenerate\n\n  // helper: build one compressed row pair\n  `define CSA_ROW(OUTS, OUTC, INA, INB, INC) \\\n    generate \\\n      for (gk = 0; gk < CW; gk = gk + 1) begin : g_csa_``OUTS`` \\\n        wire x = INA[gk]; \\\n        wire yv = INB[gk]; \\\n        wire zv = INC[gk]; \\\n        assign OUTS[gk] = x ^ yv ^ zv; \\\n        assign OUTC[gk] = (gk == 0) ? 1'b0 : \\\n                          ((INA[gk-1] & INB[gk-1]) | (INA[gk-1] & INC[gk-1]) | \\\n                           (INB[gk-1] & INC[gk-1])); \\\n      end \\\n    endgenerate\n\n  generate\n    // level 1\n    `CSA_ROW(R1[0], R1[1], R0[0], R0[1], R0[2])\n    `CSA_ROW(R1[2], R1[3], R0[3], R0[4], R0[5])\n    `CSA_ROW(R1[4], R1[5], R0[6], R0[7], R0[8])\n    for (gk = 0; gk < CW; gk = gk + 1) begin : g_l1p\n      assign R1[6][gk] = R0[9][gk];\n      assign R1[7][gk] = R0[10][gk];\n    end\n    // level 2: groups (0,1,2) (3,4,5), leftover 6,7\n    `CSA_ROW(R2[0], R2[1], R1[0], R1[1], R1[2])\n    `CSA_ROW(R2[2], R2[3], R1[3], R1[4], R1[5])\n    for (gk = 0; gk < CW; gk = gk + 1) begin : g_l2p\n      assign R2[4][gk] = R1[6][gk];\n      assign R2[5][gk] = R1[7][gk];\n    end\n    // level 3: groups (0,1,2) (3,4,5)\n    `CSA_ROW(R3[0], R3[1], R2[0], R2[1], R2[2])\n    `CSA_ROW(R3[2], R3[3], R2[3], R2[4], R2[5])\n    // level 4: group (0,1,2), leftover 3\n    `CSA_ROW(R4[0], R4[1], R3[0], R3[1], R3[2])\n    for (gk = 0; gk < CW; gk = gk + 1) begin : g_l4p\n      assign R4[2][gk] = R3[3][gk];\n    end\n    // level 5: group (0,1,2)\n    `CSA_ROW(R5[0], R5[1], R4[0], R4[1], R4[2])\n  endgenerate\n\n  // Kogge-Stone carry-propagate adder (26 bit)\n  wire [25:0] rA = R5[0];\n  wire [25:0] rB = R5[1];\n  wire [25:0] g0 = rA & rB;\n  wire [25:0] p0 = rA ^ rB;\n  wire [25:0] g1 = g0 | (p0 & {g0[24:0], 1'b0});\n  wire [25:0] p1 = p0 & {p0[24:0], 1'b0};\n  wire [25:0] g2 = g1 | (p1 & {g1[23:0], 2'b0});\n  wire [25:0] p2 = p1 & {p1[23:0], 2'b0};\n  wire [25:0] g3 = g2 | (p2 & {g2[21:0], 4'b0});\n  wire [25:0] p3 = p2 & {p2[21:0], 4'b0};\n  wire [25:0] g4 = g3 | (p3 & {g3[17:0], 8'b0});\n  wire [25:0] p4 = p3 & {p3[17:0], 8'b0};\n  wire [25:0] g5 = g4 | (p4 & {p4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ {g5[24:0], 1'b0};\n  wire [21:0] prod = prod26[21:0];\n\n  wire        p21  = prod[21];\n\n  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)\n  wire [21:0] or1   = prod | {prod[20:0], 1'b0};\n  wire [21:0] or2   = or1  | {or1[19:0],  2'b0};\n  wire [21:0] or4   = or2  | {or2[17:0],  4'b0};\n  wire [21:0] or8   = or4  | {or4[13:0],  8'b0};\n  wire [21:0] below = or8  | {or8[5:0],  16'b0};\n\n  // --------------------------------------- alignment position, one-hot\n  wire oh10 = (s_adj >= 7'sd16) & ~p21;                       // S = 10\n  wire oh11 = (s_adj == 7'sd15) | (p21 & (s_adj >= 7'sd16));  // S = 11\n  wire oh23 = (s_adj <= 7'sd3);                               // S = 23\n\n  wire [23:10] oh;\n  assign oh[10] = oh10;\n  assign oh[11] = oh11;\n  assign oh[23] = oh23;\n\n  genvar gk2;\n  generate\n    for (gk2 = 12; gk2 <= 22; gk2 = gk2 + 1) begin : g_oh\n      assign oh[gk2] = (s_adj == (26 - gk2));\n    end\n  endgenerate\n\n  wire imp = oh[10] | (oh[11] & p21);\n\n  // ------------------------------------ one-hot AND-OR extraction plane\n  wire [9:0] F;\n  wire       guard, sticky;\n\n  genvar gj;\n  generate\n    for (gj = 0; gj < 10; gj = gj + 1) begin : g_f\n      wire [23:10] terms;\n      for (gk2 = 10; gk2 <= 23; gk2 = gk2 + 1) begin : g_t\n        if (gk2 + gj <= 21)\n          assign terms[gk2] = oh[gk2] & prod[gk2 + gj];  // F[j] = prod[S+j]\n        else\n          assign terms[gk2] = 1'b0;\n      end\n      assign F[gj] = |terms;\n    end\n\n    wire [23:10] tg, ts;\n    for (gk2 = 10; gk2 <= 23; gk2 = gk2 + 1) begin : g_gs\n      if (gk2 <= 22)\n        assign tg[gk2] = oh[gk2] & prod[gk2 - 1];        // guard = prod[S-1]\n      else\n        assign tg[gk2] = 1'b0;                           // S = 23: guard = 0\n      assign ts[gk2] = oh[gk2] & below[gk2 - 2];         // sticky = |prod[S-2:0]\n    end\n    assign guard  = |tg;\n    assign sticky = |ts;\n  endgenerate\n\n  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  // increment F by `round` via a 4-level prefix-AND (q8[j] = &F[j:0])\n  wire [9:0] q1 = F  & {F[8:0],   1'b1};\n  wire [9:0] q2 = q1 & {q1[7:0],  2'b11};\n  wire [9:0] q4 = q2 & {q2[5:0],  4'b1111};\n  wire [9:0] q8 = q4 & {q4[1:0],  8'b11111111};\n\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & q8[9];\n  wire [9:0]  frac_pre = F ^ (round ? {q8[8:0], 1'b1} : 10'b0);\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c    = imp ? ec7[5:0] : 6'd0;     // clamp(e_pre, 0)\n  wire [5:0] e_c_p1 = e_c + 6'd1;\n  wire [5:0] exp6   = carry ? e_c_p1 : e_c;\n  wire       ovf    = (ec7 >= 7'sd31) | (carry & (e_c == 6'd30));\n\n  // ------------------------------------------------------------- pack\n  wire is_inf_y = is_inf | ovf;\n\n  wire [4:0] exp_y = (is_nan | is_inf_y) ? 5'd31 :\n                     zero_in             ? 5'd0  :\n                                           exp6[4:0];\n  wire [9:0] frac_y = is_nan ? 10'h200 :\n                      (is_inf_y | zero_in) ? 10'd0 :\n                                             frac_pre;\n\n  assign y = {(is_nan ? 1'b0 : s_y), exp_y, frac_y};\nendmodule\n", filename='design_v3.sv')
+
+[TOOL RESULT]
+[Step 42/60]
+Replaced file: design_v3.sv
+
+[ASSISTANT]
+I need to fix the macro approach (broken instance names and nested generates). Rewriting the tree with a small reusable compressor module:
+  -> create_file(content="// 3:2 compressor row: S[k] = A[k]^B[k]^C[k], Co[k+1] = maj(A[k],B[k],C[k])\nmodule csa_row (input [25:0] A, B, C, output [25:0] S, Co);\n  genvar k;\n  generate\n    for (k = 0; k < 26; k = k + 1) begin : g\n      assign S[k]  = A[k] ^ B[k] ^ C[k];\n      assign Co[k] = (k == 25) ? 1'b0 :\n                     (A[k-1] & B[k-1]) | (A[k-1] & C[k-1]) | (B[k-1] & C[k-1]);\n    end\n  endgenerate\nendmodule\n\n// fp_mul_e5f10 -- IEEE binary16 (E5M10) multiplier with full subnormal support.\n//\n// Architecture:\n//   * Subnormal input fractions are pre-normalised (tree leading-zero encoder\n//     + small barrel shift) so every non-zero significand has its leading one\n//     in bit 10 of an 11-bit significand m; the exponent is adjusted by (-nlz).\n//     value(m) = m * 2^(e_adj - 25).\n//   * The 11x11 significand product uses a row-grouped Wallace CSA tree\n//     (11 -> 8 -> 6 -> 4 -> 3 -> 2 rows, uniform FA per column) followed by a\n//     Kogge-Stone carry-propagate adder.\n//   * A single alignment position S = clamp(max(26 - s_adj, 10 + p21), 10, 23)\n//     serves normal and subnormal results; F = (prod >> S)[9:0] comes from a\n//     one-hot AND-OR plane (one-hot codes are early exponent compares).\n//     One round-to-nearest-even step (guard = prod[S-1], sticky = |prod[S-2:0]).\n//   * exp = clamp(e_pre, 0) + carry with e_pre = s_adj - 15 + p21.\n\nmodule fp_mul_e5f10 (a, b, y);\n  input  [15:0] a;\n  input  [15:0] b;\n  output [15:0] y;\n\n  // ------------------------------------------------------------- unpack\n  wire [4:0] e_a = a[14:10];\n  wire [4:0] e_b = b[14:10];\n  wire [9:0] f_a = a[9:0];\n  wire [9:0] f_b = b[9:0];\n  wire       s_y = a[15] ^ b[15];\n\n  // ------------------------------------------------------------- classify\n  wire e_a_zero = ~|e_a;\n  wire e_b_zero = ~|e_b;\n  wire e_a_max  =  &e_a;\n  wire e_b_max  =  &e_b;\n  wire f_a_zero = ~|f_a;\n  wire f_b_zero = ~|f_b;\n\n  wire zero_a = e_a_zero & f_a_zero;\n  wire zero_b = e_b_zero & f_b_zero;\n  wire nan_a  = e_a_max  & ~f_a_zero;\n  wire nan_b  = e_b_max  & ~f_b_zero;\n  wire inf_a  = e_a_max  &  f_a_zero;\n  wire inf_b  = e_b_max  &  f_b_zero;\n\n  wire is_nan  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);\n  wire is_inf  = inf_a | inf_b;\n  wire zero_in = zero_a | zero_b;\n\n  // ------------------------------------- normalise subnormal fractions\n  function [2:0] nlz5;\n    input [4:0] x;\n    begin\n      nlz5[2] = ~x[4] & ~x[3] & ~x[2] & ~x[1];\n      nlz5[1] = ~x[4] & ~x[3] & (x[2] | x[1]);\n      nlz5[0] = (~x[4] & (x[3] | (~x[2] & x[1]))) | ~|x;\n    end\n  endfunction\n\n  function [3:0] nlz10;\n    input [9:0] f;\n    begin\n      nlz10 = (|f[9:5]) ? {1'b0, nlz5(f[9:5])}\n                        : (4'd5 + {1'b0, nlz5(f[4:0])});\n    end\n  endfunction\n\n  wire [3:0] nlz_a = e_a_zero ? nlz10(f_a) : 4'd0;\n  wire [3:0] nlz_b = e_b_zero ? nlz10(f_b) : 4'd0;\n\n  wire [10:0] m_a = e_a_zero ? ({1'b0, f_a} << (nlz_a + 4'd1)) : {1'b1, f_a};\n  wire [10:0] m_b = e_b_zero ? ({1'b0, f_b} << (nlz_b + 4'd1)) : {1'b1, f_b};\n\n  wire [5:0] ea_adj = e_a_zero ? (6'd0 - {2'b0, nlz_a}) : {1'b0, e_a};\n  wire [5:0] eb_adj = e_b_zero ? (6'd0 - {2'b0, nlz_b}) : {1'b0, e_b};\n\n  wire signed [6:0] s_adj = {{1{ea_adj[5]}}, ea_adj}\n                          + {{1{eb_adj[5]}}, eb_adj};\n\n  // ------------- 11x11 unsigned product: row-grouped Wallace tree + KS CPA\n  localparam int CW = 26;   // row width in columns\n\n  wire [CW-1:0] R0 [0:10];\n  genvar gi;\n  generate\n    for (gi = 0; gi <= 10; gi = gi + 1) begin : g_r0\n      assign R0[gi] = {{(15-gi){1'b0}}, m_a, {gi{1'b0}}};\n    end\n  endgenerate\n\n  wire [CW-1:0] R1 [0:7];\n  wire [CW-1:0] R2 [0:5];\n  wire [CW-1:0] R3 [0:3];\n  wire [CW-1:0] R4 [0:2];\n  wire [CW-1:0] R5 [0:1];\n\n  // level 1: groups (0,1,2) (3,4,5) (6,7,8), leftover 9,10  -> 8 rows\n  csa_row u_l1a (.A(R0[0]), .B(R0[1]), .C(R0[2]), .S(R1[0]), .Co(R1[1]));\n  csa_row u_l1b (.A(R0[3]), .B(R0[4]), .C(R0[5]), .S(R1[2]), .Co(R1[3]));\n  csa_row u_l1c (.A(R0[6]), .B(R0[7]), .C(R0[8]), .S(R1[4]), .Co(R1[5]));\n  assign R1[6] = R0[9];\n  assign R1[7] = R0[10];\n\n  // level 2: groups (0,1,2) (3,4,5), leftover 6,7  -> 6 rows\n  csa_row u_l2a (.A(R1[0]), .B(R1[1]), .C(R1[2]), .S(R2[0]), .Co(R2[1]));\n  csa_row u_l2b (.A(R1[3]), .B(R1[4]), .C(R1[5]), .S(R2[2]), .Co(R2[3]));\n  assign R2[4] = R1[6];\n  assign R2[5] = R1[7];\n\n  // level 3: groups (0,1,2) (3,4,5)  -> 4 rows\n  csa_row u_l3a (.A(R2[0]), .B(R2[1]), .C(R2[2]), .S(R3[0]), .Co(R3[1]));\n  csa_row u_l3b (.A(R2[3]), .B(R2[4]), .C(R2[5]), .S(R3[2]), .Co(R3[3]));\n\n  // level 4: group (0,1,2), leftover 3  -> 3 rows\n  csa_row u_l4 (.A(R3[0]), .B(R3[1]), .C(R3[2]), .S(R4[0]), .Co(R4[1]));\n  assign R4[2] = R3[3];\n\n  // level 5: group (0,1,2)  -> 2 rows\n  csa_row u_l5 (.A(R4[0]), .B(R4[1]), .C(R4[2]), .S(R5[0]), .Co(R5[1]));\n\n  // Kogge-Stone carry-propagate adder (26 bit)\n  wire [25:0] rA = R5[0];\n  wire [25:0] rB = R5[1];\n  wire [25:0] g0 = rA & rB;\n  wire [25:0] p0 = rA ^ rB;\n  wire [25:0] g1 = g0 | (p0 & {g0[24:0], 1'b0});\n  wire [25:0] p1 = p0 & {p0[24:0], 1'b0};\n  wire [25:0] g2 = g1 | (p1 & {g1[23:0], 2'b0});\n  wire [25:0] p2 = p1 & {p1[23:0], 2'b0};\n  wire [25:0] g3 = g2 | (p2 & {g2[21:0], 4'b0});\n  wire [25:0] p3 = p2 & {p2[21:0], 4'b0};\n  wire [25:0] g4 = g3 | (p3 & {g3[17:0], 8'b0});\n  wire [25:0] p4 = p3 & {p3[17:0], 8'b0};\n  wire [25:0] g5 = g4 | (p4 & {p4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ {g5[24:0], 1'b0};\n  wire [21:0] prod = prod26[21:0];\n\n  wire        p21  = prod[21];\n\n  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)\n  wire [21:0] or1   = prod | {prod[20:0], 1'b0};\n  wire [21:0] or2   = or1  | {or1[19:0],  2'b0};\n  wire [21:0] or4   = or2  | {or2[17:0],  4'b0};\n  wire [21:0] or8   = or4  | {or4[13:0],  8'b0};\n  wire [21:0] below = or8  | {or8[5:0],  16'b0};\n\n  // --------------------------------------- alignment position, one-hot\n  wire oh10 = (s_adj >= 7'sd16) & ~p21;                       // S = 10\n  wire oh11 = (s_adj == 7'sd15) | (p21 & (s_adj >= 7'sd16));  // S = 11\n  wire oh23 = (s_adj <= 7'sd3);                               // S = 23\n\n  wire [23:10] oh;\n  assign oh[10] = oh10;\n  assign oh[11] = oh11;\n  assign oh[23] = oh23;\n\n  genvar gk2;\n  generate\n    for (gk2 = 12; gk2 <= 22; gk2 = gk2 + 1) begin : g_oh\n      assign oh[gk2] = (s_adj == (26 - gk2));\n    end\n  endgenerate\n\n  wire imp = oh[10] | (oh[11] & p21);\n\n  // ------------------------------------ one-hot AND-OR extraction plane\n  wire [9:0] F;\n  wire       guard, sticky;\n\n  genvar gj;\n  generate\n    for (gj = 0; gj < 10; gj = gj + 1) begin : g_f\n      wire [23:10] terms;\n      for (gk2 = 10; gk2 <= 23; gk2 = gk2 + 1) begin : g_t\n        if (gk2 + gj <= 21)\n          assign terms[gk2] = oh[gk2] & prod[gk2 + gj];  // F[j] = prod[S+j]\n        else\n          assign terms[gk2] = 1'b0;\n      end\n      assign F[gj] = |terms;\n    end\n\n    wire [23:10] tg, ts;\n    for (gk2 = 10; gk2 <= 23; gk2 = gk2 + 1) begin : g_gs\n      if (gk2 <= 22)\n        assign tg[gk2] = oh[gk2] & prod[gk2 - 1];        // guard = prod[S-1]\n      else\n        assign tg[gk2] = 1'b0;                           // S = 23: guard = 0\n      assign ts[gk2] = oh[gk2] & below[gk2 - 2];         // sticky = |prod[S-2:0]\n    end\n    assign guard  = |tg;\n    assign sticky = |ts;\n  endgenerate\n\n  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  // increment F by `round` via a 4-level prefix-AND (q8[j] = &F[j:0])\n  wire [9:0] q1 = F  & {F[8:0],   1'b1};\n  wire [9:0] q2 = q1 & {q1[7:0],  2'b11};\n  wire [9:0] q4 = q2 & {q2[5:0],  4'b1111};\n  wire [9:0] q8 = q4 & {q4[1:0],  8'b11111111};\n\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & q8[9];\n  wire [9:0]  frac_pre = F ^ (round ? {q8[8:0], 1'b1} : 10'b0);\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c    = imp ? ec7[5:0] : 6'd0;     // clamp(e_pre, 0)\n  wire [5:0] e_c_p1 = e_c + 6'd1;\n  wire [5:0] exp6   = carry ? e_c_p1 : e_c;\n  wire       ovf    = (ec7 >= 7'sd31) | (carry & (e_c == 6'd30));\n\n  // ------------------------------------------------------------- pack\n  wire is_inf_y = is_inf | ovf;\n\n  wire [4:0] exp_y = (is_nan | is_inf_y) ? 5'd31 :\n                     zero_in             ? 5'd0  :\n                                           exp6[4:0];\n  wire [9:0] frac_y = is_nan ? 10'h200 :\n                      (is_inf_y | zero_in) ? 10'd0 :\n                                             frac_pre;\n\n  assign y = {(is_nan ? 1'b0 : s_y), exp_y, frac_y};\nendmodule\n", filename='design_v3.sv')
+
+[TOOL RESULT]
+[Step 43/60]
+Created file: design_v3.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.sv')
+
+[TOOL RESULT]
+[Step 44/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 14075337/18874371
+  Sim output: TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4607
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36351
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=7456
+TB_ERROR a=1 b=14336 expected_y=0 actua .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4607
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36351
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=7456
+TB_ERROR a=1 b=14336 expected_y=0 actual_y=1
+TB_ERROR a=1 b=15360 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15361 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15362 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15363 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15701 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15679 expected_y=1 actual_y=2
+TB_SUMMARY total=18874371 errors=14075333
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker__doyprd5/verilator_netlist_out.log
+
+Best so far: 116905.83438837831 area_delay_product (eval 16)
+
+[ASSISTANT]
+Found it — a typo in the final Kogge-Stone level: `g5` must combine with `g4` (group generate), not `p4`:
+  -> edit_file(filename='design_v3.sv', new_string="  wire [25:0] g5 = g4 | (p4 & {g4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ {g5[24:0], 1'b0};", old_string="  wire [25:0] g5 = g4 | (p4 & {p4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ {g5[24:0], 1'b0};")
+
+[TOOL RESULT]
+[Step 45/60]
+Edited file: design_v3.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.sv')
+
+[TOOL RESULT]
+[Step 46/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 14075337/18874371
+  Sim output: TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4607
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36351
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=7456
+TB_ERROR a=1 b=14336 expected_y=0 actua .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4607
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36351
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=7456
+TB_ERROR a=1 b=14336 expected_y=0 actual_y=1
+TB_ERROR a=1 b=15360 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15361 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15362 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15363 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15701 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15679 expected_y=1 actual_y=2
+TB_SUMMARY total=18874371 errors=14075333
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_6435xyoq/verilator_netlist_out.log
+
+Best so far: 116905.83438837831 area_delay_product (eval 16)
+
+[ASSISTANT]
+  -> edit_file(filename='design_v3.sv', new_string="      assign Co[k] = (k == 0) ? 1'b0 :\n                     (A[k-1] & B[k-1]) | (A[k-1] & C[k-1]) | (B[k-1] & C[k-1]);", old_string="      assign Co[k] = (k == 25) ? 1'b0 :\n                     (A[k-1] & B[k-1]) | (A[k-1] & C[k-1]) | (B[k-1] & C[k-1]);")
+
+[TOOL RESULT]
+[Step 47/60]
+Edited file: design_v3.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.sv')
+
+[TOOL RESULT]
+[Step 48/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 14075337/18874371
+  Sim output: TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4607
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36351
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=7456
+TB_ERROR a=1 b=14336 expected_y=0 actua .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4607
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36351
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=7456
+TB_ERROR a=1 b=14336 expected_y=0 actual_y=1
+TB_ERROR a=1 b=15360 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15361 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15362 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15363 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15701 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15679 expected_y=1 actual_y=2
+TB_SUMMARY total=18874371 errors=14075337
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_nbh4fs4o/verilator_netlist_out.log
+
+Best so far: 116905.83438837831 area_delay_product (eval 16)
+
+[ASSISTANT]
+  -> edit_file(filename='design_v3.sv', new_string="  // Kogge-Stone carry-propagate adder (26 bit)\n  wire [25:0] rA = R5[0];\n  wire [25:0] rB = R5[1];\n  wire [25:0] g0 = rA & rB;\n  wire [25:0] p0 = rA ^ rB;\n  wire [25:0] g1 = g0 | (p0 & {g0[24:0], 1'b0});\n  wire [25:0] p1 = p0 & {p0[24:0], 1'b0};\n  wire [25:0] g2 = g1 | (p1 & {g1[23:0], 2'b0});\n  wire [25:0] p2 = p1 & {p1[23:0], 2'b0};\n  wire [25:0] g3 = g2 | (p2 & {g2[21:0], 4'b0});\n  wire [25:0] p3 = p2 & {p2[21:0], 4'b0};\n  wire [25:0] g4 = g3 | (p3 & {g3[17:0], 8'b0});\n  wire [25:0] p4 = p3 & {p3[17:0], 8'b0};\n  wire [25:0] g5 = g4 | (p4 & {g4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ g5;      // prod26[k] = p0[k] ^ G[k-1], G[-1] = 0", old_string="  // Kogge-Stone carry-propagate adder (26 bit)\n  wire [25:0] rA = R5[0];\n  wire [25:0] rB = R5[1];\n  wire [25:0] g0 = rA & rB;\n  wire [25:0] p0 = rA ^ rB;\n  wire [25:0] g1 = g0 | (p0 & {g0[24:0], 1'b0});\n  wire [25:0] p1 = p0 & {p0[24:0], 1'b0};\n  wire [25:0] g2 = g1 | (p1 & {g1[23:0], 2'b0});\n  wire [25:0] p2 = p1 & {p1[23:0], 2'b0};\n  wire [25:0] g3 = g2 | (p2 & {p2[21:0], 4'b0});\n  wire [25:0] p3 = p2 & {p2[21:0], 4'b0};\n  wire [25:0] g4 = g3 | (p3 & {p3[17:0], 8'b0});\n  wire [25:0] p4 = p3 & {p3[17:0], 8'b0};\n  wire [25:0] g5 = g4 | (p4 & {g4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ {g5[24:0], 1'b0};")
+
+[TOOL RESULT]
+[Step 49/60]
+Error: old_string not found in file
+
+[ASSISTANT]
+  -> read_file(filename='design_v3.sv', limit=30, offset=115)
+
+[TOOL RESULT]
+[Step 50/60]
+  csa_row u_l2a (.A(R1[0]), .B(R1[1]), .C(R1[2]), .S(R2[0]), .Co(R2[1]));
+  csa_row u_l2b (.A(R1[3]), .B(R1[4]), .C(R1[5]), .S(R2[2]), .Co(R2[3]));
+  assign R2[4] = R1[6];
+  assign R2[5] = R1[7];
+
+  // level 3: groups (0,1,2) (3,4,5)  -> 4 rows
+  csa_row u_l3a (.A(R2[0]), .B(R2[1]), .C(R2[2]), .S(R3[0]), .Co(R3[1]));
+  csa_row u_l3b (.A(R2[3]), .B(R2[4]), .C(R2[5]), .S(R3[2]), .Co(R3[3]));
+
+  // level 4: group (0,1,2), leftover 3  -> 3 rows
+  csa_row u_l4 (.A(R3[0]), .B(R3[1]), .C(R3[2]), .S(R4[0]), .Co(R4[1]));
+  assign R4[2] = R3[3];
+
+  // level 5: group (0,1,2)  -> 2 rows
+  csa_row u_l5 (.A(R4[0]), .B(R4[1]), .C(R4[2]), .S(R5[0]), .Co(R5[1]));
+
+  // Kogge-Stone carry-propagate adder (26 bit)
+  wire [25:0] rA = R5[0];
+  wire [25:0] rB = R5[1];
+  wire [25:0] g0 = rA & rB;
+  wire [25:0] p0 = rA ^ rB;
+  wire [25:0] g1 = g0 | (p0 & {g0[24:0], 1'b0});
+  wire [25:0] p1 = p0 & {p0[24:0], 1'b0};
+  wire [25:0] g2 = g1 | (p1 & {g1[23:0], 2'b0});
+  wire [25:0] p2 = p1 & {p1[23:0], 2'b0};
+  wire [25:0] g3 = g2 | (p2 & {g2[21:0], 4'b0});
+  wire [25:0] p3 = p2 & {p2[21:0], 4'b0};
+  wire [25:0] g4 = g3 | (p3 & {g3[17:0], 8'b0});
+  wire [25:0] p4 = p3 & {p3[17:0], 8'b0};
+  wire [25:0] g5 = g4 | (p4 & {g4[9:0], 16'b0});
+
+... (showing lines 115-144 of 236; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='design_v3.sv', limit=12, offset=144)
+
+[TOOL RESULT]
+[Step 51/60]
+  wire [25:0] g5 = g4 | (p4 & {g4[9:0], 16'b0});
+  wire [25:0] prod26 = p0 ^ {g5[24:0], 1'b0};
+  wire [21:0] prod = prod26[21:0];
+
+  wire        p21  = prod[21];
+
+  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)
+  wire [21:0] or1   = prod | {prod[20:0], 1'b0};
+  wire [21:0] or2   = or1  | {or1[19:0],  2'b0};
+  wire [21:0] or4   = or2  | {or2[17:0],  4'b0};
+  wire [21:0] or8   = or4  | {or4[13:0],  8'b0};
+  wire [21:0] below = or8  | {or8[5:0],  16'b0};
+
+... (showing lines 144-155 of 236; use offset/limit for more)
+
+[ASSISTANT]
+  -> edit_file(filename='design_v3.sv', new_string="  wire [25:0] g5 = g4 | (p4 & {g4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ g5;      // prod26[k] = p0[k] ^ G[k-1], G[-1] = 0", old_string="  wire [25:0] g5 = g4 | (p4 & {g4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ {g5[24:0], 1'b0};")
+
+[TOOL RESULT]
+[Step 52/60]
+Edited file: design_v3.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.sv')
+
+[TOOL RESULT]
+[Step 53/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 14196696/18874371
+  Sim output: TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4607
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36351
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=6275
+TB_ERROR a=1 b=14336 expected_y=0 actua .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4607
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36351
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=6275
+TB_ERROR a=1 b=14336 expected_y=0 actual_y=1
+TB_ERROR a=1 b=15360 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15361 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15362 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15363 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15701 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15679 expected_y=1 actual_y=2
+TB_SUMMARY total=18874371 errors=14196696
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_omsxo9je/verilator_netlist_out.log
+
+Best so far: 116905.83438837831 area_delay_product (eval 16)
+
+[ASSISTANT]
+Something doesn't add up in my hand-verification of the failing vectors — let me re-read the testbench's golden self-check section precisely:
+  -> read_file(filename='tb.sv', offset=40, limit=40)
+
+[TOOL RESULT]
+[Step 54/60]
+  logic [9:0] mant;
+  int idx;
+
+  initial begin
+    errors = 0; total = 0;
+
+    lfsr = 16'hACE1;
+    idx = 0;
+    for (int s = 0; s < 2; s++)
+      for (int e = 0; e < 32; e++)
+        for (int m = 0; m < 64; m++) begin
+          if (m < 8) mant = MANT_CORNERS[m];
+          else begin lfsr = lfsr_next(lfsr); mant = lfsr[9:0]; end
+          structured[idx] = {s[0], e[4:0], mant};
+          idx = idx + 1;
+        end
+
+    a = 16'h0003; b = 16'h6801; check();
+    if (y_ref !== 16'h0E02) begin errors++; $display("TB_ERROR golden self-check 1"); end
+    a = 16'h8003; b = 16'h6479; check();
+    if (y_ref !== 16'h8AB6) begin errors++; $display("TB_ERROR golden self-check 2"); end
+    a = 16'h7521; b = 16'h0003; check();
+    if (y_ref !== 16'h1BB2) begin errors++; $display("TB_ERROR golden self-check 3"); end
+
+    for (int sa = 0; sa < 2048; sa++) begin
+      a = {sa[10], 5'b00000, sa[9:0]};
+      for (int i = 0; i < 4096; i++) begin b = structured[i]; check(); end
+    end
+    for (int i = 0; i < 4096; i++) begin
+      a = structured[i];
+      for (int sb = 0; sb < 2048; sb++) begin b = {sb[10], 5'b00000, sb[9:0]}; check(); end
+    end
+    ra = 16'h0001; rb = 16'hBEEF;
+    for (int k = 0; k < (1 << 21); k++) begin
+      ra = lfsr_next(ra); rb = lfsr_next(lfsr_next(rb));
+      a = ra; b = rb; check();
+    end
+
+    $display("TB_SUMMARY total=%0d errors=%0d", total, errors);
+    if (errors != 0) $fatal(1, "FAIL");
+
+... (showing lines 40-79 of 1276; use offset/limit for more)
+
+[ASSISTANT]
+My KS final sum was wrong — the carry into bit k is `g5[k-1]`, so the original shifted form was correct (I "fixed" the wrong thing). Verifying with rA=rB=1: sum must be 2, and `p0 ^ {g5[24:0],1'b0}` gives bit1 ✓. Reverting that line:
+  -> edit_file(filename='design_v3.sv', new_string="  wire [25:0] g5 = g4 | (p4 & {g4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ {g5[24:0], 1'b0};   // sum[k] = p0[k] ^ G[k-1]", old_string="  wire [25:0] g5 = g4 | (p4 & {g4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ g5;      // prod26[k] = p0[k] ^ G[k-1], G[-1] = 0")
+
+[TOOL RESULT]
+[Step 55/60]
+Edited file: design_v3.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.sv')
+
+[TOOL RESULT]
+[Step 56/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 14075337/18874371
+  Sim output: TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4607
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36351
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=7456
+TB_ERROR a=1 b=14336 expected_y=0 actua .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+TB_ERROR a=3 b=26625 expected_y=3586 actual_y=4607
+TB_ERROR a=32771 b=25721 expected_y=35510 actual_y=36351
+TB_ERROR a=29985 b=3 expected_y=7090 actual_y=7456
+TB_ERROR a=1 b=14336 expected_y=0 actual_y=1
+TB_ERROR a=1 b=15360 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15361 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15362 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15363 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15701 expected_y=1 actual_y=2
+TB_ERROR a=1 b=15679 expected_y=1 actual_y=2
+TB_SUMMARY total=18874371 errors=14075337
+[1887437100] %Fatal: tb.sv:79: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/fpmul-adp/glm-5.3-flash-high/fpmul_f16_verilog/z-ai_glm-5.3-flash/20261014_101956/workspace/tb.sv:79: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_jnkv9gk9/verilator_netlist_out.log
+
+Best so far: 116905.83438837831 area_delay_product (eval 16)
+
+[ASSISTANT]
+The bug is in the partial-product formation: rows must be masked by `m_b[gi]` (I shifted `m_a` unconditionally, computing `m_a·(2^11−1)`). Fixing:
+  -> edit_file(filename='design_v3.sv', new_string="  wire [CW-1:0] R0 [0:10];\n  genvar gi, gb;\n  generate\n    for (gi = 0; gi <= 10; gi = gi + 1) begin : g_r0\n      for (gb = 0; gb < CW; gb = gb + 1) begin : g_rb\n        // row gi = m_a << gi, ANDed with m_b[gi]\n        assign R0[gi][gb] = m_b[gi] & (((gb >= gi) && (gb - gi <= 10)) ? m_a[gb - gi] : 1'b0);\n      end\n    end\n  endgenerate", old_string="  wire [CW-1:0] R0 [0:10];\n  genvar gi;\n  generate\n    for (gi = 0; gi <= 10; gi = gi + 1) begin : g_r0\n      assign R0[gi] = {{(15-gi){1'b0}}, m_a, {gi{1'b0}}};\n    end\n  endgenerate")
+
+[TOOL RESULT]
+[Step 57/60]
+Edited file: design_v3.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='design_v3.sv')
+
+[TOOL RESULT]
+[Step 58/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/18874371
+Cost: OK
+  area_delay_product: 120185.07898303997
+  Metrics:
+    area_delay_product: 120185.07898303997
+    delay: 1236.9668
+    area: 97.16111942781325
+    power_probabilistic_fixed_clock: 0.00393
+    target_delay: 500.0
+    worst_slack: -736.97
+  Worst timing path:
+    Startpoint: b[5] (input port clocked by VCLK)
+    Endpoint: y[12] (output port clocked by VCLK)
+    Path Group: VCLK
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock VCLK (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 v input external delay
+       0.00    0.00 v b[5] (in)
+      86.27   86.27 ^ _1129_/Y (NOR5xp2_ASAP7_75t_R)
+      53.95  140.22 v _1154_/Y (AOI21xp5_ASAP7_75t_R)
+      40.08  180.30 ^ _1155_/Y (NAND2xp5_ASAP7_75t_R)
+      32.01  212.32 v _1276_/Y (NOR3x1_ASAP7_75t_R)
+      30.16  242.48 ^ _1329_/Y (NOR2xp67_ASAP7_75t_R)
+      43.81  286.29 v _1427_/Y (AOI32xp33_ASAP7_75t_R)
+      64.42  350.70 ^ _1440_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      51.35  402.05 v _1453_/Y (XNOR2x2_ASAP7_75t_R)
+      29.24  431.29 v _1454_/Y (XOR2x1_ASAP7_75t_R)
+      29.61  460.90 v _1504_/Y (XOR2x1_ASAP7_75t_R)
+      28.76  489.65 v _1505_/Y (XNOR2x1_ASAP7_75t_R)
+      31.04  520.70 v _1548_/Y (XOR2x1_ASAP7_75t_R)
+      27.39  548.08 v _1549_/Y (XNOR2x1_ASAP7_75t_R)
+      24.94  573.03 v _1713_/Y (XOR2xp5_ASAP7_75t_R)
+      28.94  601.96 v _1714_/Y (XNOR2xp5_ASAP7_75t_R)
+      28.98  630.95 v _1716_/Y (XNOR2xp5_ASAP7_75t_R)
+      28.49  659.44 v _1717_/Y (XNOR2xp5_ASAP7_75t_R)
+      28.75  688.18 v _1718_/Y (XOR2xp5_ASAP7_75t_R)
+      33.99  722.17 ^ _1720_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      31.71  753.88 v _1728_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      38.59  792.47 ^ _1812_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      29.98  822.45 v _1923_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      54.66  877.11 ^ _1945_/Y (OAI211xp5_ASAP7_75t_R)
+      43.21  920.32 ^ _1968_/Y (AND3x1_ASAP7_75t_R)
+      25.39  945.71 ^ _1969_/Y (BUFx3_ASAP7_75t_R)
+      25.37  971.08 ^ _2022_/Y (AO22x2_ASAP7_75t_R)
+      32.59 1003.67 ^ _2077_/Y (OA211x2_ASAP7_75t_R)
+      31.36 1035.03 ^ _2090_/Y (AND3x4_ASAP7_75t_R)
+      13.07 1048.10 v _2095_/Y (NAND3x2_ASAP7_75t_R)
+      37.00 1085.10 v _2096_/Y (OR3x1_ASAP7_75t_R)
+      76.14 1161.24 ^ _2103_/Y (NOR5xp2_ASAP7_75t_R)
+      34.37 1195.60 ^ _2144_/Y (XNOR2xp5_ASAP7_75t_R)
+      18.72 1214.32 v _2145_/Y (OAI211xp5_ASAP7_75t_R)
+      22.64 1236.97 v _2146_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1236.97 v y[12] (out)
+            1236.97   data arrival time
+    
+     500.00  500.00   clock VCLK (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+       0.00  500.00   output external delay
+             500.00   data required time
+    ---------------------------------------------------------
+             500.00   data required time
+            -1236.97   data arrival time
+    ---------------------------------------------------------
+            -736.97   slack (VIOLATED)
+
+Best so far: 116905.83438837831 area_delay_product (eval 16)
+
+[ASSISTANT]
+v3 passes but is slightly worse than v2 (bigger multiplier). The real bottleneck is the ~430ps head (nlz encoder + barrel shifter) before the multiplier. I'll replace that head with a **one-hot leading-one scheme**: compute a one-hot leading-one position directly, form the normalized significand by a flat 2-level AND-OR plane (instead of nlz→binary→4-level barrel), and derive the exponent adjust from the same one-hot:
+  -> create_file(content="// 3:2 compressor row: S[k] = A[k]^B[k]^C[k], Co[k+1] = maj(A[k],B[k],C[k])\nmodule csa_row (input [25:0] A, B, C, output [25:0] S, Co);\n  genvar k;\n  generate\n    for (k = 0; k < 26; k = k + 1) begin : g\n      assign S[k]  = A[k] ^ B[k] ^ C[k];\n      assign Co[k] = (k == 0) ? 1'b0 :\n                     (A[k-1] & B[k-1]) | (A[k-1] & C[k-1]) | (B[k-1] & C[k-1]);\n    end\n  endgenerate\nendmodule\n\n// fp_mul_e5f10 -- IEEE binary16 (E5M10) multiplier with full subnormal support.\n//\n// Architecture:\n//   * Subnormal input fractions are normalised with flat one-hot logic: a\n//     one-hot leading-one detector (prefix-OR + AND) drives a 2-level AND-OR\n//     plane that places the leading one at bit 10 of the 11-bit significand m\n//     (no binary leading-zero encoder, no barrel shifter).  The exponent\n//     adjustment (-nlz) comes from the same one-hot via a small AND-OR\n//     encoder.  value(m) = m * 2^(e_adj - 25).\n//   * The 11x11 significand product uses a row-grouped Wallace CSA tree\n//     (11 -> 8 -> 6 -> 4 -> 3 -> 2 rows) followed by a Kogge-Stone CPA.\n//   * A single alignment position S = clamp(max(26 - s_adj, 10 + p21), 10, 23)\n//     serves normal and subnormal results; F = (prod >> S)[9:0] comes from a\n//     one-hot AND-OR plane (one-hot codes are early exponent compares).\n//     One round-to-nearest-even step (guard = prod[S-1], sticky = |prod[S-2:0]).\n//   * exp = clamp(e_pre, 0) + carry with e_pre = s_adj - 15 + p21.\n\nmodule fp_mul_e5f10 (a, b, y);\n  input  [15:0] a;\n  input  [15:0] b;\n  output [15:0] y;\n\n  // ------------------------------------------------------------- unpack\n  wire [4:0] e_a = a[14:10];\n  wire [4:0] e_b = b[14:10];\n  wire [9:0] f_a = a[9:0];\n  wire [9:0] f_b = b[9:0];\n  wire       s_y = a[15] ^ b[15];\n\n  // ------------------------------------------------------------- classify\n  wire e_a_zero = ~|e_a;\n  wire e_b_zero = ~|e_b;\n  wire e_a_max  =  &e_a;\n  wire e_b_max  =  &e_b;\n  wire f_a_zero = ~|f_a;\n  wire f_b_zero = ~|f_b;\n\n  wire zero_a = e_a_zero & f_a_zero;\n  wire zero_b = e_b_zero & f_b_zero;\n  wire nan_a  = e_a_max  & ~f_a_zero;\n  wire nan_b  = e_b_max  & ~f_b_zero;\n  wire inf_a  = e_a_max  &  f_a_zero;\n  wire inf_b  = e_b_max  &  f_b_zero;\n\n  wire is_nan  = nan_a | nan_b | (inf_a & zero_b) | (zero_a & inf_b);\n  wire is_inf  = inf_a | inf_b;\n  wire zero_in = zero_a | zero_b;\n\n  // ------------------------- one-hot leading-one normalisation (operand A)\n  // h8[i] = |f_a[9:i]  (4 OR2 levels)\n  wire [9:0] h1a = f_a | {f_a[8:0], 1'b0};\n  wire [9:0] h2a = h1a | {h1a[7:0], 2'b0};\n  wire [9:0] h4a = h2a | {h2a[5:0], 4'b0};\n  wire [9:0] h8a = h4a | {h4a[1:0], 8'b0};\n\n  // laoh[u] = leading one of f_a at bit u (u = 0..9, subnormals only);\n  // laoh[10] = normal hidden one.  base = {1'b1, f_a}.\n  wire [10:0] laoh_a;\n  wire [10:0] base_a = {1'b1, f_a};\n\n  assign laoh_a[10] = ~e_a_zero;\n  assign laoh_a[9]  = e_a_zero & f_a[9];\n\n  genvar gu, gv;\n  generate\n    for (gu = 0; gu <= 8; gu = gu + 1) begin : g_la\n      assign laoh_a[gu] = e_a_zero & f_a[gu] & ~h8a[gu + 1];\n    end\n    // m[j] = OR_u laoh[u] & base[j - 10 + u]\n    for (gv = 0; gv <= 10; gv = gv + 1) begin : g_m\n      wire [10:0] terms;\n      for (gu = 0; gu <= 10; gu = gu + 1) begin : g_t\n        if ((gv - 10 + gu >= 0) && (gv - 10 + gu <= 10))\n          assign terms[gu] = laoh_a[gu] & base_a[gv - 10 + gu];\n        else\n          assign terms[gu] = 1'b0;\n      end\n      assign m_wa[gv] = |terms;\n    end\n    // exponent adjust: n = sum u*laoh[u] over u = 0..9;  ea = n - 9\n    for (gu = 0; gu < 4; gu = gu + 1) begin : g_n\n      wire [9:0] terms;\n      for (gv = 0; gv <= 9; gv = gv + 1) begin : g_t\n        assign terms[gv] = laoh_a[gv] & gv[gu];\n      end\n      assign n_wa[gu] = |terms;\n    end\n  endgenerate\n\n  wire [5:0] ea_sub_a = {1'b0, n_wa} + 6'd55;        // n - 9 (mod 64)\n  wire [5:0] ea_adj_a = e_a_zero ? ea_sub_a : {1'b0, e_a};\n  wire [10:0] m_a = m_wa;\n\n  // ------------------------- same for operand B\n  wire [9:0] h1b = f_b | {f_b[8:0], 1'b0};\n  wire [9:0] h2b = h1b | {h1b[7:0], 2'b0};\n  wire [9:0] h4b = h2b | {h2b[5:0], 4'b0};\n  wire [9:0] h8b = h4b | {h4b[1:0], 8'b0};\n\n  wire [10:0] laoh_b;\n  wire [10:0] base_b = {1'b1, f_b};\n\n  assign laoh_b[10] = ~e_b_zero;\n  assign laoh_b[9]  = e_b_zero & f_b[9];\n\n  wire [10:0] m_wb;\n  wire [3:0]  n_wb;\n  generate\n    for (gu = 0; gu <= 8; gu = gu + 1) begin : g_la\n      assign laoh_b[gu] = e_b_zero & f_b[gu] & ~h8b[gu + 1];\n    end\n    for (gv = 0; gv <= 10; gv = gv + 1) begin : g_m\n      wire [10:0] terms;\n      for (gu = 0; gu <= 10; gu = gu + 1) begin : g_t\n        if ((gv - 10 + gu >= 0) && (gv - 10 + gu <= 10))\n          assign terms[gu] = laoh_b[gu] & base_b[gv - 10 + gu];\n        else\n          assign terms[gu] = 1'b0;\n      end\n      assign m_wb[gv] = |terms;\n    end\n    for (gu = 0; gu < 4; gu = gu + 1) begin : g_n\n      wire [9:0] terms;\n      for (gv = 0; gv <= 9; gv = gv + 1) begin : g_t\n        assign terms[gv] = laoh_b[gv] & gv[gu];\n      end\n      assign n_wb[gu] = |terms;\n    end\n  endgenerate\n\n  wire [5:0] ea_sub_b = {1'b0, n_wb} + 6'd55;\n  wire [5:0] ea_adj_b = e_b_zero ? ea_sub_b : {1'b0, e_b};\n  wire [10:0] m_b = m_wb;\n\n  wire signed [6:0] s_adj = {{1{ea_adj_a[5]}}, ea_adj_a}\n                          + {{1{ea_adj_b[5]}}, ea_adj_b};\n\n  // ------------- 11x11 unsigned product: row-grouped Wallace tree + KS CPA\n  localparam int CW = 26;   // row width in columns\n\n  wire [CW-1:0] R0 [0:10];\n  genvar gi, gb;\n  generate\n    for (gi = 0; gi <= 10; gi = gi + 1) begin : g_r0\n      for (gb = 0; gb < CW; gb = gb + 1) begin : g_rb\n        // row gi = m_a << gi, ANDed with m_b[gi]\n        assign R0[gi][gb] = m_b[gi] & (((gb >= gi) && (gb - gi <= 10)) ? m_a[gb - gi] : 1'b0);\n      end\n    end\n  endgenerate\n\n  wire [CW-1:0] R1 [0:7];\n  wire [CW-1:0] R2 [0:5];\n  wire [CW-1:0] R3 [0:3];\n  wire [CW-1:0] R4 [0:2];\n  wire [CW-1:0] R5 [0:1];\n\n  // level 1: groups (0,1,2) (3,4,5) (6,7,8), leftover 9,10  -> 8 rows\n  csa_row u_l1a (.A(R0[0]), .B(R0[1]), .C(R0[2]), .S(R1[0]), .Co(R1[1]));\n  csa_row u_l1b (.A(R0[3]), .B(R0[4]), .C(R0[5]), .S(R1[2]), .Co(R1[3]));\n  csa_row u_l1c (.A(R0[6]), .B(R0[7]), .C(R0[8]), .S(R1[4]), .Co(R1[5]));\n  assign R1[6] = R0[9];\n  assign R1[7] = R0[10];\n\n  // level 2: groups (0,1,2) (3,4,5), leftover 6,7  -> 6 rows\n  csa_row u_l2a (.A(R1[0]), .B(R1[1]), .C(R1[2]), .S(R2[0]), .Co(R2[1]));\n  csa_row u_l2b (.A(R1[3]), .B(R1[4]), .C(R1[5]), .S(R2[2]), .Co(R2[3]));\n  assign R2[4] = R1[6];\n  assign R2[5] = R1[7];\n\n  // level 3: groups (0,1,2) (3,4,5)  -> 4 rows\n  csa_row u_l3a (.A(R2[0]), .B(R2[1]), .C(R2[2]), .S(R3[0]), .Co(R3[1]));\n  csa_row u_l3b (.A(R2[3]), .B(R2[4]), .C(R2[5]), .S(R3[2]), .Co(R3[3]));\n\n  // level 4: group (0,1,2), leftover 3  -> 3 rows\n  csa_row u_l4 (.A(R3[0]), .B(R3[1]), .C(R3[2]), .S(R4[0]), .Co(R4[1]));\n  assign R4[2] = R3[3];\n\n  // level 5: group (0,1,2)  -> 2 rows\n  csa_row u_l5 (.A(R4[0]), .B(R4[1]), .C(R4[2]), .S(R5[0]), .Co(R5[1]));\n\n  // Kogge-Stone carry-propagate adder (26 bit)\n  wire [25:0] rA = R5[0];\n  wire [25:0] rB = R5[1];\n  wire [25:0] g0 = rA & rB;\n  wire [25:0] p0 = rA ^ rB;\n  wire [25:0] g1 = g0 | (p0 & {g0[24:0], 1'b0});\n  wire [25:0] p1 = p0 & {p0[24:0], 1'b0};\n  wire [25:0] g2 = g1 | (p1 & {g1[23:0], 2'b0});\n  wire [25:0] p2 = p1 & {p1[23:0], 2'b0};\n  wire [25:0] g3 = g2 | (p2 & {p2[21:0], 4'b0});\n  wire [25:0] p3 = p2 & {p2[21:0], 4'b0};\n  wire [25:0] g4 = g3 | (p3 & {g3[17:0], 8'b0});\n  wire [25:0] p4 = p3 & {p3[17:0], 8'b0};\n  wire [25:0] g5 = g4 | (p4 & {g4[9:0], 16'b0});\n  wire [25:0] prod26 = p0 ^ {g5[24:0], 1'b0};   // sum[k] = p0[k] ^ G[k-1]\n  wire [21:0] prod = prod26[21:0];\n\n  wire        p21  = prod[21];\n\n  // prefix-OR: below[k] = |prod[k:0]  (5 OR2 levels)\n  wire [21:0] or1   = prod | {prod[20:0], 1'b0};\n  wire [21:0] or2   = or1  | {or1[19:0],  2'b0};\n  wire [21:0] or4   = or2  | {or2[17:0],  4'b0};\n  wire [21:0] or8   = or4  | {or4[13:0],  8'b0};\n  wire [21:0] below = or8  | {or8[5:0],  16'b0};\n\n  // --------------------------------------- alignment position, one-hot\n  wire oh10 = (s_adj >= 7'sd16) & ~p21;                       // S = 10\n  wire oh11 = (s_adj == 7'sd15) | (p21 & (s_adj >= 7'sd16));  // S = 11\n  wire oh23 = (s_adj <= 7'sd3);                               // S = 23\n\n  wire [23:10] oh;\n  assign oh[10] = oh10;\n  assign oh[11] = oh11;\n  assign oh[23] = oh23;\n\n  genvar gk2;\n  generate\n    for (gk2 = 12; gk2 <= 22; gk2 = gk2 + 1) begin : g_oh\n      assign oh[gk2] = (s_adj == (26 - gk2));\n    end\n  endgenerate\n\n  wire imp = oh[10] | (oh[11] & p21);\n\n  // ------------------------------------ one-hot AND-OR extraction plane\n  wire [9:0] F;\n  wire       guard, sticky;\n\n  genvar gj;\n  generate\n    for (gj = 0; gj < 10; gj = gj + 1) begin : g_f\n      wire [23:10] terms;\n      for (gk2 = 10; gk2 <= 23; gk2 = gk2 + 1) begin : g_t\n        if (gk2 + gj <= 21)\n          assign terms[gk2] = oh[gk2] & prod[gk2 + gj];  // F[j] = prod[S+j]\n        else\n          assign terms[gk2] = 1'b0;\n      end\n      assign F[gj] = |terms;\n    end\n\n    wire [23:10] tg, ts;\n    for (gk2 = 10; gk2 <= 23; gk2 = gk2 + 1) begin : g_gs\n      if (gk2 <= 22)\n        assign tg[gk2] = oh[gk2] & prod[gk2 - 1];        // guard = prod[S-1]\n      else\n        assign tg[gk2] = 1'b0;                           // S = 23: guard = 0\n      assign ts[gk2] = oh[gk2] & below[gk2 - 2];         // sticky = |prod[S-2:0]\n    end\n    assign guard  = |tg;\n    assign sticky = |ts;\n  endgenerate\n\n  // ---------------------------------------- round to nearest, ties even\n  wire round = guard & (sticky | F[0]);\n\n  // increment F by `round` via a 4-level prefix-AND (q8[j] = &F[j:0])\n  wire [9:0] q1 = F  & {F[8:0],   1'b1};\n  wire [9:0] q2 = q1 & {q1[7:0],  2'b11};\n  wire [9:0] q4 = q2 & {q2[5:0],  4'b1111};\n  wire [9:0] q8 = q4 & {q4[1:0],  8'b11111111};\n\n  // carry happens exactly when the 11-bit significand field is all ones\n  wire        carry    = round & q8[9];\n  wire [9:0]  frac_pre = F ^ (round ? {q8[8:0], 1'b1} : 10'b0);\n\n  // ------------------------------------------------------- exponent path\n  wire signed [6:0] ec7 = s_adj - 7'sd15 + $signed({6'b0, p21});\n  wire [5:0] e_c    = imp ? ec7[5:0] : 6'd0;     // clamp(e_pre, 0)\n  wire [5:0] e_c_p1 = e_c + 6'd1;\n  wire [5:0] exp6   = carry ? e_c_p1 : e_c;\n  wire       ovf    = (ec7 >= 7'sd31) | (carry & (e_c == 6'd30));\n\n  // ------------------------------------------------------------- pack\n  wire is_inf_y = is_inf | ovf;\n\n  wire [4:0] exp_y = (is_nan | is_inf_y) ? 5'd31 :\n                     zero_in             ? 5'd0  :\n                                           exp6[4:0];\n  wire [9:0] frac_y = is_nan ? 10'h200 :\n                      (is_inf_y | zero_in) ? 10'd0 :\n                                             frac_pre;\n\n  assign y = {(is_nan ? 1'b0 : s_y), exp_y, frac_y};\nendmodule\n", filename='design_v4.sv')
+
+[TOOL RESULT]
+[Step 59/60]
+Created file: design_v4.sv
+
+[ASSISTANT]
+  -> edit_file(filename='design_v4.sv', new_string="  wire [10:0] laoh_a;\n  wire [10:0] base_a = {1'b1, f_a};\n  wire [10:0] m_wa;\n  wire [3:0]  n_wa;", old_string="  wire [10:0] laoh_a;\n  wire [10:0] base_a = {1'b1, f_a};")
+
+[TOOL RESULT]
+[Step 60/60]
+Edited file: design_v4.sv
+
+[USER]
+The design session is now over. Final result: PASS, best cost: 1.169e+05 area_delay_product.
+
+Please write a brief summary covering:
+1. What approaches did you try and what worked best?
+2. What optimizations had the most impact?
+3. What didn't work or caused regressions?
+4. Lessons learned and what you would do differently next time.
+
+Your design files are carried over to the next agent, so refer to them by filename where useful.
+Be concise and specific.
+
+[ASSISTANT]
+## Summary
+
+**Final best: `design_v2.v` — 116,906 area_delay_product (area 92.7, delay 1260 ps), 19.6% better than the starting point (145,429).**
+
+### 1. Approaches tried
+- **`starting_point.v`** (baseline): 145,429 — classic unpack→multiply→22-bit LZ count→wide barrel shift→round→pack.
+- **`design.v`**: pre-normalize subnormal inputs so the product's leading one is always in bit 21/20, eliminating the LZ counter; separate normal/subnormal rounding paths. Correct but only 145,756 — the two rounding paths + barrel shift + priority-loop nlz ate the gains.
+- **`design_v2.v`** (best): unified **single alignment position** `S = clamp(max(26 − s_adj, 10 + p21), 10, 23)` covering normal (S∈{10,11}) and subnormal (S∈{12..23}) results. F, guard, sticky come from a one-hot AND-OR plane over early exponent compares; one shared RNE rounding; exponent = clamp(e_pre,0)+carry handles subnormal/zero/round-up-to-min-normal for free.
+- **`design_v3.sv`** / **`design_v4.sv`**: hand-built 11×11 Wallace CSA tree + Kogge-Stone CPA to replace Yosys's ripple array multiplier, and one-hot leading-one normalization to flatten the nlz+barrel head. v3 passed (120,185 — worse than v2, multiplier area grew); v4 (combining both ideas) was left unverified at session end.
+
+### 2. Most impactful optimizations
+- **Unified alignment/rounding path** (v2): one rounding step, no double-rounding correction logic, no 22-bit shifters — area 109.9 → 93.3.
+- **`carry = round & &F` computed in parallel** with the incrementer, plus `frac_pre = mant_rnd[9:0]` unconditionally (post-carry low bits are 0) — removed the incrementer→exponent and incrementer→fraction serial dependencies.
+- **4-level prefix-AND incrementer** replacing the 11-bit ripple increment (−4,600 cost).
+- Early one-hot codes from pure exponent compares → extraction plane is 2-level AND-OR off the multiplier.
+
+### 3. What didn't work / regressions
+- Plain prefix-**OR** "increment" (XOR trick) — mathematically wrong; must be prefix-**AND** mask.
+- Constant-function-generated Wallace schedule — Yosys rejected (`Unsupported language construct in constant function`).
+- Kogge-Stone bugs (typed `{p4[9:0],16'b0}` instead of `{g4[9:0],16'b0}`; wrong final sum; carry `k==25` vs `k==0`; forgetting to AND rows with `m_b[gi]`) — several debug cycles.
+- Hand multiplier: correct but area grew more than delay shrank → net regression vs. Yosys's synthesized `*`.
+
+### 4. Lessons learned
+- **Bugs cluster at boundaries and in hand-built datapaths**; each KS/CSA iteration cost 2+ steps. A quick local sanity sim before full evaluation would have saved ~5 steps.
+- Sign-extension and bit-slice off-by-ones in `{a, b}` concatenations were the recurring failure mode — verify widths/signedness first when a whole path fails.
+- Structural RTL changes (unified datapath) beat micro-optimizations; but Yosys's multiplier is hard to beat at this small size — flattening the *head* (nlz/shift) is the more promising untested lever (v4, unverified).
+- `casez` is lint-banned; loop-based priority encoders synthesize poorly — use prefix/one-hot logic.
+
+================================================================================

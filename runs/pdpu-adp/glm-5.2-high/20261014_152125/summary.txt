@@ -1,0 +1,29 @@
+## Summary
+
+### Final Best Design: `design_opt1.v` with cost 812,970 (down from 968,044 baseline)
+
+### Approaches Tried & Results
+
+**What worked best (in order of impact):**
+
+1. **Deferred two's-complement +1 (XOR-only sign inversion)** — Biggest single win (~10% cost reduction, 968K→879K). Instead of `mantissa_comp = sign ? (~mant + 1) : mant` in the pipe2→pipe3 critical path, used `mantissa_xor = sign ? ~mant : mant` (XOR only) and deferred the +1 corrections by counting negative signs (`$countones`) and adding them at the final sum. This removed a carry chain from the critical path.
+
+2. **Simple `*` multiplier replacing Booth+CSA** (~9% area reduction, 1034→979 area, 879K→861K). Replaced the entire `radix4_booth_multiplier`/`gen_prods`/`booth_encoder`/`gen_product` hierarchy with `assign sum_o = operand_a * operand_b; assign carry_o = '0;`. The mantissa is only 4-bit, so a simple multiplier is smaller and sufficient.
+
+3. **Simplified comparator using direct signed comparison** (~5% cost reduction, 861K→813K). Replaced the case-based comparator with `assign result_o = (operand_a > operand_b) ? operand_a : operand_b;`. Yosys maps this more efficiently.
+
+### What Didn't Work / Caused Regressions
+
+- **Simple `>>`/`<<` barrel shifter** — Area dropped but delay increased significantly (845→891ps), net worse. The explicit mux-tree barrel shifter synthesizes to faster logic.
+- **Simplified LZC (priority encoder loop)** — Almost broke correctness initially (variable in for loop), and even when fixed, increased delay substantially (845→875ps).
+- **CSA tree rewrite using only 3:2 compressors** — Broke correctness; the carry combination logic was buggy. Reverted.
+- **Pipeline rebalancing (splitting CSA from final addition)** — Pushed the mantissa_norm+encoder into one stage, creating a 1114ps critical path. Much worse.
+- **Simplified mantissa_norm with `<<`** — Slightly worse (815K vs 813K).
+
+### Lessons Learned
+
+1. **Yosys maps behavioral operators (`*`, `>`, `+`) well for small widths** — for 4-bit multiply and 5-bit comparison, simple operators beat hand-crafted logic trees.
+2. **Carry-chain deferral is a powerful technique** — removing `+1` from a per-lane critical path and replacing with a single popcount correction at the end of the CSA tree is highly effective.
+3. **Explicit mux structures can be faster than behavioral shifts** — the barrel shifter's mux tree outperformed `>>`/`<<` in delay despite more area.
+4. **Pipeline rebalancing requires holistic analysis** — moving logic between stages can shift the critical path elsewhere unexpectedly. Would need to try more balanced splits (e.g., split CSA tree depth rather than CSA+add boundary).
+5. **Target_delay sweep had minimal impact** — the default 500ps gave the best ADP; higher values increased delay without reducing area enough.

@@ -1,0 +1,32 @@
+## Summary
+
+### 1. Approaches Tried
+
+1. **Starting point copy** (`design.v`): Exact replica of the logikbench RTL. Cost: 4,624,409.
+2. **Narrowed psum + removed resets** (`design_opt1.v`, `design_opt2.v`): Reduced accumulator width from 32→ //
+
+→19 bits (max |sum| = 8×128×128 = 2^17, needs 19-bit signed), sign-extended only at final output, removed unnecessary resets from skew/deskew registers. Cost: ~3,175,413.
+
+3. **Internal PE pipeline** (`design_pipe1.v`): Registered multiplier output inside PE. **Failed** — couldn't fix the 15-cycle latency contract with the extra internal latency without breaking data alignment.
+4. **Carry-save accumulation** (`design_cs1.v` through `design_cs7.v`): Replaced ripple-carry accumulator with 3-input CSA (sum/carry pair), final propagate add at output. Cost: ~3,034,274.
+5. **Final-add-in-deskew** (`design_cs4.v`, `design_cs7.v`): Moved the final propagate add into the first stage of the deskew shift register chain, giving the adder a full clock cycle of slack instead of being purely combinational at the output. Best cost: **2,796,689**.
+
+### 2. Most Impactful Optimizations
+- **Narrowing psum to 19 bits**: ~31% cost reduction (4.62M → 3.18M). Massive area savings from smaller registers and adders across 64 PEs.
+- **Carry-save accumulation**: Eliminated the ripple-carry chain through the PE column, reducing delay from ~820ps to ~650ps.
+- **Final-add-in-deskew**: Moved the propagate add into the deskew pipeline register, reducing both delay and area (~3.03M → ~2.80M).
+
+### 3. What Didn't Work / Regressions
+- **Removing vpipe reset**: Broke correctness — Verilator doesn't zero-initialize, so the valid pipeline produced spurious `c_valid` during early cycles.
+- **Internal PE pipelining**: Added latency that couldn't be compensated within the fixed 15-cycle contract. Data alignment broke regardless of how I adjusted input skew.
+- **PSUMW=18**: Not enough — max positive sum (131072) exceeds 18-bit signed range (+131071). Didn't even try.
+- **Higher target_delay** (800-1000ps): Made things worse — Yosys used weaker cells, increasing delay more than area savings justified.
+- **Lower target_delay** (300-400ps): No effect — the achieved delay was already at the structural minimum (~650ps).
+
+### 4. Lessons Learned
+- **Latency contracts are rigid**: The 15-cycle compute latency is a hard constraint that prevents adding internal pipeline stages to the PE. Any latency-in
+
+→adding optimization must compensate by removing latency elsewhere (e.g., reducing input skew), which is tricky to get right.
+- **Carry-save is ideal for systolic accumulation**: The vertical psum chain is naturally suited to CSA since each PE adds one product per cycle — no carry propagation needed between PEs, only a final propagate add at the bottom.
+- **Moving combinational logic into pipeline registers** (like the final add into deskew) is a powerful technique that simultaneously reduces delay and area.
+- **Resets matter for simulation**: Verilator treats uninitialized registers as X, so keeping resets on the valid pipeline was essential even when removing them from data paths.

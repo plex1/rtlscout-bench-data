@@ -1,0 +1,21 @@
+## Summary
+
+### What Worked Best
+The single most impactful optimization was **replacing the 64-entry `ptr_conv` LUT function in `jpeg_idct_y` with a simple bit-swap**: `{ptr_q[2:0], ptr_q[5:3]}`. The transpose index permutation is just swapping the two 3-bit halves of the 6-bit counter — no 64-entry case statement needed. This reduced area_delay_product from **9.49M → 8.97M** (5.5% improvement), cutting critical-path delay from 2222ps to 2103ps while slightly reducing area.
+
+### What Had the Most Impact
+The `ptr_conv` elimination was the clear winner. The original 64-entry case statement synthesized into a large mux that Yosys couldn't simplify well, and it sat on the critical path from `ptr_q` through to `outport_idx_o`. The bit-swap is essentially free.
+
+### What Didn't Work
+1. **Replacing signed division `/256` with `>>>8` + correction**: The truncation-toward-zero semantics for signed division require `>>>8 + (sign & |remainder)`, but my implementation had a sign-extension bug that caused ~11K test failures. Reverting to the original `/` was necessary — Verilator/Yosys handle the division synthesizably.
+2. **Removing `ram_read0_q` from the transpose RAM**: This increased cost (9.74M vs 9.49M) and added delay.
+3. **Pipelining the transpose read address** (`rd_addr_pipe_q`): Broke the fixed output schedule — data arrived one cycle late, causing ~20K failures. The transpose timing is tightly coupled to the y-pass pipeline.
+4. **Target delay sweeping** (500ps, 1000ps, 5000ps, 10000ps): Had negligible effect — the RTL structure dominates, not the timing constraint.
+
+### Lessons Learned
+- **Always check if a large LUT is just a simple arithmetic/bit operation.** The 64-entry `ptr_conv` was the biggest win and easiest to spot once I examined the pattern.
+- **Pipeline stages in a fixed-schedule design are dangerous** — the original timing relationships between blocks must be preserved exactly.
+- **Signed division by power-of-2 is tricky** — floor vs. truncate-toward-zero semantics differ for negatives, and getting the correction logic right requires careful testing.
+- The critical path is in the transpose RAM decode (32:1 mux), which is hard to optimize without restructuring the memory, which risks breaking the schedule.
+
+The final design (`design2.v`) achieves cost **8.97M**, a 5.5% improvement over the original 9.49M, with 100% correctness.

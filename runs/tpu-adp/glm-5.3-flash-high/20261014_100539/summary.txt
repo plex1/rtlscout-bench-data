@@ -1,0 +1,26 @@
+## Summary
+
+**Best result: `design_cs.v` — PASS, cost 3,089,796 (area 4603, delay 671ps)** vs. baseline 4,624,409 (area 4604, delay 1004ps) — a 33% improvement.
+
+### 1. Approaches tried
+- **`design.v`** (baseline copy of starting_point.v): PASS, 4.62M.
+- **`design19.v`** (baseline + 19-bit internal accumulator instead of 32-bit): PASS, 3.24M.
+- **`design_vw.v`** (systolic with per-stage narrowed accumulators: widths 16,17,17,18,18,18,18,19 down the chain): PASS, 3.21M — barely better than uniform 19.
+- **`design_par.v`** (parallel pipeline: delay A rows 11 cycles, then per-column 8 multipliers + 3-level 2-input add tree, total latency 15): **FAIL** — could not reproduce mid-stream weight-reload semantics. I proved (by exhaustive reasoning over the 8-cycle load window vs. A-row timing) that the systolic array mixes old/new weights per product while a reload overlaps in-flight A rows; that timing mixing is unobservable from the outside but different in any restructured design. **The systolic per-PE weight capture timing is load-bearing — keep it.**
+- **`design_cs.v`** (keep systolic timing, replace each PE's multiply-accumulate CPA with a 3:2 compressor; carry-save (S,C) pairs flow down columns; single final CPA per column at the de-skew stage): **PASS, 3.09M** ← best.
+- **`design_booth.v`** (fused radix-4 Booth partial products + 4 CSA levels in the PE, eliminating even the `*` operator): **FAIL** — exhausted most of the step budget chasing Booth encoding bugs (wrong neg0 encoding, lost sign bits on negated rows); got close (failures down to a single bit-18 flip in some columns) but ran out of steps. **Do not attempt Booth fusion again without a way to exhaustively verify the 8×8=256-case Booth row decomposition offline first — the vectors only cover a handful of (a,w) cases per tile.**
+
+### 2. Most impactful optimizations
+1. **Accumulator narrowing 32→19 bits** (−30% cost): 8 signed 8×8 products sum to at most ±131072, so 19 bits is exact; the 32-bit output is just sign-extension at the pins. Applied to adders, registers, and interconnect.
+2. **Carry-save accumulation in the PE** (−4% more, delay 770→671ps): PE computes `S' = S^C^P`, `C' = maj(S,C,P)<<1` per cycle — ~2 gate levels instead of a 19-bit ripple CPA. One final CPA per column outside the array. Critically, the **stall/en timing of the psum registers must stay identical** to the original PE (register only on `en`, weights only on `ld`), otherwise cycle accuracy breaks.
+
+### 3. What failed / regressed
+- Any restructure that changes *when* each product is formed relative to weight reloads (the parallel pipeline). The golden trace includes mid-drain weight reloads that make product-level timing observable.
+- The Booth variant: every "fix" to the Booth digit encoding introduced a new bug elsewhere (I went in circles on digit-0: its triplet is {0,a1,a0}, so d ∈ {0,1,2} and neg0 is always 0). Also, `[0:D-2]` array ranges with D=0/1 break Verilator/Yosys — special-case D=0 and D=1 in generate blocks.
+- `target_delay` sweeps (350 vs 500ps): no effect on achieved delay or area in this flow — RTL structure is the only real lever.
+
+### 4. Lessons learned
+- **Verify arithmetic sub-blocks (Booth encoding, compressor invariants) exhaustively in isolation before integrating** — e.g., with an independent script over all operand combinations. The testbench's directed vectors are not dense enough to isolate which (a,w) case is broken; each sim round-trip costs a step.
+- **One behavior change per iteration.** In `design_par.v` I changed both the structure and the weight-load timing simultaneously and wasted 4 steps debugging compound bugs.
+- Gotchas that cost steps: module-scope `integer` shared across always blocks (simulation race); indexing a parenthesized expression `(...)[x]` is illegal in Verilog-2001 (use an intermediate wire); declared array ranges smaller than the indices actually written.
+- The two proven levers (width narrowing, carry-save) compose; the next obvious step for a successor is getting the Booth variant correct (`design_booth.v` is ~90% there — the CSA chain structure works, only the Booth row generation needs fixing), which should cut the PE critical path from ~330ps of multiplier+compressor to ~150ps of pure compressors, potentially well under 2.5M cost.

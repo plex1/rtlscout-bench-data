@@ -1,0 +1,26 @@
+## Summary
+
+### What Worked Best
+The best result (cost 8.96M, down from baseline 10.7M) came from **two key changes** in `design_v5.v`:
+1. **Replaced the y-pass `ptr_conv` lookup table function** with a direct bit-swap `{ptr_q[2:0], ptr_q[5:3]}`. This eliminated a 64-entry case-based function that generated significant combinational logic, reducing both area and delay (2509→2105 ps).
+2. **Removed unused `img_end_i` and `INPUT_WIDTH` parameter** from submodule ports, yielding a small area reduction.
+
+### What Had the Most Impact
+The `ptr_conv` → bit-swap change alone reduced cost by ~16% (10.7M → 8.98M), as it removed a large mux/LUT structure that was either on or near the critical path.
+
+### What Didn't Work / Caused Regressions
+- **Split RAM into two 16-entry banks**: Made delay *worse* (2105→2246 ps). Yosys's native 32:1 mux optimization was better than an explicit 16:1 + 2:1 split.
+- **Removed `ram_read0_q` (unused write-port read register)**: Worsened delay significantly (2105→2457 ps) — the second read port helped Yosys share mux decode logic.
+- **Removed `mul` pipeline stage** (merging mul_q→mul): Broke correctness — the 4-stage idx pipeline was needed to align with the 2-stage mul pipeline.
+- **Pipelined 2-stage RAM read**: Broke correctness (extra cycle of read latency misaligned transpose→y-pass timing).
+- **Combinational (async) RAM read**: Broke correctness — y-pass expects registered data.
+- **Flatten attribute `(* flatten *)`**: Made delay worse (2105→2509 ps) — hierarchical optimization was better.
+- **Address bit remapping** (moving ±8 bit to MSB): Made delay worse (2105→2420 ps).
+- **Inlined constant multiplies** (removing mul_a/mul_b register stage): Broke correctness — the mul_a/mul_b registers were needed to hold operands across the schedule, and removing them changed the pipeline alignment.
+
+### Lessons Learned
+1. **The transpose RAM 32:1 read mux is a hard structural bottleneck** (~1400 ps) that cannot be reduced without changing the fundamental buffer architecture or adding pipeline stages that break the carefully tuned timing.
+2. **Yosys's mux optimization is surprisingly good** — manually restructuring muxes (split-bank, bit-remapping) consistently made things worse.
+3. **The design has very tight pipeline timing** — every register stage serves a specific alignment purpose. Removing or merging stages almost always breaks correctness.
+4. **The best ROI came from eliminating unnecessary combinational logic** (the ptr_conv LUT) rather than trying to restructure the datapath.
+5. **`target_delay` had no effect** on this design since the critical path was structurally fixed by the RAM mux.
