@@ -46,6 +46,38 @@
    "price_per_mtok": {"input": 0.14, "output": 0.28},
    "price_note": "via OpenRouter, Xiaomi endpoint (provider pin), list price on 2026-10-14, no prompt caching",
    "default_reasoning_effort": "thinking on"
+  },
+  "openrouter:deepseek/deepseek-v4-pro-0813": {
+   "name": "DeepSeek V4 Pro",
+   "vendor": "DeepSeek",
+   "open_weights": true,
+   "price_per_mtok": {"input": 0.66, "output": 1.98},
+   "price_note": "via OpenRouter, Alibaba endpoint (provider pin; DeepSeek's own endpoint is excluded by the account's data policy), list price on 2026-10-14, no prompt caching",
+   "default_reasoning_effort": "high"
+  },
+  "openrouter:z-ai/glm-5.3": {
+   "name": "GLM 5.3",
+   "vendor": "Z.ai",
+   "open_weights": true,
+   "price_per_mtok": {"input": 1.4, "output": 4.4},
+   "price_note": "via OpenRouter, Z.AI endpoint (provider pin), list price on 2026-10-14, no prompt caching",
+   "default_reasoning_effort": "max"
+  },
+  "openrouter:xiaomi/mimo-v2.6-pro": {
+   "name": "MiMo-V2.6-Pro",
+   "vendor": "Xiaomi",
+   "open_weights": true,
+   "price_per_mtok": {"input": 0.435, "output": 0.87},
+   "price_note": "via OpenRouter, Xiaomi endpoint (provider pin), list price on 2026-10-14, no prompt caching",
+   "default_reasoning_effort": "thinking on"
+  },
+  "openrouter:qwen/qwen3.8-2.4t-a95b": {
+   "name": "Qwen3.8 2.4T-A95B",
+   "vendor": "Alibaba Qwen",
+   "open_weights": true,
+   "price_per_mtok": {"input": 2.0, "output": 6.0},
+   "price_note": "via OpenRouter, Alibaba endpoint (provider pin), list price on 2026-10-14, no prompt caching",
+   "default_reasoning_effort": "thinking on"
   }
  }
 }
