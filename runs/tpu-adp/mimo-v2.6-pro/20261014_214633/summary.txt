@@ -1,0 +1,32 @@
+## Summary
+
+**Final: `design.sv` — PASS, ADP 2.029M** (area 4202, delay 483 ps), vs. `starting_point.v` baseline **4.624M** (area 4604, delay 1004 ps) — a **2.28× improvement**.
+
+### 1. Approaches tried
+- **Baseline copy** → 4.62M (32-bit ripple accumulate per PE).
+- **Narrow accumulators** (value-range proof: Σ of k≤8 signed 8×8 products fits 19 bits; offset form `v+130048` fits 18 unsigned bits) + removing datapath resets → 3.13M.
+- **Carry-save psums** (`design_csa.sv`): {s,c} pairs descend the column, one 3:2 CSA level per PE, single CPA at column bottom → 2.84M.
+- **Fused multiplier-less CSA tree** (`design_csa2.sv`): 12-row partial-product tree → 2.83M (delay win, area loss).
+- **Booth recoding** (`design_booth*.sv`): digits of A recoded once at the input; storing `−w` at load removes all +1 corrections and a whole CSA level (`design_booth3.sv`) → 2.24M; offset-form + "shift-last" term rows (`design_booth4.sv`) → 2.10M.
+- **Final (`design_v7.sv`/`design.sv`)**: mixed signed-digit recode (`a = Σdₖ4ᵏ + d₃·64`) with **one-hot digits** so masked bases OR-combine with no per-digit mux, `c>>1` storage → 2.03M.
+
+### 2. Highest-impact optimizations
+1. Replacing per-PE multiply-accumulate (mult + 18-bit CPA) with **carry-save {s,c} pairs + bottom CPA** — removed all carry chains from the array path.
+2. **Storing `−w` at weight-load** — negative Booth digits negate the *base*, killing correction rows/tree levels.
+3. **Accumulator width reduction** (32→18/19, offset form) — smaller adders and ~1200 fewer flops.
+4. **"Shift-last" term rows** — mask at bit 0, then shift: 513→488 ps.
+5. **One-hot digit rows** — mux-free term generation, ~100 area units.
+
+### 3. Regressions / dead ends
+- XOR-form term rows, 4-way gate-form rows, mux-after-mask forms — all mapped worse (+150–350 ADP).
+- Unconditional psum registers fed from the *north* PE (self-re-encode trick) — **functionally wrong** (psums shift during stalls); fixed self-feedback version was still worse than a plain enable mux.
+- Two's-complement digit pairs `(s0,s1)` where both bits can be set — OR≠ADD bug; fixed via one-hot digits.
+- `(A0>>>2) + unsigned` silently turned `>>>` into a *logical* shift (mixed signedness) — subtle correctness bug.
+- Offset bias folded into the bottom adder created a 2-adder chain that became critical; moved the bias to the output side.
+- `target_delay` had zero effect on this flow; some "simplifications" (gate-form, XOR) were strictly worse — mapping lottery matters.
+
+### 4. Lessons / next time
+- Gate-level mapping is highly sensitive to *expression shape* (shift placement, OR vs XOR, mux position) even when functions are identical — cheap A/B trials of tiny RTL variants paid off repeatedly.
+- Value-range analysis unlocks easy, safe width reduction; offset/bias representations must keep bias math off critical paths.
+- Preserve the invariant (here: the *sum* of the carry-save pair) rather than the exact representation — but be careful what "holds" during stalls means structurally.
+- Keep a known-good file (`design.sv`) frozen while experimenting in copies (`design_booth*.sv`, `design_v7.sv`); the remaining lever would be shrinking the 13-bit digit bundle / enable muxes on the 36 psum flops per PE.

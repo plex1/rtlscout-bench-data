@@ -1,0 +1,2626 @@
+================================================================================
+BENCHMARK : tpu_verilog
+MODEL     : deepseek/deepseek-v4-pro-0813
+METRIC    : area_delay_product
+RESULT    : PASS  |  best cost: 2.879e+06 area_delay_product  (eval 22)
+STEPS: 60  |  duration: 14270.18s
+================================================================================
+
+[SYSTEM]
+You are an RTL (Register Transfer Level) design agent. Your task is to create a Verilog/SystemVerilog design that satisfies the given specification, is functionally correct, and has minimal cost (area_delay_product).
+
+**Cost metric `area_delay_product`:** area × achieved critical-path delay — the classic area-delay product. Does NOT include simulation cycle count (contrast with the 'area_runtime_product' metric). Cost is measured on your design alone. The testbench and everything it owns (checking logic, the external memories, etc.) is not synthesized and contributes nothing to area, delay, power, or energy.
+
+## Specification
+Weight-stationary systolic matrix-multiply tile (a Google-TPU-style MXU),
+module name `tpu`, implementing the EXACT per-cycle behavior of the logikbench
+`tpu` benchmark (zeroasiccorp/logikbench, MIT).
+
+FUNCTION: computes C = A * B tile products on an 8x8 grid of processing
+elements. B (the "weight" matrix, 8-bit signed) is loaded into the array and
+held; A (the "activation" matrix, 8-bit signed) streams through; result rows
+C (32-bit signed) drain out the bottom.
+
+PROTOCOL:
+  1. Weight load: assert w_valid for 8 cycles; w_data carries one weight row
+     per cycle, 8 signed bytes packed { col 7 ... col 0 }, BOTTOM matrix row
+     first (cycle k carries B[7-k][*]; the weights shift south). After 8
+     cycles PE(i,j) holds B[i][j].
+  2. Compute: assert a_valid while streaming A one row per cycle (packed the
+     same way). Row m of the result, C[m][*] packed { col 7 ... col 0 } as 8
+     signed 32-bit words, appears on c_data with c_valid high exactly 15
+     (= 2*8-1) compute cycles after its A row was accepted.
+  - The array advances only while w_valid is low: asserting w_valid stalls
+    any in-flight computation (and reloads weights). Zeros are injected while
+    a_valid is low, so idle/drain cycles add nothing to the accumulators.
+  - Multiple A tiles may stream back-to-back against the same loaded weights.
+
+CYCLE ACCURACY: c_valid is compared against the original design EVERY cycle;
+c_data is compared on every cycle where c_valid is high. The 15-cycle
+compute-latency and the stall semantics are part of the contract.
+
+Ports:
+  clk, rst (async active-high reset, asserted only before the stream begins)
+  w_valid, w_data[63:0]
+  a_valid, a_data[63:0]
+  c_valid, c_data[255:0]
+
+A working starting point is provided: `starting_point.v` is the
+original logikbench RTL (tpu_pe / tpu_array / tpu: PE mesh, per-row input
+skew, per-column output de-skew, valid pipeline). It passes every cycle of the golden
+trace in `vectors.dat` (directed zero/identity/extreme tiles, random tiles,
+back-to-back streams, a_valid gaps, mid-drain weight reloads, random soak).
+Study it, then optimize while preserving the cycle-accurate behavior. The
+sibling benchmark `tpu_spire` shares the identical testbench and vectors
+with a SpireHDL starting point.
+
+## Tools
+- create_file: Create a new file in your working directory
+- replace_file: Replace the entire contents of an existing file
+- apply_diff: Apply a unified diff to modify a file
+- edit_file: Edit a file by replacing an exact string match with new content. Provide old_string (must match exactly once) and new_string.
+- ls: List files in your working directory
+- read_file: Read the contents of a file
+- run_evaluation(filename[, target_delay]): Run evaluation on the given design file. Returns correctness (Verilator simulation) + cost (Yosys area_delay_product). The filename must be your main design file (e.g. 'design.sv'). Optionally pass target_delay (ps) to override the synthesis timing constraint.
+
+## Strategy
+1. Lay out an action plan. Try to cover a diverse set of approaches in your plan to increase the chances of finding a good solution within the step limit. Also once you find a new best solution, explore close solutions. Trade off exploration with exploitation.
+2. First, create a simple, straightforward design that is functionally correct. Focus on getting 100% correctness first.
+3. Run evaluation to confirm correctness and get the initial cost (area_delay_product).
+4. ONLY after achieving 100% correctness, try to optimize the design to reduce the area_delay_product.
+5. After each optimization, run evaluation to verify correctness is maintained and check the new cost.
+6. If an optimization breaks correctness, revert and try a different approach.
+7. Keep iterating until you run out of steps — use every step to try improvements. The run ends automatically at the step limit; your best passing design is kept.
+
+In general, be creative and take risk. At least after you have a correct design, try bold optimizations to reduce area_delay_product, even if they might break correctness. You can always revert if it doesn't work.
+The best results you obtain which is 100% correctness counts.
+Try to beat at least the straightforward implementation.
+
+Running evaluation is crucial after every change to ensure correctness and track cost. Do not skip evaluations.
+
+You may do some 'thinking' alongside with your tool calling responses to explain your reasoning, but always remember to call a tool in every response.
+
+## Important
+- Always call a tool in every response.
+- You have a maximum of **60 steps** (LLM turns). Budget them wisely: get a correct design first, then optimise. You may batch tool calls in one response --- at most 8, and only one `run_evaluation`.
+- The best result is the one with lowest cost among designs that pass 100% of testbench checks.
+- Use different filenames for different design variants so you can retrieve them later.
+- If context files (e.g. component source files) are in your workspace, you can modify them directly using edit_file or replace_file to optimize the design. Make targeted, incremental changes rather than rewriting files from scratch — small edits are less likely to introduce bugs.
+- Write clean, synthesizable RTL code.
+- You can pass `target_delay` (ps) to `run_evaluation` to try different synthesis timing constraints; experimenting with this may improve PPA results (lower target delay may reduce delay, higher target delay may reduce area/transistor count). target_delay must be > 0.
+- Do not spend too many steps sweeping `target_delay` — basically if you want to minimize delay choose a low value,if you want to minimize area/transistor count choose a high value. That's it.A few targeted experiments are more productive than an exhaustive sweep.
+
+## Delay Optimization Tips
+- `target_delay` trades area against delay (a lower value pressures toward faster logic, a higher value lets Yosys re-map to smaller cells). Do not overly iterate on different target delays; often the RTL structure is the real lever, target_delay is only a minor secondary knob.
+- After getting a correct design, try different accumulation orderings (sequential vs. tree) and compare results — Yosys synthesis can produce noticeably different delays (~10 ps) from structurally similar descriptions.
+- For designs dominated by a multiply-accumulate chain, the critical path is the multiplier followed by the adder tree. Reducing the adder depth or splitting into parallel partial sums can help.
+
+## Reference Implementations
+The following are reference implementations for inspiration. Study them for patterns and techniques, but do not copy them directly — adapt ideas to your specific design.
+
+### Parallel-prefix adder (ripple-carry / carry-lookahead) (Add.sv)
+```systemverilog
+// Copyright 2024 ETH Zurich and University of Bologna.
+// Solderpad Hardware License, Version 0.51, see LICENSE for details.
+// SPDX-License-Identifier: SHL-0.51
+//
+// Based on the work by Reto Zimmermann 1998 - ETH Zürich
+// Originally written in VHDL, available under: 
+// https://iis-people.ee.ethz.ch/~zimmi/arith_lib.html#library
+//
+// Authors:
+// - Thomas Benz <tbenz@iis.ee.ethz.ch>
+// - Philippe Sauter <phsauter@iis.ee.ethz.ch>
+// - Paul Scheffler <paulsc@iis.ee.ethz.ch>
+//
+// Description :
+// Binary adder using ripple-carry or parallel-prefix carry-lookahead logic.
+// S = A+B
+
+module Add #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] A,  // operands
+	input  logic [width-1:0] B,
+	output logic [width-1:0] S   // sum
+);
+
+	// Function: Binary adder using parallel-prefix carry-lookahead logic.
+
+	logic [width-1:0] GI, PI;  // prefix gen./prop. in
+	logic [width-1:0] GO, PO;  // prefix gen./prop. out
+	logic [width-1:0] PT;  // adder propagate temp
+
+	// Internal signals for unsigned operands
+	logic [width-1:0] Auns, Buns, Suns;
+
+	// default ripple-carry adder as slow implementation
+	if (speed == lau_pkg::SLOW) begin
+		// type conversion: std_logic_vector -> unsigned
+		assign Auns = A;
+		assign Buns = B;
+
+		// addition
+		assign Suns = Auns + Buns;
+
+		// type conversion: unsigned -> std_logic_vector
+		assign S = Suns;
+	end else begin
+		// parallel-prefix adders as medium and fast implementations
+
+		// calculate prefix input generate/propagate signals
+		assign GI = A & B;
+		assign PI = A | B;
+		// calculate adder propagate signals (PT = A xor B)
+		assign PT = ~GI & PI;
+
+		// calculate prefix output generate/propagate signals
+		PrefixAndOr #(
+			.width(width),
+			.speed(speed)
+		) prefix (
+			.GI(GI),
+			.PI(PI),
+			.GO(GO),
+			.PO(PO)
+		);
+
+		// calculate sum bits
+		assign S = PT ^ {GO[width-2:0], 1'b0};
+	end
+endmodule
+
+
+
+module behavioural_Add #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] A,  // operands
+	input  logic [width-1:0] B,
+	output logic [width-1:0] S   // sum
+);
+	assign S = A + B;
+endmodule
+```
+
+### Prefix AND-OR structures (Sklansky, Brent-Kung, serial) (PrefixAndOr.sv)
+```systemverilog
+// Copyright 2024 ETH Zurich and University of Bologna.
+// Solderpad Hardware License, Version 0.51, see LICENSE for details.
+// SPDX-License-Identifier: SHL-0.51
+//
+// Based on the work by Reto Zimmermann 1998 - ETH Zürich
+// Originally written in VHDL, available under: 
+// https://iis-people.ee.ethz.ch/~zimmi/arith_lib.html#library
+//
+// Authors:
+// - Thomas Benz <tbenz@iis.ee.ethz.ch>
+// - Philippe Sauter <phsauter@iis.ee.ethz.ch>
+// - Paul Scheffler <paulsc@iis.ee.ethz.ch>
+//
+// Description :
+// Prefix structures of different depth (i.e. speed) for carry calculation
+// in binary adders. Compute in m levels new generate/propagate signal pairs
+// for always larger groups of bits. Generate signals of the last level correspond
+// to carries in binary addition. Basic logic operations: AND-OR for generate
+// signals, AND for propagate signals.
+
+module PrefixAndOr #(
+	parameter int              width = 8,             // word width
+	parameter lau_pkg::speed_e speed = lau_pkg::FAST  // performance parameter
+) (
+	input  logic [width-1:0] GI,  // gen./prop. in
+	input  logic [width-1:0] PI,  // gen./prop. in
+	output logic [width-1:0] GO,  // gen./prop. out
+	output logic [width-1:0] PO   // gen./prop. out
+);
+
+	// Constants
+	localparam int n = width;  // prefix structure width
+	localparam int m = $clog2(width);  // prefix structure depth
+
+	// Sklansky parallel-prefix carry-lookahead structure
+	if (speed == lau_pkg::FAST) begin : fastPrefix
+		logic [(m+1)*n-1:0] GT, PT;  // gen./prop. temp
+			assign GT[n-1:0] = GI;
+			assign PT[n-1:0] = PI;
+			for (genvar l = 1; l <= m; l++) begin : levels
+				for (genvar k = 0; k < 2 ** (m - l); k++) begin : groups
+					for (genvar i = 0; i < 2 ** (l - 1); i++) begin : bits
+						// pass prop and gen to following nodes
+						if ((k * 2 ** l + i) < n) begin : white
+							assign GT[l*n+k*2**l+i] = GT[(l-1)*n+k*2**l+i];
+							assign PT[l*n+k*2**l+i] = PT[(l-1)*n+k*2**l+i];
+						end
+						// calculate new propagate and generate
+						if ((k * 2 ** l + 2 ** (l - 1) + i) < n) begin : black
+							assign GT[l*n + k*2**l + 2**(l-1) + i] = 
+												GT[(l-1)*n + k*2**l + 2**(l-1) + i]
+											  | (  PT[(l-1)*n + k*2**l + 2**(l-1) + i]
+												 & GT[(l-1)*n + k*2**l + 2**(l-1) - 1] );
+							assign PT[l*n + k*2**l + 2**(l-1) + i] = 
+													PT[(l-1)*n + k*2**l + 2**(l-1) + i]
+												  & PT[(l-1)*n + k*2**l + 2**(l-1) - 1];
+						end
+					end
+				end
+			end
+			assign GO = GT[(m+1)*n-1 : m*n];
+			assign PO = PT[(m+1)*n-1 : m*n];
+	end
+
+	// Brent-Kung parallel-prefix carry-lookahead structure
+	if (speed == lau_pkg::MEDIUM) begin : mediumPrefix
+		logic [(2*m)*n -1:0] GT, PT;  // gen./prop. temp
+		assign GT[n-1:0] = GI;
+		assign PT[n-1:0] = PI;
+
+		for (genvar l = 1; l <= m; l++) begin : levels1
+			for (genvar k = 0; k < 2**(m-l); k++) begin : groups
+				for (genvar i = 0; i < 2**l -1; i++) begin : bits
+					if ((k* 2**l +i) < n) begin : white
+						assign GT[l*n + k* 2**l +i] = GT[(l-1)*n + k* 2**l +i];
+						assign PT[l*n + k* 2**l +i] = PT[(l-1)*n + k* 2**l +i];
+					end // white
+				end // bits
+				if ((k* 2**l + 2**l -1) < n) begin : black
+					assign GT[l*n + k* 2**l + 2**l -1] =
+								GT[(l-1)*n + k* 2**l + 2**l - 1] |
+							  | (  PT[(l-1)*n + k* 2**l + 2**l     -1] 
+							     & GT[(l-1)*n + k* 2**l + 2**(l-1) -1]);
+					assign PT[l*n + k* 2**l + 2**l -1] =
+								PT[(l-1)*n + k*2**l + 2**l     -1] 
+							  & PT[(l-1)*n + k*2**l + 2**(l-1) -1];
+				end // black
+			end
+		end // level1
+		for (genvar l = m +1; l < 2*m; l++) begin : levels2
+			for (genvar i = 0; i < 2**(2*m -l); i++) begin : bits
+				if (i < n) begin : white
+					assign GT[l*n +i] = GT[(l-1)*n +i];
+					assign PT[l*n +i] = PT[(l-1)*n +i];
+				end // white
+			end // bits
+			for (genvar k = 1; k < 2**(l-m); k++) begin : groups
+				if (l < 2*m -1) begin : empty
+					for (genvar i = 0; i < 2**(2*m -l -1) -1; i++) begin : bits
+						if ((k* 2**(2*m -l) +i) < n) begin : white
+							assign GT[l*n + k* 2**(2*m -l) +i] = GT[(l-1)*n + k* 2**(2*m -l) +i];
+							assign PT[l*n + k* 2**(2*m -l) +i] = PT[(l-1)*n + k* 2**(2*m -l) +i];
+						end // white
+					end
+				end // empty
+				if ((k* 2**(2*m -l) + 2**(2*m -l -1) -1) < n) begin : black
+					assign GT[l*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1] = 
+								GT[(l-1)*n + k* 2**(2*m-l) + 2**(2*m -l-1) -1]
+							  | (  PT[(l-1)*n + k* 2**(2*m-l) + 2**(2*m-l-1) -1] 
+								 & GT[(l-1)*n + k* 2**(2*m-l) -1] );
+					assign PT[l*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1] = 
+								PT[(l-1)*n + k* 2**(2*m -l) + 2**(2*m -l-1) -1]
+							  & PT[(l-1)*n + k* 2**(2*m -l) -1];
+				end // black
+				for (genvar i = 2**(2*m -l-1); i < 2**(2*m -l); i++) begin : bits
+					if ((k* 2**(2*m -l) +i) < n) begin : white
+						assign GT[l*n + k* 2**(2*m -l) +i] = GT[(l-1)*n + k* 2**(2*m -l) +i];
+						assign PT[l*n + k* 2**(2*m -l) +i] = PT[(l-1)*n + k* 2**(2*m -l) +i];
+					end // white
+				end
+			end
+		end // level2
+		assign GO = GT[2*m*n -1 : (2*m -1) * n];
+		assign PO = PT[2*m*n -1 : (2*m -1) * n];
+	end  // Serial-prefix carry-lookahead structure
+	else if (speed == lau_pkg::SLOW) begin : slowPrefix
+		logic [n-1:0] GT, PT;  // gen./prop. temp
+		assign GT[0] = GI[0];
+		assign PT[0] = PI[0];
+		
+		for (genvar i = 1; i < n; i++) begin : bits
+			assign GT[i] = GI[i] | (PI[i] & GT[i-1]);
+			assign PT[i] = PI[i] & PT[i-1];
+		end
+		assign GO = GT;
+		assign PO = PT;
+	end
+
+endmodule
+
+```
+
+
+[USER]
+Please create the design according to the specification. Start with a simple correct implementation, evaluate it, then optimize.
+
+[ASSISTANT]
+  -> ls()
+
+[TOOL RESULT]
+[Step 1/60]
+Files:
+starting_point.v
+tb.sv
+vectors.dat
+
+[ASSISTANT]
+  -> read_file(filename='starting_point.v')
+
+[TOOL RESULT]
+[Step 2/60]
+//#############################################################################
+// Copyright: Zero ASIC. All rights Reserved.
+// Author: Andreas Olofsson
+// License:  MIT (see LICENSE file in LogikBench repository)
+//#############################################################################
+//
+// Processing element (PE) for the weight-stationary systolic array (TPU MXU).
+//
+// Each PE holds one stationary signed weight 'w'. Two independent datapaths
+// share the cell:
+//
+//   Weight load (ld): the weights form a per-column shift register that loads
+//   from the top. On each ld cycle the PE captures the weight from the PE above
+//   (w_north) and presents its stored weight downward (w_south). After N load
+//   cycles every PE in a column holds its final stationary weight.
+//
+//   Compute (en): the activation flows west to east (registered, one hop per
+//   cycle) and the partial sum flows north to south, accumulating the local
+//   product a_west * w. This is the only arithmetic cell in the array: one
+//   signed DW x DW multiply plus an ACCW-bit add.
+//
+//#############################################################################
+
+module tpu_pe
+  #(parameter DW = 8,	 // operand width (signed)
+    parameter ACCW = 32) // accumulator / partial-sum width (signed)
+   (
+    input		  clk,
+    input		  rst,	      // synchronous, active high
+    input		  ld,	      // weight-load shift enable
+    input		  en,	      // compute enable
+    input [DW-1:0]	  w_north,    // weight in from PE above
+    input [DW-1:0]	  a_west,     // activation in from west
+    input [ACCW-1:0]	  psum_north, // partial sum in from above
+    output [DW-1:0]	  w_south,    // stored weight out to PE below
+    output reg [DW-1:0]	  a_east,     // activation out to east
+    output reg [ACCW-1:0] psum_south  // partial sum out to below
+    );
+
+   // stationary weight register; presented downward for the load shift chain
+   reg [DW-1:0] w;
+   assign w_south = w;
+
+   // local product: the ONLY signed operation. Operands are interpreted as
+   // signed here via $signed; the 2*DW-bit result holds the two's-complement
+   // product, which is then sign-extended to the accumulator width below.
+   wire [2*DW-1:0] prod = $signed(a_west) * $signed(w);
+
+   always @(posedge clk) begin
+      if (rst) begin
+         w          <= {DW{1'b0}};
+         a_east     <= {DW{1'b0}};
+         psum_south <= {ACCW{1'b0}};
+      end
+      else begin
+         if (ld)
+           w <= w_north;
+         if (en) begin
+            a_east     <= a_west;
+            psum_south <= psum_north +
+                          {{(ACCW-2*DW){prod[2*DW-1]}}, prod};
+         end
+      end
+   end
+
+endmodule
+//#############################################################################
+// Copyright: Zero ASIC. All rights Reserved.
+// Author: Andreas Olofsson
+// License:  MIT (see LICENSE file in LogikBench repository)
+//#############################################################################
+//
+// N x N weight-stationary systolic array (the TPU MXU core).
+//
+// One tpu_pe per grid element, wired as a 2D mesh (per CLAUDE.md: replicated
+// hardware via generate, never a procedural unroll):
+//
+//   - weights load from the top: w_top[j] feeds column j; each column is a
+//     vertical shift register (w_south of PE(i,j) -> w_north of PE(i+1,j)).
+//   - activations flow west to east: a_left[i] enters row i; a_east of PE(i,j)
+//     feeds a_west of PE(i,j+1).
+//   - partial sums flow north to south and accumulate; the top row's psum_north
+//     is tied to zero (fresh accumulation), and c_bot[j] is the column-j result
+//     leaving the bottom row.
+//
+// With weight B[i][j] held at PE(i,j) and activation A[m][i] entering row i,
+// column j computes C[m][j] = sum_i A[m][i] * B[i][j]. Input/output skew (which
+// time-aligns rows and columns) lives in the tpu top, not here.
+//
+//#############################################################################
+
+module tpu_array
+  #(parameter N = 8,	 // array dimension (N x N PEs)
+    parameter DW = 8,	 // operand width (signed)
+    parameter ACCW = 32) // accumulator width (signed)
+   (
+    input		clk,
+    input		rst,	// synchronous, active high
+    input		ld,	// weight-load shift enable
+    input		en,	// compute enable
+    input [N*DW-1:0]	w_top,	// weight inputs, one per column (load)
+    input [N*DW-1:0]	a_left,	// activation inputs, one per row
+    output [N*ACCW-1:0]	c_bot	// column results, one per column
+    );
+
+   // mesh nets: a_h carries activations east, psum_v carries sums south,
+   // w_v carries weights south during load.
+   wire [DW-1:0]   a_h    [0:N-1][0:N];
+   wire [ACCW-1:0] psum_v [0:N][0:N-1];
+   wire [DW-1:0]   w_v    [0:N][0:N-1];
+
+   genvar	   i, j;
+   generate
+      // west edge: activation inputs into column 0 of each row
+      for (i = 0; i < N; i = i + 1) begin : g_west
+         assign a_h[i][0] = a_left[i*DW +: DW];
+      end
+      // top edge: zero partial sums, weight inputs; bottom edge: results out
+
+... (showing lines 1-118 of 282; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='starting_point.v', offset=118)
+
+[TOOL RESULT]
+[Step 3/60]
+      // top edge: zero partial sums, weight inputs; bottom edge: results out
+      for (j = 0; j < N; j = j + 1) begin : g_edge
+         assign psum_v[0][j] = {ACCW{1'b0}};
+         assign w_v[0][j]    = w_top[j*DW +: DW];
+         assign c_bot[j*ACCW +: ACCW] = psum_v[N][j];
+      end
+      // the PE mesh
+      for (i = 0; i < N; i = i + 1) begin : g_pe_row
+         for (j = 0; j < N; j = j + 1) begin : g_pe_col
+            tpu_pe #(.DW(DW), .ACCW(ACCW)) u_pe
+              (.clk        (clk),
+               .rst        (rst),
+               .ld         (ld),
+               .en         (en),
+               .w_north    (w_v[i][j]),
+               .a_west     (a_h[i][j]),
+               .psum_north (psum_v[i][j]),
+               .w_south    (w_v[i+1][j]),
+               .a_east     (a_h[i][j+1]),
+               .psum_south (psum_v[i+1][j]));
+         end
+      end
+   endgenerate
+
+endmodule
+//#############################################################################
+// Copyright: Zero ASIC. All rights Reserved.
+// Author: Andreas Olofsson
+// License:  MIT (see LICENSE file in LogikBench repository)
+//#############################################################################
+//
+// Weight-stationary systolic matrix-multiply tile (a Google-TPU-style MXU).
+//
+// Computes one tile product C = A * B, where A and B are N x N signed operands
+// (DW bits) and C is N x N signed (ACCW bits). B is the "weight" matrix, loaded
+// into and held by the array; A is the "activation" matrix, streamed through; C
+// drains out the bottom. Built from a tpu_array of N x N tpu_pe cells.
+//
+// Operation has two phases the host drives via valids:
+//
+//   1. Weight load: assert w_valid for N cycles. w_data carries one weight row
+//      per cycle, N signed weights packed { col N-1 ... col 0 }. Because the
+//      array loads top-down (shift south), push the BOTTOM matrix row first:
+//      cycle k carries B[N-1-k][*]. After N cycles PE(i,j) holds B[i][j].
+//
+//   2. Compute: assert a_valid while streaming A one row per cycle, a_data
+//      packed { col N-1 ... col 0 } = A[m][N-1..0]. Row m of the result, C[m][*]
+//      (packed the same way), appears on c_data with c_valid high, 2*N-1 cycles
+//      after its A row was accepted.
+//
+// Time alignment: row i of A is delayed i cycles entering the array (input
+// skew) so partial sums chain correctly down each column; column j of the
+// result is delayed N-1-j cycles (output de-skew) so a full result row leaves
+// together. Both skew networks and the valid pipeline advance only with the
+// array (compute enable), so the 2*N-1 latency is exact. Per CLAUDE.md the skew
+// chains are generated per-row/column shift registers, not a procedural unroll.
+//
+//#############################################################################
+
+module tpu
+  #(parameter N = 8,	 // array dimension (N x N)
+    parameter DW = 8,	 // operand width (signed)
+    parameter ACCW = 32) // result / accumulator width (signed)
+   (
+    input		clk,
+    input		rst,	 // synchronous, active high
+    input		w_valid, // weight-row valid (load phase)
+    input [N*DW-1:0]	w_data,	 // weight row, packed { col N-1 ... col 0 }
+    input		a_valid, // activation-row valid (compute phase)
+    input [N*DW-1:0]	a_data,	 // activation row, packed { col N-1 ... col 0 }
+    output		c_valid, // result-row valid
+    output [N*ACCW-1:0]	c_data	 // result row, packed { col N-1 ... col 0 }
+    );
+
+   // total injection-to-output latency, in compute cycles
+   localparam LAT = 2*N - 1;
+
+   // load weights while w_valid; otherwise the array computes (and drains)
+   wire	      ld = w_valid;
+   wire	      en = ~w_valid;
+
+   //##########################################################################
+   // Input skew: row i of the activation is delayed i cycles. Zero is injected
+   // when a_valid is low so idle/drain cycles add nothing to the accumulators.
+   //##########################################################################
+   wire [N*DW-1:0] a_left;
+   genvar	   i;
+   generate
+      for (i = 0; i < N; i = i + 1) begin : g_skew
+         wire [DW-1:0] din =
+		       a_valid ? a_data[i*DW +: DW] : {DW{1'b0}};
+         if (i == 0) begin : g_skew0
+            assign a_left[i*DW +: DW] = din;
+         end
+         else begin : g_skewn
+            reg [DW-1:0] sr [0:i-1];
+            integer k;
+            always @(posedge clk) begin
+               if (rst) begin
+                  for (k = 0; k < i; k = k + 1)
+                    sr[k] <= {DW{1'b0}};
+               end
+               else if (en) begin
+                  sr[0] <= din;
+                  for (k = 1; k < i; k = k + 1)
+                    sr[k] <= sr[k-1];
+               end
+            end
+            assign a_left[i*DW +: DW] = sr[i-1];
+         end
+      end
+   endgenerate
+
+   //##########################################################################
+   // The systolic array.
+   //##########################################################################
+   wire [N*ACCW-1:0] c_bot;
+   tpu_array #(.N(N), .DW(DW), .ACCW(ACCW)) u_array
+     (.clk(clk), .rst(rst), .ld(ld), .en(en),
+      .w_top(w_data), .a_left(a_left), .c_bot(c_bot));
+
+   //##########################################################################
+   // Output de-skew: column j is delayed N-1-j cycles so all columns of a
+   // result row line up. Column N-1 (longest path) needs no delay.
+   //##########################################################################
+   genvar j;
+   generate
+      for (j = 0; j < N; j = j + 1) begin : g_deskew
+         localparam D = N - 1 - j;
+         wire [ACCW-1:0] cin = c_bot[j*ACCW +: ACCW];
+         if (D == 0) begin : g_deskew0
+            assign c_data[j*ACCW +: ACCW] = cin;
+         end
+         else begin : g_deskewn
+            reg [ACCW-1:0] dr [0:D-1];
+            integer k;
+            always @(posedge clk) begin
+               if (rst) begin
+                  for (k = 0; k < D; k = k + 1)
+                    dr[k] <= {ACCW{1'b0}};
+               end
+               else if (en) begin
+                  dr[0] <= cin;
+                  for (k = 1; k < D; k = k + 1)
+                    dr[k] <= dr[k-1];
+               end
+            end
+            assign c_data[j*ACCW +: ACCW] = dr[D-1];
+         end
+      end
+   endgenerate
+
+   //##########################################################################
+   // Valid pipeline: c_valid is a_valid delayed LAT compute cycles.
+   //##########################################################################
+   reg [LAT-1:0] vpipe;
+   always @(posedge clk) begin
+      if (rst)
+        vpipe <= {LAT{1'b0}};
+      else if (en)
+        vpipe <= {vpipe[LAT-2:0], a_valid};
+   end
+   assign c_valid = vpipe[LAT-1];
+
+endmodule
+
+... (showing lines 118-282 of 282; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='tb.sv')
+
+[TOOL RESULT]
+[Step 4/60]
+// Self-checking testbench for the tpu benchmark (8x8 weight-stationary
+// systolic matmul tile). Reads vectors.dat, one line per clock cycle:
+//   w_valid w_data(64b) a_valid a_data(64b)   c_valid c_data(256b)   (hex)
+// The expected outputs are the ORIGINAL logikbench tpu's per-cycle behavior;
+// c_valid and c_data are compared CYCLE-ACCURATELY every cycle (c_data only
+// while c_valid is high — the original holds stale data between results).
+module tb;
+  localparam N = 8, DW = 8, ACCW = 32;
+  int total_checks;
+  int total_errors;
+
+  logic clk, rst;
+  logic w_valid, a_valid, c_valid;
+  logic [N*DW-1:0] w_data, a_data;
+  logic [N*ACCW-1:0] c_data;
+
+  tpu dut
+    (.clk(clk), .rst(rst), .w_valid(w_valid), .w_data(w_data),
+     .a_valid(a_valid), .a_data(a_data), .c_valid(c_valid), .c_data(c_data));
+
+  initial clk = 0;
+  always #5 clk = ~clk;
+
+  integer fd, rc, line_num;
+  string line_buf;
+  logic s_wv, s_av, e_cv;
+  logic [63:0] s_wd, s_ad;
+  logic [255:0] e_cd;
+
+  initial begin
+    total_checks = 0;
+    total_errors = 0;
+    w_valid = 0; a_valid = 0; w_data = 0; a_data = 0;
+    rst = 1;
+    repeat (4) @(negedge clk);
+    rst = 0;
+
+    fd = $fopen("vectors.dat", "r");
+    if (fd == 0) begin
+      $display("ERROR: cannot open vectors.dat");
+      $fatal(1);
+    end
+    line_num = 0;
+    while (!$feof(fd)) begin
+      line_num = line_num + 1;
+      void'($fgets(line_buf, fd));
+      if (line_buf.len() == 0) continue;
+      if (line_buf.substr(0, 0) == "#") continue;
+      rc = $sscanf(line_buf, "%h %h %h %h %h %h", s_wv, s_wd, s_av, s_ad, e_cv, e_cd);
+      if (rc != 6) continue;
+      w_valid = s_wv; w_data = s_wd; a_valid = s_av; a_data = s_ad;
+      @(negedge clk);
+      total_checks = total_checks + 1;
+      if (c_valid !== e_cv || (e_cv && c_data !== e_cd)) begin
+        $display("TB_ERROR line=%0d exp(cv=%b cd=%h) got(cv=%b cd=%h)",
+                 line_num, e_cv, e_cd, c_valid, c_data);
+        total_errors = total_errors + 1;
+        if (total_errors > 20) begin
+          $display("TB_SUMMARY total=%0d errors=%0d", total_checks, total_errors);
+          $fatal(1, "FAIL (too many errors, aborting)");
+        end
+      end
+    end
+    $fclose(fd);
+
+    $display("TB_SUMMARY total=%0d errors=%0d", total_checks, total_errors);
+    if (total_errors != 0) $fatal(1, "FAIL");
+    $display("PASS");
+    $finish;
+  end
+endmodule
+
+
+[ASSISTANT]
+  -> run_evaluation(filename='starting_point.v')
+
+[TOOL RESULT]
+[Step 5/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 4624408.882038144
+  Metrics:
+    area_delay_product: 4624408.882038144
+    delay: 1004.4171
+    area: 4604.072234570822
+    power_probabilistic_fixed_clock: 0.0421
+    target_delay: 500.0
+    worst_slack: -518.57
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[5].g_pe_col[4].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_efc804edddce (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[5].g_pe_col[4].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      91.59   91.59 ^ u_array.g_pe_row[5].g_pe_col[4].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      40.59  132.18 v _60203_/Y (NOR3x1_ASAP7_75t_R)
+      31.89  164.08 ^ _60205_/Y (NOR2xp33_ASAP7_75t_R)
+      31.50  195.57 v _60242_/Y (AOI21xp5_ASAP7_75t_R)
+      20.25  215.82 ^ _60282_/Y (NAND2xp5_ASAP7_75t_R)
+      50.84  266.66 v _60284_/Y (OAI311xp33_ASAP7_75t_R)
+      43.16  309.82 v _60285_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.56  341.39 v _60286_/Y (XNOR2xp5_ASAP7_75t_R)
+      33.12  374.51 v _60287_/Y (XNOR2xp5_ASAP7_75t_R)
+      24.68  399.19 ^ _60288_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.34  433.53 ^ _60289_/Y (XOR2xp5_ASAP7_75t_R)
+      41.45  474.98 ^ _60290_/Y (XOR2xp5_ASAP7_75t_R)
+      31.53  506.52 v _60332_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      35.37  541.89 ^ _60381_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      35.46  577.35 ^ _60427_/Y (OA211x2_ASAP7_75t_R)
+      20.59  597.94 v _60428_/Y (NOR2xp33_ASAP7_75t_R)
+      36.82  634.75 v _60429_/Y (XNOR2xp5_ASAP7_75t_R)
+      39.04  673.80 ^ _60451_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      32.04  705.84 v _60459_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      33.95  739.78 ^ _60469_/Y (MAJIxp5_ASAP7_75t_R)
+      35.59  775.38 v _60484_/Y (AOI211xp5_ASAP7_75t_R)
+      55.59  830.97 v _60513_/Y (OR5x1_ASAP7_75t_R)
+      20.60  851.57 ^ _60530_/Y (AOI211x1_ASAP7_75t_R)
+      31.00  882.57 v _60554_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      37.67  920.24 ^ _60561_/Y (MAJIxp5_ASAP7_75t_R)
+      27.89  948.13 ^ _60562_/Y (XOR2xp5_ASAP7_75t_R)
+      20.22  968.36 v _60563_/Y (NOR2xp33_ASAP7_75t_R)
+      16.77  985.13 ^ _60564_/Y (AOI211x1_ASAP7_75t_R)
+      19.29 1004.42 ^ _60565_/Y (BUFx3_ASAP7_75t_R)
+       0.00 1004.42 ^ vh_efc804edddce/D (DFFHQNx1_ASAP7_75t_R)
+            1004.42   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ vh_efc804edddce/CLK (DFFHQNx1_ASAP7_75t_R)
+     -14.16  485.84   library setup time
+             485.84   data required time
+    ---------------------------------------------------------
+             485.84   data required time
+            -1004.42   data arrival time
+    ---------------------------------------------------------
+            -518.57   slack (VIOLATED)
+
+Best so far: 4624408.882038144 area_delay_product (eval 1)
+
+[ASSISTANT]
+  -> run_evaluation(filename='starting_point.v', target_delay=1100)
+
+[TOOL RESULT]
+[Step 6/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 4966648.343850367
+  Metrics:
+    area_delay_product: 4966648.343850367
+    delay: 1085.5059
+    area: 4575.422707375765
+    power_probabilistic_fixed_clock: 0.0189
+    target_delay: 1100
+    worst_slack: -5.9
+  Worst timing path:
+    Startpoint: vh_3699681c36e2 (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_5ee1dfba11cd (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ vh_3699681c36e2/CLK (DFFHQNx1_ASAP7_75t_R)
+      74.95   74.95 v vh_3699681c36e2/QN (DFFHQNx1_ASAP7_75t_R)
+      44.66  119.61 ^ _55915_/Y (NOR3xp33_ASAP7_75t_R)
+      37.92  157.53 v _55917_/Y (NOR2xp33_ASAP7_75t_R)
+      52.36  209.89 ^ _55953_/Y (AOI21xp33_ASAP7_75t_R)
+      39.23  249.11 ^ _55995_/Y (AO221x1_ASAP7_75t_R)
+      42.78  291.90 ^ _55996_/Y (HB1xp67_ASAP7_75t_R)
+      28.66  320.56 v _55997_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.53  351.10 v _55998_/Y (XNOR2xp5_ASAP7_75t_R)
+      32.79  383.89 v _55999_/Y (XNOR2xp5_ASAP7_75t_R)
+      29.43  413.31 v _56000_/Y (XNOR2xp5_ASAP7_75t_R)
+      25.36  438.67 v _56001_/Y (XOR2xp5_ASAP7_75t_R)
+      28.10  466.77 v _56003_/Y (AO21x1_ASAP7_75t_R)
+      31.29  498.06 ^ _56004_/Y (NAND2xp33_ASAP7_75t_R)
+      29.93  528.00 v _56049_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      37.59  565.58 ^ _56085_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      27.45  593.03 v _56116_/Y (MAJIxp5_ASAP7_75t_R)
+      33.47  626.50 ^ _56141_/Y (NAND2xp33_ASAP7_75t_R)
+      30.12  656.62 v _56151_/Y (NAND2xp5_ASAP7_75t_R)
+      57.49  714.11 v _56167_/Y (HB1xp67_ASAP7_75t_R)
+      66.67  780.78 v _56185_/Y (HB1xp67_ASAP7_75t_R)
+      39.05  819.83 ^ _56194_/Y (NAND2xp33_ASAP7_75t_R)
+      29.08  848.91 v _56200_/Y (OAI311xp33_ASAP7_75t_R)
+      46.70  895.61 ^ _56225_/Y (OAI31xp33_ASAP7_75t_R)
+      53.14  948.75 ^ _56254_/Y (AND5x1_ASAP7_75t_R)
+      23.60  972.35 v _56267_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      28.94 1001.29 ^ _56275_/Y (MAJIxp5_ASAP7_75t_R)
+      27.89 1029.19 ^ _56276_/Y (XOR2xp5_ASAP7_75t_R)
+      15.02 1044.21 v _56277_/Y (NOR2xp33_ASAP7_75t_R)
+      18.22 1062.43 ^ _56278_/Y (AOI211xp5_ASAP7_75t_R)
+      23.08 1085.51 ^ _56279_/Y (HB1xp67_ASAP7_75t_R)
+       0.00 1085.51 ^ vh_5ee1dfba11cd/D (DFFHQNx1_ASAP7_75t_R)
+            1085.51   data arrival time
+    
+    1100.00 1100.00   clock clk (rise edge)
+       0.00 1100.00   clock network delay (ideal)
+       0.00 1100.00   clock reconvergence pessimism
+            1100.00 ^ vh_5ee1dfba11cd/CLK (DFFHQNx1_ASAP7_75t_R)
+     -20.40 1079.60   library setup time
+            1079.60   data required time
+    ---------------------------------------------------------
+            1079.60   data required time
+            -1085.51   data arrival time
+    ---------------------------------------------------------
+              -5.90   slack (VIOLATED)
+
+Best so far: 4624408.882038144 area_delay_product (eval 1)
+
+[ASSISTANT]
+  -> create_file(filename='tpu_narrow.sv', content="module tpu_pe\n  #(parameter DW = 8,\n    parameter ACCW = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic ld,\n    input  logic en,\n    input  logic [DW-1:0]   w_north,\n    input  logic [DW-1:0]   a_west,\n    input  logic [ACCW-1:0] psum_north,\n    output logic [DW-1:0]   w_south,\n    output logic [DW-1:0]   a_east,\n    output logic [ACCW-1:0] psum_south\n    );\n\n   logic [DW-1:0] w;\n   assign w_south = w;\n\n   logic [2*DW-1:0] prod;\n   always_comb begin\n      prod = $signed(a_west) * $signed(w);\n   end\n\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         w          <= '0;\n         a_east     <= '0;\n         psum_south <= '0;\n      end else begin\n         if (ld)\n           w <= w_north;\n         if (en) begin\n            a_east     <= a_west;\n            psum_south <= $signed(psum_north) +\n                          $signed({{(ACCW-2*DW){prod[2*DW-1]}}, prod});\n         end\n      end\n   end\nendmodule\n\nmodule tpu_array\n  #(parameter N = 8, DW = 8, ACCW = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic ld,\n    input  logic en,\n    input  logic [N*DW-1:0]    w_top,\n    input  logic [N*DW-1:0]    a_left,\n    output logic [N*ACCW-1:0]  c_bot\n    );\n\n   logic [DW-1:0]   a_h    [0:N-1][0:N];\n   logic [ACCW-1:0] psum_v [0:N][0:N-1];\n   logic [DW-1:0]   w_v    [0:N][0:N-1];\n\n   genvar i, j;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_west\n         assign a_h[i][0] = a_left[i*DW +: DW];\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_edge\n         assign psum_v[0][j] = '0;\n         assign w_v[0][j]    = w_top[j*DW +: DW];\n         assign c_bot[j*ACCW +: ACCW] = psum_v[N][j];\n      end\n      for (i = 0; i < N; i = i + 1) begin : g_pe_row\n         for (j = 0; j < N; j = j + 1) begin : g_pe_col\n            tpu_pe #(.DW(DW), .ACCW(ACCW)) u_pe\n              (.clk(clk), .rst(rst), .ld(ld), .en(en),\n               .w_north(w_v[i][j]), .a_west(a_h[i][j]),\n               .psum_north(psum_v[i][j]),\n               .w_south(w_v[i+1][j]), .a_east(a_h[i][j+1]),\n               .psum_south(psum_v[i+1][j]));\n         end\n      end\n   endgenerate\nendmodule\n\nmodule tpu\n  #(parameter N = 8, DW = 8, ACCW_TOP = 32,\n    parameter ACCW_INT = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic w_valid,\n    input  logic [N*DW-1:0]   w_data,\n    input  logic a_valid,\n    input  logic [N*DW-1:0]   a_data,\n    output logic c_valid,\n    output logic [N*ACCW_TOP-1:0] c_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   logic ld = w_valid;\n   logic en = ~w_valid;\n\n   logic [N*DW-1:0] a_left;\n   genvar i;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_skew\n         logic [DW-1:0] din;\n         assign din = a_valid ? a_data[i*DW +: DW] : {DW{1'b0}};\n         if (i == 0) begin : g_skew0\n            assign a_left[i*DW +: DW] = din;\n         end else begin : g_skewn\n            logic [DW-1:0] sr [0:i-1];\n            integer k;\n            always_ff @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < i; k = k + 1)\n                    sr[k] <= '0;\n               end else if (en) begin\n                  sr[0] <= din;\n                  for (k = 1; k < i; k = k + 1)\n                    sr[k] <= sr[k-1];\n               end\n            end\n            assign a_left[i*DW +: DW] = sr[i-1];\n         end\n      end\n   endgenerate\n\n   logic [N*ACCW_INT-1:0] c_bot;\n   tpu_array #(.N(N), .DW(DW), .ACCW(ACCW_INT)) u_array\n     (.clk(clk), .rst(rst), .ld(ld), .en(en),\n      .w_top(w_data), .a_left(a_left), .c_bot(c_bot));\n\n   genvar j;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_deskew\n         localparam D = N - 1 - j;\n         logic [ACCW_INT-1:0] cin;\n         logic [ACCW_TOP-1:0] cin_ext;\n         assign cin = c_bot[j*ACCW_INT +: ACCW_INT];\n         assign cin_ext = {{(ACCW_TOP-ACCW_INT){cin[ACCW_INT-1]}}, cin};\n         if (D == 0) begin : g_deskew0\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] = cin_ext;\n         end else begin : g_deskewn\n            logic [ACCW_TOP-1:0] dr [0:D-1];\n            integer k;\n            always_ff @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < D; k = k + 1)\n                    dr[k] <= '0;\n               end else if (en) begin\n                  dr[0] <= cin_ext;\n                  for (k = 1; k < D; k = k + 1)\n                    dr[k] <= dr[k-1];\n               end\n            end\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] = dr[D-1];\n         end\n      end\n   endgenerate\n\n   logic [LAT-1:0] vpipe;\n   always_ff @(posedge clk) begin\n      if (rst)\n        vpipe <= '0;\n      else if (en)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\nendmodule")
+
+[TOOL RESULT]
+[Step 7/60]
+Created file: tpu_narrow.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_narrow.sv')
+
+[TOOL RESULT]
+[Step 8/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 3283107.92329054
+  Metrics:
+    area_delay_product: 3283107.92329054
+    delay: 765.9119
+    area: 4286.534682762522
+    power_probabilistic_fixed_clock: 0.042
+    target_delay: 500.0
+    worst_slack: -280.66
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_406a53a0f71f (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      85.08   85.08 v u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      56.78  141.85 v _65296_/Y (OR4x1_ASAP7_75t_R)
+      20.18  162.03 ^ _65297_/Y (NAND2xp5_ASAP7_75t_R)
+      36.78  198.80 ^ _65298_/Y (XOR2xp5_ASAP7_75t_R)
+      22.72  221.52 v _65299_/Y (XOR2xp5_ASAP7_75t_R)
+      30.90  252.42 v _65300_/Y (XNOR2xp5_ASAP7_75t_R)
+      28.72  281.14 v _65301_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.01  311.16 v _65302_/Y (XNOR2xp5_ASAP7_75t_R)
+      29.69  340.84 v _65303_/Y (XOR2xp5_ASAP7_75t_R)
+      34.71  375.56 ^ _65309_/Y (MAJIxp5_ASAP7_75t_R)
+      34.37  409.93 v _65341_/Y (MAJIxp5_ASAP7_75t_R)
+      38.21  448.14 ^ _65377_/Y (MAJIxp5_ASAP7_75t_R)
+      33.84  481.99 v _65415_/Y (MAJIxp5_ASAP7_75t_R)
+      47.22  529.20 ^ _65533_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      32.85  562.06 v _65577_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.12  596.18 ^ _65616_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.45  630.62 v _65667_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.99  665.62 ^ _65710_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      26.92  692.54 v _65733_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      32.56  725.10 v _65755_/Y (OR3x1_ASAP7_75t_R)
+      19.85  744.95 ^ _65757_/Y (AOI31xp33_ASAP7_75t_R)
+      20.97  765.91 ^ _65758_/Y (BUFx3_ASAP7_75t_R)
+       0.00  765.91 ^ vh_406a53a0f71f/D (DFFHQNx1_ASAP7_75t_R)
+             765.91   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ vh_406a53a0f71f/CLK (DFFHQNx1_ASAP7_75t_R)
+     -14.75  485.25   library setup time
+             485.25   data required time
+    ---------------------------------------------------------
+             485.25   data required time
+            -765.91   data arrival time
+    ---------------------------------------------------------
+            -280.66   slack (VIOLATED)
+
+Best so far: 3283107.92329054 area_delay_product (eval 3)
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_narrow.sv', target_delay=800)
+
+[TOOL RESULT]
+[Step 9/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 3516488.520266092
+  Metrics:
+    area_delay_product: 3516488.520266092
+    delay: 824.0427
+    area: 4267.362019305665
+    power_probabilistic_fixed_clock: 0.026
+    target_delay: 800
+    worst_slack: -38.85
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[5].g_pe_col[4].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_33ef577fc481 (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[5].g_pe_col[4].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      79.49   79.49 v u_array.g_pe_row[5].g_pe_col[4].u_pe.w_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      84.06  163.55 ^ _56455_/Y (NOR2xp33_ASAP7_75t_R)
+      78.29  241.84 ^ _56556_/Y (HB1xp67_ASAP7_75t_R)
+      40.20  282.05 ^ _56637_/Y (XOR2xp5_ASAP7_75t_R)
+      29.35  311.40 ^ _56638_/Y (XNOR2xp5_ASAP7_75t_R)
+      33.15  344.55 ^ _56639_/Y (XOR2xp5_ASAP7_75t_R)
+      25.73  370.29 ^ _56640_/Y (XNOR2xp5_ASAP7_75t_R)
+      25.05  395.34 ^ _56641_/Y (XNOR2xp5_ASAP7_75t_R)
+      27.45  422.79 v _56642_/Y (NOR2xp33_ASAP7_75t_R)
+      27.43  450.22 ^ _56663_/Y (AOI21xp33_ASAP7_75t_R)
+      36.20  486.42 v _56683_/Y (NOR2xp33_ASAP7_75t_R)
+      41.05  527.47 ^ _56685_/Y (NOR3xp33_ASAP7_75t_R)
+      31.01  558.49 v _56687_/Y (NOR2xp33_ASAP7_75t_R)
+      28.91  587.40 v _56688_/Y (XOR2xp5_ASAP7_75t_R)
+      31.50  618.90 v _56689_/Y (XNOR2xp5_ASAP7_75t_R)
+      32.41  651.31 ^ _56698_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      26.49  677.80 v _56769_/Y (AOI211xp5_ASAP7_75t_R)
+      31.89  709.69 ^ _56785_/Y (OAI21xp33_ASAP7_75t_R)
+      32.93  742.62 v _56811_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      31.41  774.03 ^ _56845_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      33.16  807.19 ^ _56847_/Y (OA31x2_ASAP7_75t_R)
+      16.85  824.04 ^ _56848_/Y (BUFx2_ASAP7_75t_R)
+       0.00  824.04 ^ vh_33ef577fc481/D (DFFHQNx1_ASAP7_75t_R)
+             824.04   data arrival time
+    
+     800.00  800.00   clock clk (rise edge)
+       0.00  800.00   clock network delay (ideal)
+       0.00  800.00   clock reconvergence pessimism
+             800.00 ^ vh_33ef577fc481/CLK (DFFHQNx1_ASAP7_75t_R)
+     -14.81  785.19   library setup time
+             785.19   data required time
+    ---------------------------------------------------------
+             785.19   data required time
+            -824.04   data arrival time
+    ---------------------------------------------------------
+             -38.85   slack (VIOLATED)
+
+Best so far: 3283107.92329054 area_delay_product (eval 3)
+
+[ASSISTANT]
+  -> edit_file(filename='tpu_narrow.sv', old_string="for (j = 0; j < N; j = j + 1) begin : g_deskew\n         localparam D = N - 1 - j;\n         logic [ACCW_INT-1:0] cin;\n         logic [ACCW_TOP-1:0] cin_ext;\n         assign cin = c_bot[j*ACCW_INT +: ACCW_INT];\n         assign cin_ext = {{(ACCW_TOP-ACCW_INT){cin[ACCW_INT-1]}}, cin};\n         if (D == 0) begin : g_deskew0\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] = cin_ext;\n         end else begin : g_deskewn\n            logic [ACCW_TOP-1:0] dr [0:D-1];\n            integer k;\n            always_ff @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < D; k = k + 1)\n                    dr[k] <= '0;\n               end else if (en) begin\n                  dr[0] <= cin_ext;\n                  for (k = 1; k < D; k = k + 1)\n                    dr[k] <= dr[k-1];\n               end\n            end\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] = dr[D-1];\n         end\n      end", new_string="for (j = 0; j < N; j = j + 1) begin : g_deskew\n         localparam D = N - 1 - j;\n         logic [ACCW_INT-1:0] cin;\n         assign cin = c_bot[j*ACCW_INT +: ACCW_INT];\n         if (D == 0) begin : g_deskew0\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] =\n                {{(ACCW_TOP-ACCW_INT){cin[ACCW_INT-1]}}, cin};\n         end else begin : g_deskewn\n            logic [ACCW_INT-1:0] dr [0:D-1];\n            integer k;\n            always_ff @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < D; k = k + 1)\n                    dr[k] <= '0;\n               end else if (en) begin\n                  dr[0] <= cin;\n                  for (k = 1; k < D; k = k + 1)\n                    dr[k] <= dr[k-1];\n               end\n            end\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] =\n                {{(ACCW_TOP-ACCW_INT){dr[D-1][ACCW_INT-1]}}, dr[D-1]};\n         end\n      end")
+
+[TOOL RESULT]
+[Step 10/60]
+Edited file: tpu_narrow.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_narrow.sv')
+
+[TOOL RESULT]
+[Step 11/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 3283107.92329054
+  Metrics:
+    area_delay_product: 3283107.92329054
+    delay: 765.9119
+    area: 4286.534682762522
+    power_probabilistic_fixed_clock: 0.042
+    target_delay: 500.0
+    worst_slack: -280.66
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_406a53a0f71f (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      85.08   85.08 v u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      56.78  141.85 v _65296_/Y (OR4x1_ASAP7_75t_R)
+      20.18  162.03 ^ _65297_/Y (NAND2xp5_ASAP7_75t_R)
+      36.78  198.80 ^ _65298_/Y (XOR2xp5_ASAP7_75t_R)
+      22.72  221.52 v _65299_/Y (XOR2xp5_ASAP7_75t_R)
+      30.90  252.42 v _65300_/Y (XNOR2xp5_ASAP7_75t_R)
+      28.72  281.14 v _65301_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.01  311.16 v _65302_/Y (XNOR2xp5_ASAP7_75t_R)
+      29.69  340.84 v _65303_/Y (XOR2xp5_ASAP7_75t_R)
+      34.71  375.56 ^ _65309_/Y (MAJIxp5_ASAP7_75t_R)
+      34.37  409.93 v _65341_/Y (MAJIxp5_ASAP7_75t_R)
+      38.21  448.14 ^ _65377_/Y (MAJIxp5_ASAP7_75t_R)
+      33.84  481.99 v _65415_/Y (MAJIxp5_ASAP7_75t_R)
+      47.22  529.20 ^ _65533_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      32.85  562.06 v _65577_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.12  596.18 ^ _65616_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.45  630.62 v _65667_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      34.99  665.62 ^ _65710_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      26.92  692.54 v _65733_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      32.56  725.10 v _65755_/Y (OR3x1_ASAP7_75t_R)
+      19.85  744.95 ^ _65757_/Y (AOI31xp33_ASAP7_75t_R)
+      20.97  765.91 ^ _65758_/Y (BUFx3_ASAP7_75t_R)
+       0.00  765.91 ^ vh_406a53a0f71f/D (DFFHQNx1_ASAP7_75t_R)
+             765.91   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ vh_406a53a0f71f/CLK (DFFHQNx1_ASAP7_75t_R)
+     -14.75  485.25   library setup time
+             485.25   data required time
+    ---------------------------------------------------------
+             485.25   data required time
+            -765.91   data arrival time
+    ---------------------------------------------------------
+            -280.66   slack (VIOLATED)
+
+Best so far: 3283107.92329054 area_delay_product (eval 3)
+
+[ASSISTANT]
+  -> create_file(filename='tpu_var_width.sv', content="module tpu_pe\n  #(parameter DW = 8,\n    parameter ACCW = 16,\n    parameter ACCW_IN = 16)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic ld,\n    input  logic en,\n    input  logic [DW-1:0]        w_north,\n    input  logic [DW-1:0]        a_west,\n    input  logic [ACCW_IN-1:0]   psum_north,\n    output logic [DW-1:0]        w_south,\n    output logic [DW-1:0]        a_east,\n    output logic [ACCW-1:0]      psum_south\n    );\n\n   logic [DW-1:0] w;\n   assign w_south = w;\n\n   logic [2*DW-1:0] prod;\n   logic [ACCW-1:0]  psum_ext;\n\n   always_comb begin\n      prod = $signed(a_west) * $signed(w);\n   end\n   assign psum_ext = {{(ACCW-ACCW_IN){psum_north[ACCW_IN-1]}}, psum_north};\n\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         w          <= '0;\n         a_east     <= '0;\n         psum_south <= '0;\n      end else begin\n         if (ld)\n           w <= w_north;\n         if (en) begin\n            a_east     <= a_west;\n            psum_south <= $signed(psum_ext) +\n                          $signed({{(ACCW-2*DW){prod[2*DW-1]}}, prod});\n         end\n      end\n   end\nendmodule\n\nmodule tpu_array\n  #(parameter N = 8, DW = 8, ACCW_MAX = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic ld,\n    input  logic en,\n    input  logic [N*DW-1:0]      w_top,\n    input  logic [N*DW-1:0]      a_left,\n    output logic [N*ACCW_MAX-1:0] c_bot\n    );\n\n   function automatic integer psum_width(input integer r);\n      case (r)\n        0: return 16;\n        1: return 16;\n        2: return 17;\n        3: return 17;\n        4: return 18;\n        5: return 18;\n        6: return 18;\n        7: return 18;\n        8: return 19;\n        default: return 19;\n      endcase\n   endfunction\n\n   logic [DW-1:0]        a_h    [0:N-1][0:N];\n   logic [ACCW_MAX-1:0]  psum_v [0:N][0:N-1];\n   logic [DW-1:0]        w_v    [0:N][0:N-1];\n\n   genvar i, j;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_west\n         assign a_h[i][0] = a_left[i*DW +: DW];\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_top\n         assign psum_v[0][j] = '0;\n         assign w_v[0][j]    = w_top[j*DW +: DW];\n      end\n      for (i = 0; i < N; i = i + 1) begin : g_pe_row\n         localparam integer INW  = psum_width(i);\n         localparam integer OUTW = psum_width(i+1);\n         for (j = 0; j < N; j = j + 1) begin : g_pe_col\n            logic [INW-1:0]  psum_in_n;\n            logic [OUTW-1:0] psum_out_n;\n            logic [ACCW_MAX-1:0] psum_out_full;\n\n            assign psum_in_n = psum_v[i][j][INW-1:0];\n            tpu_pe #(.DW(DW), .ACCW(OUTW), .ACCW_IN(INW)) u_pe\n              (.clk(clk), .rst(rst), .ld(ld), .en(en),\n               .w_north(w_v[i][j]), .a_west(a_h[i][j]),\n               .psum_north(psum_in_n),\n               .w_south(w_v[i+1][j]), .a_east(a_h[i][j+1]),\n               .psum_south(psum_out_n));\n            assign psum_out_full =\n              {{(ACCW_MAX-OUTW){psum_out_n[OUTW-1]}}, psum_out_n};\n            assign psum_v[i+1][j] = psum_out_full;\n         end\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_bot\n         assign c_bot[j*ACCW_MAX +: ACCW_MAX] = psum_v[N][j];\n      end\n   endgenerate\nendmodule\n\nmodule tpu\n  #(parameter N = 8, DW = 8, ACCW_TOP = 32,\n    parameter ACCW_INT = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic w_valid,\n    input  logic [N*DW-1:0]   w_data,\n    input  logic a_valid,\n    input  logic [N*DW-1:0]   a_data,\n    output logic c_valid,\n    output logic [N*ACCW_TOP-1:0] c_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   logic ld = w_valid;\n   logic en = ~w_valid;\n\n   logic [N*DW-1:0] a_left;\n   genvar i;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_skew\n         logic [DW-1:0] din;\n         assign din = a_valid ? a_data[i*DW +: DW] : {DW{1'b0}};\n         if (i == 0) begin : g_skew0\n            assign a_left[i*DW +: DW] = din;\n         end else begin : g_skewn\n            logic [DW-1:0] sr [0:i-1];\n            integer k;\n            always_ff @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < i; k = k + 1)\n                    sr[k] <= '0;\n               end else if (en) begin\n                  sr[0] <= din;\n                  for (k = 1; k < i; k = k + 1)\n                    sr[k] <= sr[k-1];\n               end\n            end\n            assign a_left[i*DW +: DW] = sr[i-1];\n         end\n      end\n   endgenerate\n\n   logic [N*ACCW_INT-1:0] c_bot;\n   tpu_array #(.N(N), .DW(DW), .ACCW_MAX(ACCW_INT)) u_array\n     (.clk(clk), .rst(rst), .ld(ld), .en(en),\n      .w_top(w_data), .a_left(a_left), .c_bot(c_bot));\n\n   genvar j;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_deskew\n         localparam D = N - 1 - j;\n         logic [ACCW_INT-1:0] cin;\n         assign cin = c_bot[j*ACCW_INT +: ACCW_INT];\n         if (D == 0) begin : g_deskew0\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] =\n                {{(ACCW_TOP-ACCW_INT){cin[ACCW_INT-1]}}, cin};\n         end else begin : g_deskewn\n            logic [ACCW_INT-1:0] dr [0:D-1];\n            integer k;\n            always_ff @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < D; k = k + 1)\n                    dr[k] <= '0;\n               end else if (en) begin\n                  dr[0] <= cin;\n                  for (k = 1; k < D; k = k + 1)\n                    dr[k] <= dr[k-1];\n               end\n            end\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] =\n                {{(ACCW_TOP-ACCW_INT){dr[D-1][ACCW_INT-1]}}, dr[D-1]};\n         end\n      end\n   endgenerate\n\n   logic [LAT-1:0] vpipe;\n   always_ff @(posedge clk) begin\n      if (rst)\n        vpipe <= '0;\n      else if (en)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\nendmodule")
+
+[TOOL RESULT]
+[Step 12/60]
+Created file: tpu_var_width.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_var_width.sv')
+
+[TOOL RESULT]
+[Step 13/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: FAIL
+  Cost error: PPA extraction failed: Yosys synthesis failed to produce a netlist (netlist.v missing/empty; yosys exit=256). A common cause is an inferred latch in an always_comb block (incomplete assignment) or another synthesis error. Yosys error:
+/scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tpu_var_width.sv:60: ERROR: syntax error, unexpected TOK_CONSTVAL
+
+Best so far: 3283107.92329054 area_delay_product (eval 3)
+
+[ASSISTANT]
+  -> read_file(filename='tpu_var_width.sv', offset=48, limit=30)
+
+[TOOL RESULT]
+[Step 14/60]
+   (
+    input  logic clk,
+    input  logic rst,
+    input  logic ld,
+    input  logic en,
+    input  logic [N*DW-1:0]      w_top,
+    input  logic [N*DW-1:0]      a_left,
+    output logic [N*ACCW_MAX-1:0] c_bot
+    );
+
+   function automatic integer psum_width(input integer r);
+      case (r)
+        0: return 16;
+        1: return 16;
+        2: return 17;
+        3: return 17;
+        4: return 18;
+        5: return 18;
+        6: return 18;
+        7: return 18;
+        8: return 19;
+        default: return 19;
+      endcase
+   endfunction
+
+   logic [DW-1:0]        a_h    [0:N-1][0:N];
+   logic [ACCW_MAX-1:0]  psum_v [0:N][0:N-1];
+   logic [DW-1:0]        w_v    [0:N][0:N-1];
+
+   genvar i, j;
+
+... (showing lines 48-77 of 198; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='tpu_var_width.sv', offset=55, limit=12)
+
+[TOOL RESULT]
+[Step 15/60]
+    output logic [N*ACCW_MAX-1:0] c_bot
+    );
+
+   function automatic integer psum_width(input integer r);
+      case (r)
+        0: return 16;
+        1: return 16;
+        2: return 17;
+        3: return 17;
+        4: return 18;
+        5: return 18;
+        6: return 18;
+
+... (showing lines 55-66 of 198; use offset/limit for more)
+
+[ASSISTANT]
+  -> edit_file(filename='tpu_var_width.sv', old_string='function automatic integer psum_width(input integer r);\n      case (r)\n        0: return 16;\n        1: return 16;\n        2: return 17;\n        3: return 17;\n        4: return 18;\n        5: return 18;\n        6: return 18;\n        7: return 18;\n        8: return 19;\n        default: return 19;\n      endcase\n   endfunction', new_string='function integer psum_width(input integer r);\n      begin\n         case (r)\n           0: psum_width = 16;\n           1: psum_width = 16;\n           2: psum_width = 17;\n           3: psum_width = 17;\n           4: psum_width = 18;\n           5: psum_width = 18;\n           6: psum_width = 18;\n           7: psum_width = 18;\n           8: psum_width = 19;\n           default: psum_width = 19;\n         endcase\n      end\n   endfunction')
+
+[TOOL RESULT]
+[Step 16/60]
+Edited file: tpu_var_width.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_var_width.sv')
+
+[TOOL RESULT]
+[Step 17/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 3116374.9562736596
+  Metrics:
+    area_delay_product: 3116374.9562736596
+    delay: 741.8829
+    area: 4200.629177830706
+    power_probabilistic_fixed_clock: 0.0413
+    target_delay: 500.0
+    worst_slack: -257.25
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_2f5f61c58b47 (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      85.07   85.07 v u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      61.69  146.77 v _63750_/Y (OR4x2_ASAP7_75t_R)
+      18.79  165.56 ^ _63751_/Y (NAND2xp5_ASAP7_75t_R)
+      33.25  198.81 v _63752_/Y (XOR2x2_ASAP7_75t_R)
+      27.40  226.21 v _63753_/Y (XOR2x1_ASAP7_75t_R)
+      26.67  252.88 v _63754_/Y (XNOR2x1_ASAP7_75t_R)
+      19.45  272.33 ^ _63755_/Y (XNOR2xp5_ASAP7_75t_R)
+      41.39  313.71 v _63756_/Y (XNOR2x2_ASAP7_75t_R)
+      27.98  341.70 v _63757_/Y (XOR2x1_ASAP7_75t_R)
+      31.89  373.59 ^ _63763_/Y (MAJIxp5_ASAP7_75t_R)
+      34.48  408.07 v _63795_/Y (MAJIxp5_ASAP7_75t_R)
+      38.27  446.34 ^ _63831_/Y (MAJIxp5_ASAP7_75t_R)
+      33.84  480.18 v _63869_/Y (MAJIxp5_ASAP7_75t_R)
+      48.58  528.76 ^ _63986_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.89  556.65 v _64028_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      22.83  579.48 ^ _64029_/Y (AOI21x1_ASAP7_75t_R)
+      27.93  607.41 v _64067_/Y (MAJIxp5_ASAP7_75t_R)
+      42.00  649.41 ^ _64122_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      34.67  684.09 ^ _64161_/Y (MAJx2_ASAP7_75t_R)
+      10.84  694.93 v _64162_/Y (OAI21x1_ASAP7_75t_R)
+      24.24  719.17 ^ _64164_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      22.71  741.88 ^ _64165_/Y (BUFx3_ASAP7_75t_R)
+       0.00  741.88 ^ vh_2f5f61c58b47/D (DFFHQNx1_ASAP7_75t_R)
+             741.88   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ vh_2f5f61c58b47/CLK (DFFHQNx1_ASAP7_75t_R)
+     -15.37  484.63   library setup time
+             484.63   data required time
+    ---------------------------------------------------------
+             484.63   data required time
+            -741.88   data arrival time
+    ---------------------------------------------------------
+            -257.25   slack (VIOLATED)
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> apply_diff(diff='--- a/tpu_var_width.sv\n+++ b/tpu_var_width.sv\n@@ -73,7 +73,7 @@\n            0: psum_width = 16;\n            1: psum_width = 16;\n            2: psum_width = 17;\n            3: psum_width = 17;\n-           4: psum_width = 18;\n+           4: psum_width = 17;\n            5: psum_width = 18;\n            6: psum_width = 18;\n            7: psum_width = 18;', filename='tpu_var_width.sv')
+
+[TOOL RESULT]
+[Step 18/60]
+Applied diff to: tpu_var_width.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_var_width.sv')
+
+[TOOL RESULT]
+[Step 19/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 8/6782
+  Sim output: TB_ERROR line=138 exp(cv=1 cd=0002000000020000000200000002000000020000000200000002000000020000) got(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000)
+TB_ERROR line=139 exp(cv .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tb.sv:67: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+9 exp(cv=1 cd=0002000000020000000200000002000000020000000200000002000000020000) got(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000)
+TB_ERROR line=140 exp(cv=1 cd=0002000000020000000200000002000000020000000200000002000000020000) got(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000)
+TB_ERROR line=141 exp(cv=1 cd=0002000000020000000200000002000000020000000200000002000000020000) got(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000)
+TB_ERROR line=142 exp(cv=1 cd=0002000000020000000200000002000000020000000200000002000000020000) got(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000)
+TB_ERROR line=143 exp(cv=1 cd=0002000000020000000200000002000000020000000200000002000000020000) got(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000)
+TB_ERROR line=144 exp(cv=1 cd=0002000000020000000200000002000000020000000200000002000000020000) got(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000)
+TB_ERROR line=145 exp(cv=1 cd=0002000000020000000200000002000000020000000200000002000000020000) got(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000)
+TB_SUMMARY total=6782 errors=8
+[6786000] %Fatal: tb.sv:67: Assertion failed in tb: FAIL
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tb.sv:67: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_o6lwb64t/verilator_netlist_out.log
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> apply_diff(diff='--- a/tpu_var_width.sv\n+++ b/tpu_var_width.sv\n@@ -73,7 +73,7 @@\n            0: psum_width = 16;\n            1: psum_width = 16;\n            2: psum_width = 17;\n            3: psum_width = 17;\n-           4: psum_width = 17;\n+           4: psum_width = 18;\n            5: psum_width = 18;\n            6: psum_width = 18;\n            7: psum_width = 18;', filename='tpu_var_width.sv')
+
+[TOOL RESULT]
+[Step 20/60]
+Applied diff to: tpu_var_width.sv
+
+[ASSISTANT]
+  -> edit_file(filename='tpu_var_width.sv', old_string='localparam LAT = 2*N - 1;\n\n   logic ld = w_valid;\n   logic en = ~w_valid;', new_string='localparam LAT = 2*N - 1;\n\n   function integer psum_width(input integer r);\n      begin\n         case (r)\n           0: psum_width = 16;\n           1: psum_width = 16;\n           2: psum_width = 17;\n           3: psum_width = 17;\n           4: psum_width = 18;\n           5: psum_width = 18;\n           6: psum_width = 18;\n           7: psum_width = 18;\n           8: psum_width = 19;\n           default: psum_width = 19;\n         endcase\n      end\n   endfunction\n\n   logic ld = w_valid;\n   logic en = ~w_valid;')
+
+[TOOL RESULT]
+[Step 21/60]
+Edited file: tpu_var_width.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_var_width.sv', target_delay=700)
+
+[TOOL RESULT]
+[Step 22/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 3237174.1135798437
+  Metrics:
+    area_delay_product: 3237174.1135798437
+    delay: 776.1738
+    area: 4170.682021964467
+    power_probabilistic_fixed_clock: 0.0291
+    target_delay: 700
+    worst_slack: -92.28
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[7].g_pe_col[2].u_pe.w_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_2072a5d92706 (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[7].g_pe_col[2].u_pe.w_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      80.03   80.03 v u_array.g_pe_row[7].g_pe_col[2].u_pe.w_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      49.66  129.69 v _46954_/Y (OR4x1_ASAP7_75t_R)
+      24.19  153.88 v _46958_/Y (AND3x1_ASAP7_75t_R)
+      44.84  198.71 ^ _46960_/Y (NOR4xp25_ASAP7_75t_R)
+      47.42  246.13 v _46961_/Y (NOR2xp33_ASAP7_75t_R)
+      31.30  277.44 v _46962_/Y (XOR2xp5_ASAP7_75t_R)
+      31.33  308.77 ^ _46963_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.67  340.43 ^ _46964_/Y (XOR2xp5_ASAP7_75t_R)
+      24.50  364.93 ^ _46965_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.32  395.25 v _46966_/Y (OAI21xp33_ASAP7_75t_R)
+      34.79  430.04 v _46968_/Y (AND2x2_ASAP7_75t_R)
+      28.42  458.46 ^ _46974_/Y (MAJIxp5_ASAP7_75t_R)
+      32.92  491.38 v _47008_/Y (MAJIxp5_ASAP7_75t_R)
+      33.87  525.25 ^ _47154_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.29  552.54 v _47190_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      35.95  588.48 ^ _47269_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      28.72  617.21 v _47275_/Y (OAI21xp5_ASAP7_75t_R)
+      44.22  661.43 ^ _47341_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      37.82  699.24 v _47383_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      35.41  734.65 v _47400_/Y (OR3x1_ASAP7_75t_R)
+      18.41  753.07 ^ _47402_/Y (AOI221xp5_ASAP7_75t_R)
+      23.11  776.17 ^ _47403_/Y (BUFx2_ASAP7_75t_R)
+       0.00  776.17 ^ vh_2072a5d92706/D (DFFHQNx1_ASAP7_75t_R)
+             776.17   data arrival time
+    
+     700.00  700.00   clock clk (rise edge)
+       0.00  700.00   clock network delay (ideal)
+       0.00  700.00   clock reconvergence pessimism
+             700.00 ^ vh_2072a5d92706/CLK (DFFHQNx1_ASAP7_75t_R)
+     -16.10  683.90   library setup time
+             683.90   data required time
+    ---------------------------------------------------------
+             683.90   data required time
+            -776.17   data arrival time
+    ---------------------------------------------------------
+             -92.28   slack (VIOLATED)
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_var_width.sv', target_delay=800)
+
+[TOOL RESULT]
+[Step 23/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 3349105.602804947
+  Metrics:
+    area_delay_product: 3349105.602804947
+    delay: 803.7983
+    area: 4166.599509858315
+    power_probabilistic_fixed_clock: 0.0254
+    target_delay: 800
+    worst_slack: -24.21
+  Worst timing path:
+    Startpoint: vh_977ffaed485d (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_2072a5d92706 (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ vh_977ffaed485d/CLK (DFFHQNx1_ASAP7_75t_R)
+      76.79   76.79 ^ vh_977ffaed485d/QN (DFFHQNx1_ASAP7_75t_R)
+      73.67  150.46 v _47025_/Y (NOR2xp33_ASAP7_75t_R)
+      38.66  189.12 v _47026_/Y (AND3x1_ASAP7_75t_R)
+      39.78  228.90 ^ _47029_/Y (NOR4xp25_ASAP7_75t_R)
+      48.54  277.44 v _47088_/Y (NOR2xp33_ASAP7_75t_R)
+      30.50  307.95 v _47093_/Y (XOR2xp5_ASAP7_75t_R)
+      31.83  339.77 v _47094_/Y (XNOR2xp5_ASAP7_75t_R)
+      26.64  366.41 v _47095_/Y (XOR2xp5_ASAP7_75t_R)
+      31.07  397.48 v _47096_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.75  428.23 v _47097_/Y (XNOR2xp5_ASAP7_75t_R)
+      31.47  459.70 v _47098_/Y (XNOR2xp5_ASAP7_75t_R)
+      35.57  495.27 v _47099_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.09  525.36 v _47100_/Y (XOR2xp5_ASAP7_75t_R)
+      24.05  549.41 ^ _47154_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.29  576.70 v _47190_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      34.04  610.74 ^ _47269_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      34.44  645.17 v _47275_/Y (OAI21xp33_ASAP7_75t_R)
+      45.96  691.13 ^ _47341_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      38.00  729.13 v _47383_/Y (O2A1O1Ixp33_ASAP7_75t_R)
+      35.44  764.57 v _47400_/Y (OR3x1_ASAP7_75t_R)
+      15.85  780.42 ^ _47402_/Y (AOI221xp5_ASAP7_75t_R)
+      23.38  803.80 ^ _47403_/Y (HB1xp67_ASAP7_75t_R)
+       0.00  803.80 ^ vh_2072a5d92706/D (DFFHQNx1_ASAP7_75t_R)
+             803.80   data arrival time
+    
+     800.00  800.00   clock clk (rise edge)
+       0.00  800.00   clock network delay (ideal)
+       0.00  800.00   clock reconvergence pessimism
+             800.00 ^ vh_2072a5d92706/CLK (DFFHQNx1_ASAP7_75t_R)
+     -20.41  779.59   library setup time
+             779.59   data required time
+    ---------------------------------------------------------
+             779.59   data required time
+            -803.80   data arrival time
+    ---------------------------------------------------------
+             -24.21   slack (VIOLATED)
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> create_file(filename='tpu_parallel.sv', content="module tpu\n  #(parameter N = 8, DW = 8, ACCW = 32)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic w_valid,\n    input  logic [N*DW-1:0]   w_data,\n    input  logic a_valid,\n    input  logic [N*DW-1:0]   a_data,\n    output logic c_valid,\n    output logic [N*ACCW-1:0] c_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   // Weight matrix B[i][j], i = row, j = column. Load shifts south:\n   // bottom matrix row first, so B[0] ends up in Breg[0] after N cycles.\n   logic [DW-1:0] Breg [0:N-1][0:N-1];\n\n   integer bi;\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         for (bi = 0; bi < N; bi = bi + 1) begin\n            integer bj;\n            for (bj = 0; bj < N; bj = bj + 1)\n              Breg[bi][bj] <= '0;\n         end\n      end else if (w_valid) begin\n         for (bj = 0; bj < N; bj = bj + 1)\n           Breg[0][bj] <= w_data[bj*DW +: DW];\n         for (bi = 1; bi < N; bi = bi + 1)\n           for (bj = 0; bj < N; bj = bj + 1)\n             Breg[bi][bj] <= Breg[bi-1][bj];\n      end\n   end\n\n   // Activation row shift register: depth LAT (15). Shifts only while ~w_valid,\n   // and zero is injected when a_valid is low (same as the systolic datapath).\n   logic [N*DW-1:0] adly [0:LAT-1];\n   integer ai;\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         for (ai = 0; ai < LAT; ai = ai + 1)\n           adly[ai] <= '0;\n      end else if (!w_valid) begin\n         adly[0] <= a_valid ? a_data : {N*DW{1'b0}};\n         for (ai = 1; ai < LAT; ai = ai + 1)\n           adly[ai] <= adly[ai-1];\n      end\n   end\n\n   // Compute C = A * B from the delayed activation row. Balanced addition tree.\n   genvar j, i;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_col\n         wire signed [DW-1:0] a_arr [0:N-1];\n         wire signed [DW-1:0] b_arr [0:N-1];\n         wire signed [2*DW-1:0] prod [0:N-1];\n         wire signed [ACCW-1:0] sum01 [0:N/2-1];\n         wire signed [ACCW-1:0] sum23 [0:N/4-1];\n         wire signed [ACCW-1:0] sum4567 [0:N/4-1];\n         wire signed [ACCW-1:0] sum_l, sum_r;\n         wire signed [ACCW-1:0] dot;\n\n         for (i = 0; i < N; i = i + 1) begin : g_prod\n            assign a_arr[i] = adly[LAT-1][i*DW +: DW];\n            assign b_arr[i] = Breg[i][j];\n            assign prod[i]  = $signed(a_arr[i]) * $signed(b_arr[i]);\n         end\n\n         for (i = 0; i < N/2; i = i + 1) begin : g_s01\n            assign sum01[i] = $signed({{(ACCW-2*DW){prod[2*i][2*DW-1]}}, prod[2*i]})\n                            + $signed({{(ACCW-2*DW){prod[2*i+1][2*DW-1]}}, prod[2*i+1]});\n         end\n\n         for (i = 0; i < N/4; i = i + 1) begin : g_s0123\n            assign sum23[i] = sum01[2*i] + sum01[2*i+1];\n         end\n\n         for (i = 0; i < N/4; i = i + 1) begin : g_s4567\n            assign sum4567[i] = prod[4+2*i] + prod[4+2*i+1];\n         end\n\n         // sign-extend the last two products before adding; Yosys will do this\n         assign sum_l = sum23[0] + sum23[1]; // 4 products\n         assign sum_r = $signed({{(ACCW-2*DW){prod[4][2*DW-1]}}, prod[4]})\n                      + $signed({{(ACCW-2*DW){prod[5][2*DW-1]}}, prod[5]})\n                      + $signed({{(ACCW-2*DW){prod[6][2*DW-1]}}, prod[6]})\n                      + $signed({{(ACCW-2*DW){prod[7][2*DW-1]}}, prod[7]});\n         assign dot = sum_l + sum_r;\n\n         assign c_data[j*ACCW +: ACCW] = dot;\n      end\n   endgenerate\n\n   // Valid pipeline: a_valid delayed 15 en-cycles.\n   logic [LAT-1:0] vpipe;\n   always_ff @(posedge clk) begin\n      if (rst)\n        vpipe <= '0;\n      else if (!w_valid)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\nendmodule")
+
+[TOOL RESULT]
+[Step 24/60]
+Created file: tpu_parallel.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_parallel.sv')
+
+[TOOL RESULT]
+[Step 25/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: FAIL
+  Sim:  FAIL
+  Checks (fails/tot): 0/0
+  Lint errors: %Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tpu_parallel.sv:29:15: Ca ..       for (bj = 0; bj < N; bj = bj + 1)
+      |               ^~
+        ... See the manual at https://verilator.org/verilator_doc.html?v=5.040 for more assistance.
+%Error: Exiting due to 1 error(s)
+  Sim output: 
+  Sim errors: Verilator could not build the design with the testbench:
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro ..       for (bj = 0; bj < N; bj = bj + 1)
+      |               ^~
+        ... See the manual at https://verilator.org/verilator_doc.html?v=5.040 for more assistance.
+%Error: Exiting due to 1 error(s)
+Cost: FAIL
+  Cost error: PPA extraction failed: Yosys synthesis failed to produce a netlist (netlist.v missing/empty; yosys exit=256). A common cause is an inferred latch in an always_comb block (incomplete assignment) or another synthesis error. Yosys error:
+/scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tpu_parallel.sv:29: ERROR: Left hand side of 1st expression of procedural for-loop is not a register!
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> apply_diff(diff="--- a/tpu_parallel.sv\n+++ b/tpu_parallel.sv\n@@ -30,10 +30,12 @@\n             integer bj;\n             for (bj = 0; bj < N; bj = bj + 1)\n               Breg[bi][bj] <= '0;\n+            end\n          end\n-      end else if (w_valid) begin\n+      end else if (w_valid) begin\n+         integer bj;\n          for (bj = 0; bj < N; bj = bj + 1)\n            Breg[0][bj] <= w_data[bj*DW +: DW];\n-         for (bi = 1; bi < N; bi = bi + 1)\n+         for (bi = 1; bi < N; bi = bi + 1)\n            for (bj = 0; bj < N; bj = bj + 1)\n              Breg[bi][bj] <= Breg[bi-1][bj];\n       end\n@@ -44,7 +46,7 @@\n    always_ff @(posedge clk) begin\n       if (rst) begin\n          for (ai = 0; ai < LAT; ai = ai + 1)\n            adly[ai] <= '0;\n-      end else if (!w_valid) begin\n+      end else if (!w_valid) begin\n          adly[0] <= a_valid ? a_data : {N*DW{1'b0}};\n          for (ai = 1; ai < LAT; ai = ai + 1)\n            adly[ai] <= adly[ai-1];\n@@ -76,7 +78,7 @@\n          for (i = 0; i < N/4; i = i + 1) begin : g_s0123\n             assign sum23[i] = sum01[2*i] + sum01[2*i+1];\n          end\n-\n+ \n          for (i = 0; i < N/4; i = i + 1) begin : g_s4567\n             assign sum4567[i] = prod[4+2*i] + prod[4+2*i+1];\n          end")
+
+[TOOL RESULT]
+[Step 26/60]
+Error executing tool apply_diff: 'filename'
+
+[ASSISTANT]
+  -> read_file(filename='tpu_parallel.sv', offset=20, limit=35)
+
+[TOOL RESULT]
+[Step 27/60]
+   integer bi;
+   always_ff @(posedge clk) begin
+      if (rst) begin
+         for (bi = 0; bi < N; bi = bi + 1) begin
+            integer bj;
+            for (bj = 0; bj < N; bj = bj + 1)
+              Breg[bi][bj] <= '0;
+         end
+      end else if (w_valid) begin
+         for (bj = 0; bj < N; bj = bj + 1)
+           Breg[0][bj] <= w_data[bj*DW +: DW];
+         for (bi = 1; bi < N; bi = bi + 1)
+           for (bj = 0; bj < N; bj = bj + 1)
+             Breg[bi][bj] <= Breg[bi-1][bj];
+      end
+   end
+
+   // Activation row shift register: depth LAT (15). Shifts only while ~w_valid,
+   // and zero is injected when a_valid is low (same as the systolic datapath).
+   logic [N*DW-1:0] adly [0:LAT-1];
+   integer ai;
+   always_ff @(posedge clk) begin
+      if (rst) begin
+         for (ai = 0; ai < LAT; ai = ai + 1)
+           adly[ai] <= '0;
+      end else if (!w_valid) begin
+         adly[0] <= a_valid ? a_data : {N*DW{1'b0}};
+         for (ai = 1; ai < LAT; ai = ai + 1)
+           adly[ai] <= adly[ai-1];
+      end
+   end
+
+   // Compute C = A * B from the delayed activation row. Balanced addition tree.
+   genvar j, i;
+   generate
+
+... (showing lines 20-54 of 105; use offset/limit for more)
+
+[ASSISTANT]
+  -> edit_file(filename='tpu_parallel.sv', old_string="integer bi;\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         for (bi = 0; bi < N; bi = bi + 1) begin\n            integer bj;\n            for (bj = 0; bj < N; bj = bj + 1)\n              Breg[bi][bj] <= '0;\n         end\n      end else if (w_valid) begin\n         for (bj = 0; bj < N; bj = bj + 1)\n           Breg[0][bj] <= w_data[bj*DW +: DW];\n         for (bi = 1; bi < N; bi = bi + 1)\n           for (bj = 0; bj < N; bj = bj + 1)\n             Breg[bi][bj] <= Breg[bi-1][bj];\n      end\n   end", new_string="integer bi, bj;\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         for (bi = 0; bi < N; bi = bi + 1) begin\n            for (bj = 0; bj < N; bj = bj + 1)\n              Breg[bi][bj] <= '0;\n         end\n      end else if (w_valid) begin\n         for (bj = 0; bj < N; bj = bj + 1)\n           Breg[0][bj] <= w_data[bj*DW +: DW];\n         for (bi = 1; bi < N; bi = bi + 1)\n           for (bj = 0; bj < N; bj = bj + 1)\n             Breg[bi][bj] <= Breg[bi-1][bj];\n      end\n   end")
+
+[TOOL RESULT]
+[Step 28/60]
+Edited file: tpu_parallel.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_parallel.sv')
+
+[TOOL RESULT]
+[Step 29/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 21/108
+  Sim output: TB_ERROR line=61 exp(cv=1 cd=00002c27ffffd752fffffd85ffffd1dd00002aaa00002ea2ffffd654ffffc9ed) got(cv=1 cd=0000584effffaea4fffffb0affffa3ba00002aaa00002ea2ffffd654ffffc9ed)
+TB_ERROR line=62 exp(cv=1 .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction failed: Verilator simulation failed (rc=1); tail:
+8080001f8080001f8080001f8080001f8080001f8080001f808) got(cv=1 cd=0002f40c0002f40c0002f40c0002f40c0002f40c0002f40c0002f40c0002f40c)
+TB_ERROR line=102 exp(cv=1 cd=0001f8080001f8080001f8080001f8080001f8080001f8080001f8080001f808) got(cv=1 cd=0002f40c0002f40c0002f40c0002f40c0002f40c0002f40c0002f40c0002f40c)
+TB_ERROR line=104 exp(cv=1 cd=fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400) got(cv=1 cd=fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600)
+TB_ERROR line=105 exp(cv=1 cd=fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400) got(cv=1 cd=fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600)
+TB_ERROR line=106 exp(cv=1 cd=fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400) got(cv=1 cd=fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600)
+TB_ERROR line=107 exp(cv=1 cd=fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400) got(cv=1 cd=fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600)
+TB_ERROR line=108 exp(cv=1 cd=fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400fffe0400) got(cv=1 cd=fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600fffd0600)
+TB_SUMMARY total=108 errors=21
+[112000] %Fatal: tb.sv:60: Assertion failed in tb: FAIL (too many errors, aborting)
+%Error: /scratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+; see /tmp/ppa_worker_y47mw7_t/verilator_netlist_out.log
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> read_file(filename='vectors.dat', limit=75)
+
+[TOOL RESULT]
+[Step 30/60]
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 7f00000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 007f000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 00007f0000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000007f00000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 000000007f000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 00000000007f0000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000007f00 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 000000000000007f 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 59aefba3565eac93 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 97f1994b9ff2bf9e 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 b4dc1dbcc95614c4 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 5a7ee99ea0b13ee0 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 fcdcff1939686e20 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 bca513652f7d19a9 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 a794577acd2fd456 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0aafa3697e332e20 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 00002c27ffffd752fffffd85ffffd1dd00002aaa00002ea2ffffd654ffffc9ed
+0 0000000000000000 0 0000000000000000 1 ffffcbe9fffff88fffffcce700002535ffffcfe1fffff90effffdfc1ffffcf62
+0 0000000000000000 0 0000000000000000 1 ffffda4cffffee2400000e63ffffde44ffffe4b700002aaa000009ecffffe23c
+0 0000000000000000 0 0000000000000000 1 00002ca600003e82fffff497ffffcf62ffffd060ffffd8cf00001ec2fffff020
+0 0000000000000000 0 0000000000000000 1 fffffe04ffffee24ffffff8100000c6700001c47000033980000369200000fe0
+0 0000000000000000 0 0000000000000000 1 ffffde44ffffd2db0000096d0000321b0000175100003e0300000c67ffffd4d7
+0 0000000000000000 0 0000000000000000 1 ffffd3d9ffffca6c00002b2900003c86ffffe6b300001751ffffea2c00002aaa
+0 0000000000000000 0 0000000000000000 1 000004f6ffffd7d1ffffd1dd0000341700003e820000194d000016d200000fe0
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 7f7f7f7f7f7f7f7f 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 7f7f7f7f7f7f7f7f 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 7f7f7f7f7f7f7f7f 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+
+... (showing lines 1-75 of 6782; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='vectors.dat', offset=55, limit=15)
+
+[TOOL RESULT]
+[Step 31/60]
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 00002c27ffffd752fffffd85ffffd1dd00002aaa00002ea2ffffd654ffffc9ed
+0 0000000000000000 0 0000000000000000 1 ffffcbe9fffff88fffffcce700002535ffffcfe1fffff90effffdfc1ffffcf62
+0 0000000000000000 0 0000000000000000 1 ffffda4cffffee2400000e63ffffde44ffffe4b700002aaa000009ecffffe23c
+0 0000000000000000 0 0000000000000000 1 00002ca600003e82fffff497ffffcf62ffffd060ffffd8cf00001ec2fffff020
+0 0000000000000000 0 0000000000000000 1 fffffe04ffffee24ffffff8100000c6700001c47000033980000369200000fe0
+0 0000000000000000 0 0000000000000000 1 ffffde44ffffd2db0000096d0000321b0000175100003e0300000c67ffffd4d7
+0 0000000000000000 0 0000000000000000 1 ffffd3d9ffffca6c00002b2900003c86ffffe6b300001751ffffea2c00002aaa
+0 0000000000000000 0 0000000000000000 1 000004f6ffffd7d1ffffd1dd0000341700003e820000194d000016d200000fe0
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+
+... (showing lines 55-69 of 6782; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='vectors.dat', offset=36, limit=36)
+
+[TOOL RESULT]
+[Step 32/60]
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 7f00000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 007f000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 00007f0000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000007f00000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 000000007f000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 00000000007f0000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 0000000000007f00 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 000000000000007f 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 59aefba3565eac93 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 97f1994b9ff2bf9e 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 b4dc1dbcc95614c4 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 5a7ee99ea0b13ee0 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 fcdcff1939686e20 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 bca513652f7d19a9 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 a794577acd2fd456 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0aafa3697e332e20 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 00002c27ffffd752fffffd85ffffd1dd00002aaa00002ea2ffffd654ffffc9ed
+0 0000000000000000 0 0000000000000000 1 ffffcbe9fffff88fffffcce700002535ffffcfe1fffff90effffdfc1ffffcf62
+0 0000000000000000 0 0000000000000000 1 ffffda4cffffee2400000e63ffffde44ffffe4b700002aaa000009ecffffe23c
+0 0000000000000000 0 0000000000000000 1 00002ca600003e82fffff497ffffcf62ffffd060ffffd8cf00001ec2fffff020
+0 0000000000000000 0 0000000000000000 1 fffffe04ffffee24ffffff8100000c6700001c47000033980000369200000fe0
+0 0000000000000000 0 0000000000000000 1 ffffde44ffffd2db0000096d0000321b0000175100003e0300000c67ffffd4d7
+0 0000000000000000 0 0000000000000000 1 ffffd3d9ffffca6c00002b2900003c86ffffe6b300001751ffffea2c00002aaa
+0 0000000000000000 0 0000000000000000 1 000004f6ffffd7d1ffffd1dd0000341700003e820000194d000016d200000fe0
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+
+... (showing lines 36-71 of 6782; use offset/limit for more)
+
+[ASSISTANT]
+  -> edit_file(filename='tpu_parallel.sv', old_string='// sign-extend the last two products before adding; Yosys will do this\n         assign sum_l = sum23[0] + sum23[1]; // 4 products\n         assign sum_r = $signed({{(ACCW-2*DW){prod[4][2*DW-1]}}, prod[4]})\n                      + $signed({{(ACCW-2*DW){prod[5][2*DW-1]}}, prod[5]})\n                      + $signed({{(ACCW-2*DW){prod[6][2*DW-1]}}, prod[6]})\n                      + $signed({{(ACCW-2*DW){prod[7][2*DW-1]}}, prod[7]});\n         assign dot = sum_l + sum_r;', new_string="// Balanced tree: sum23[0] = products 0..3, sum23[1] = products 4..7.\n         assign sum_l = sum23[0] + sum23[1]; // all 8 products\n         assign sum_r = '0;\n         assign dot = sum_l;")
+
+[TOOL RESULT]
+[Step 33/60]
+Edited file: tpu_parallel.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_parallel.sv')
+
+[TOOL RESULT]
+[Step 34/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 21/506
+  Sim output: TB_ERROR line=271 exp(cv=1 cd=00004376ffffcd1d00004432ffffcff1000074e700001e12000082bd00001f97) got(cv=1 cd=000036000000475fffffb1ee0000095e000040290000b27effffbf88ffff84b7)
+TB_ERROR line=272 exp(cv .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction timed out after 1800s
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> edit_file(filename='tpu_parallel.sv', old_string="// Compute C = A * B from the delayed activation row. Balanced addition tree.\n   genvar j, i;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_col\n         wire signed [DW-1:0] a_arr [0:N-1];\n         wire signed [DW-1:0] b_arr [0:N-1];\n         wire signed [2*DW-1:0] prod [0:N-1];\n         wire signed [ACCW-1:0] sum01 [0:N/2-1];\n         wire signed [ACCW-1:0] sum23 [0:N/4-1];\n         wire signed [ACCW-1:0] sum4567 [0:N/4-1];\n         wire signed [ACCW-1:0] sum_l, sum_r;\n         wire signed [ACCW-1:0] dot;\n\n         for (i = 0; i < N; i = i + 1) begin : g_prod\n            assign a_arr[i] = adly[LAT-1][i*DW +: DW];\n            assign b_arr[i] = Breg[i][j];\n            assign prod[i]  = $signed(a_arr[i]) * $signed(b_arr[i]);\n         end\n\n         for (i = 0; i < N/2; i = i + 1) begin : g_s01\n            assign sum01[i] = $signed({{(ACCW-2*DW){prod[2*i][2*DW-1]}}, prod[2*i]})\n                            + $signed({{(ACCW-2*DW){prod[2*i+1][2*DW-1]}}, prod[2*i+1]});\n         end\n\n         for (i = 0; i < N/4; i = i + 1) begin : g_s0123\n            assign sum23[i] = sum01[2*i] + sum01[2*i+1];\n         end\n\n         for (i = 0; i < N/4; i = i + 1) begin : g_s4567\n            assign sum4567[i] = prod[4+2*i] + prod[4+2*i+1];\n         end\n\n// Balanced tree: sum23[0] = products 0..3, sum23[1] = products 4..7.\n         assign sum_l = sum23[0] + sum23[1]; // all 8 products\n         assign sum_r = '0;\n         assign dot = sum_l;\n\n         assign c_data[j*ACCW +: ACCW] = dot;\n      end\n   endgenerate", new_string='// Compute C = A * B from the delayed activation row. Balanced addition tree.\n   wire signed [15:0] prod [0:7][0:7];\n   wire signed [31:0] sum01 [0:3][0:7];\n   wire signed [31:0] sum23 [0:1][0:7];\n   wire signed [31:0] dot   [0:7];\n   genvar j, i;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_col\n         for (i = 0; i < N; i = i + 1) begin : g_prod\n            assign prod[i][j] = $signed(adly[LAT-1][i*DW +: DW])\n                              * $signed(Breg[i][j]);\n         end\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_sum1\n         for (i = 0; i < N/2; i = i + 1) begin : g_sum1_i\n            assign sum01[i][j] =\n                $signed({{(32-2*DW){prod[2*i][j][15]}}, prod[2*i][j]})\n              + $signed({{(32-2*DW){prod[2*i+1][j][15]}}, prod[2*i+1][j]});\n         end\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_sum2\n         for (i = 0; i < N/4; i = i + 1) begin : g_sum2_i\n            assign sum23[i][j] = sum01[2*i][j] + sum01[2*i+1][j];\n         end\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_sum3\n         assign dot[j] = sum23[0][j] + sum23[1][j];\n         assign c_data[j*ACCW +: ACCW] = dot[j];\n      end\n   endgenerate')
+
+[TOOL RESULT]
+[Step 35/60]
+Error: old_string not found in file
+
+[ASSISTANT]
+  -> read_file(filename='tpu_parallel.sv', offset=50, limit=55)
+
+[TOOL RESULT]
+[Step 36/60]
+
+   // Compute C = A * B from the delayed activation row. Balanced addition tree.
+   genvar j, i;
+   generate
+      for (j = 0; j < N; j = j + 1) begin : g_col
+         wire signed [DW-1:0] a_arr [0:N-1];
+         wire signed [DW-1:0] b_arr [0:N-1];
+         wire signed [2*DW-1:0] prod [0:N-1];
+         wire signed [ACCW-1:0] sum01 [0:N/2-1];
+         wire signed [ACCW-1:0] sum23 [0:N/4-1];
+         wire signed [ACCW-1:0] sum4567 [0:N/4-1];
+         wire signed [ACCW-1:0] sum_l, sum_r;
+         wire signed [ACCW-1:0] dot;
+
+         for (i = 0; i < N; i = i + 1) begin : g_prod
+            assign a_arr[i] = adly[LAT-1][i*DW +: DW];
+            assign b_arr[i] = Breg[i][j];
+            assign prod[i]  = $signed(a_arr[i]) * $signed(b_arr[i]);
+         end
+
+         for (i = 0; i < N/2; i = i + 1) begin : g_s01
+            assign sum01[i] = $signed({{(ACCW-2*DW){prod[2*i][2*DW-1]}}, prod[2*i]})
+                            + $signed({{(ACCW-2*DW){prod[2*i+1][2*DW-1]}}, prod[2*i+1]});
+         end
+
+         for (i = 0; i < N/4; i = i + 1) begin : g_s0123
+            assign sum23[i] = sum01[2*i] + sum01[2*i+1];
+         end
+
+         for (i = 0; i < N/4; i = i + 1) begin : g_s4567
+            assign sum4567[i] = prod[4+2*i] + prod[4+2*i+1];
+         end
+
+         // Balanced tree: sum23[0] = products 0..3, sum23[1] = products 4..7.
+         assign sum_l = sum23[0] + sum23[1]; // all 8 products
+         assign sum_r = '0;
+         assign dot = sum_l;
+
+         assign c_data[j*ACCW +: ACCW] = dot;
+      end
+   endgenerate
+
+   // Valid pipeline: a_valid delayed 15 en-cycles.
+   logic [LAT-1:0] vpipe;
+   always_ff @(posedge clk) begin
+      if (rst)
+        vpipe <= '0;
+      else if (!w_valid)
+        vpipe <= {vpipe[LAT-2:0], a_valid};
+   end
+   assign c_valid = vpipe[LAT-1];
+endmodule
+... (showing lines 50-101 of 101; use offset/limit for more)
+
+[ASSISTANT]
+  -> edit_file(filename='tpu_parallel.sv', old_string="// Compute C = A * B from the delayed activation row. Balanced addition tree.\n   genvar j, i;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_col\n         wire signed [DW-1:0] a_arr [0:N-1];\n         wire signed [DW-1:0] b_arr [0:N-1];\n         wire signed [2*DW-1:0] prod [0:N-1];\n         wire signed [ACCW-1:0] sum01 [0:N/2-1];\n         wire signed [ACCW-1:0] sum23 [0:N/4-1];\n         wire signed [ACCW-1:0] sum4567 [0:N/4-1];\n         wire signed [ACCW-1:0] sum_l, sum_r;\n         wire signed [ACCW-1:0] dot;\n\n         for (i = 0; i < N; i = i + 1) begin : g_prod\n            assign a_arr[i] = adly[LAT-1][i*DW +: DW];\n            assign b_arr[i] = Breg[i][j];\n            assign prod[i]  = $signed(a_arr[i]) * $signed(b_arr[i]);\n         end\n\n         for (i = 0; i < N/2; i = i + 1) begin : g_s01\n            assign sum01[i] = $signed({{(ACCW-2*DW){prod[2*i][2*DW-1]}}, prod[2*i]})\n                            + $signed({{(ACCW-2*DW){prod[2*i+1][2*DW-1]}}, prod[2*i+1]});\n         end\n\n         for (i = 0; i < N/4; i = i + 1) begin : g_s0123\n            assign sum23[i] = sum01[2*i] + sum01[2*i+1];\n         end\n\n         for (i = 0; i < N/4; i = i + 1) begin : g_s4567\n            assign sum4567[i] = prod[4+2*i] + prod[4+2*i+1];\n         end\n\n         // Balanced tree: sum23[0] = products 0..3, sum23[1] = products 4..7.\n         assign sum_l = sum23[0] + sum23[1]; // all 8 products\n         assign sum_r = '0;\n         assign dot = sum_l;\n\n         assign c_data[j*ACCW +: ACCW] = dot;\n      end\n   endgenerate", new_string='// Compute C = A * B from the delayed activation row. Balanced addition tree.\n   wire signed [15:0] prod [0:7][0:7];\n   wire signed [ACCW-1:0] sum01 [0:3][0:7];\n   wire signed [ACCW-1:0] sum23 [0:1][0:7];\n   wire signed [ACCW-1:0] dot   [0:7];\n   genvar j, i;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_col_prod\n         for (i = 0; i < N; i = i + 1) begin : g_prod_i\n            assign prod[i][j] = $signed(adly[LAT-1][i*DW +: DW])\n                              * $signed(Breg[i][j]);\n         end\n      end\n\n      for (j = 0; j < N; j = j + 1) begin : g_col_s01\n         for (i = 0; i < N/2; i = i + 1) begin : g_s01_i\n            assign sum01[i][j] =\n                $signed({{(ACCW-2*DW){prod[2*i][j][15]}}, prod[2*i][j]})\n              + $signed({{(ACCW-2*DW){prod[2*i+1][j][15]}}, prod[2*i+1][j]});\n         end\n      end\n\n      for (j = 0; j < N; j = j + 1) begin : g_col_s23\n         for (i = 0; i < N/4; i = i + 1) begin : g_s23_i\n            assign sum23[i][j] = sum01[2*i][j] + sum01[2*i+1][j];\n         end\n      end\n\n      for (j = 0; j < N; j = j + 1) begin : g_col_out\n         assign dot[j] = sum23[0][j] + sum23[1][j];\n         assign c_data[j*ACCW +: ACCW] = dot[j];\n      end\n   endgenerate')
+
+[TOOL RESULT]
+[Step 37/60]
+Edited file: tpu_parallel.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_parallel.sv')
+
+[TOOL RESULT]
+[Step 38/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 21/506
+  Sim output: TB_ERROR line=271 exp(cv=1 cd=00004376ffffcd1d00004432ffffcff1000074e700001e12000082bd00001f97) got(cv=1 cd=000036000000475fffffb1ee0000095e000040290000b27effffbf88ffff84b7)
+TB_ERROR line=272 exp(cv .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction timed out after 1800s
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> read_file(filename='vectors.dat', offset=245, limit=35)
+
+[TOOL RESULT]
+[Step 39/60]
+1 403055c81a4f667b 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 81d18c49787ef63a 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 b90fc33806c8aea6 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 ebeb460966a76a14 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 665299a9e84c8e5b 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 5471d7c1997812c6 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 1afa4f050218102f 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 7eeaa6d2d5bd4977 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 fce2c75a662a67f0 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 043cfa23ae2fd9ae 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0a40eb5344538ae7 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 afeec0380e7f9f2d 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 4a39572d917cf43d 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 59f403a9577fe38b 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 9c1d528efef873fc 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 210e6b1a8580f205 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 46e219a4b2b95f00 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 c11b93f7c08094ab 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 6ab7cdcff2b7ff65 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 6f48a5807a725990 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 1fe67de9a21583e5 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 7db71707f16ef6e3 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 9b49ca9c5578f2df 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 49de9e9a54c88ced 1 00004376ffffcd1d00004432ffffcff1000074e700001e12000082bd00001f97
+0 0000000000000000 1 dee128d4a8b92066 1 ffffef88ffffe1c9ffff98f100000fbb000017510000460dffffe02dffffb9d3
+0 0000000000000000 1 d662293f411f906f 1 ffffd990000007bc000022fdffffefbb00000f0d00000a06ffffe0a50000005d
+0 0000000000000000 1 bf5733a90fa881b7 1 00005332000008dd000023d000004b7cffffe6f2ffffbc2200003796ffffe037
+0 0000000000000000 1 7299ac5d1e3642ea 1 00004b8cffffdb66ffffeccf0000294effffe6d40000228e0000069400003060
+0 0000000000000000 0 0000000000000000 1 ffffc72e000001f0ffffe419000002f100000f5100003142ffffb531ffffd541
+0 0000000000000000 0 0000000000000000 1 ffffee8300001cca000023cffffff824ffffb3810000343f00001d9b00004b2b
+0 0000000000000000 0 0000000000000000 1 ffffd27800001eb1ffffb5ca00000ca3fffff5d1ffff7807000017f600004023
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+
+... (showing lines 245-279 of 6782; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='vectors.dat', offset=258, limit=22)
+
+[TOOL RESULT]
+[Step 40/60]
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 4a39572d917cf43d 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 59f403a9577fe38b 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 9c1d528efef873fc 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 210e6b1a8580f205 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 46e219a4b2b95f00 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 c11b93f7c08094ab 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 6ab7cdcff2b7ff65 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 6f48a5807a725990 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 1fe67de9a21583e5 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 7db71707f16ef6e3 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 9b49ca9c5578f2df 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 49de9e9a54c88ced 1 00004376ffffcd1d00004432ffffcff1000074e700001e12000082bd00001f97
+0 0000000000000000 1 dee128d4a8b92066 1 ffffef88ffffe1c9ffff98f100000fbb000017510000460dffffe02dffffb9d3
+0 0000000000000000 1 d662293f411f906f 1 ffffd990000007bc000022fdffffefbb00000f0d00000a06ffffe0a50000005d
+0 0000000000000000 1 bf5733a90fa881b7 1 00005332000008dd000023d000004b7cffffe6f2ffffbc2200003796ffffe037
+0 0000000000000000 1 7299ac5d1e3642ea 1 00004b8cffffdb66ffffeccf0000294effffe6d40000228e0000069400003060
+0 0000000000000000 0 0000000000000000 1 ffffc72e000001f0ffffe419000002f100000f5100003142ffffb531ffffd541
+0 0000000000000000 0 0000000000000000 1 ffffee8300001cca000023cffffff824ffffb3810000343f00001d9b00004b2b
+0 0000000000000000 0 0000000000000000 1 ffffd27800001eb1ffffb5ca00000ca3fffff5d1ffff7807000017f600004023
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+
+... (showing lines 258-279 of 6782; use offset/limit for more)
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_var_width.sv', target_delay=500)
+
+[TOOL RESULT]
+[Step 41/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 3116374.9562736596
+  Metrics:
+    area_delay_product: 3116374.9562736596
+    delay: 741.8829
+    area: 4200.629177830706
+    power_probabilistic_fixed_clock: 0.0413
+    target_delay: 500
+    worst_slack: -257.25
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_2f5f61c58b47 (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      85.07   85.07 v u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      61.69  146.77 v _63750_/Y (OR4x2_ASAP7_75t_R)
+      18.79  165.56 ^ _63751_/Y (NAND2xp5_ASAP7_75t_R)
+      33.25  198.81 v _63752_/Y (XOR2x2_ASAP7_75t_R)
+      27.40  226.21 v _63753_/Y (XOR2x1_ASAP7_75t_R)
+      26.67  252.88 v _63754_/Y (XNOR2x1_ASAP7_75t_R)
+      19.45  272.33 ^ _63755_/Y (XNOR2xp5_ASAP7_75t_R)
+      41.39  313.71 v _63756_/Y (XNOR2x2_ASAP7_75t_R)
+      27.98  341.70 v _63757_/Y (XOR2x1_ASAP7_75t_R)
+      31.89  373.59 ^ _63763_/Y (MAJIxp5_ASAP7_75t_R)
+      34.48  408.07 v _63795_/Y (MAJIxp5_ASAP7_75t_R)
+      38.27  446.34 ^ _63831_/Y (MAJIxp5_ASAP7_75t_R)
+      33.84  480.18 v _63869_/Y (MAJIxp5_ASAP7_75t_R)
+      48.58  528.76 ^ _63986_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.89  556.65 v _64028_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      22.83  579.48 ^ _64029_/Y (AOI21x1_ASAP7_75t_R)
+      27.93  607.41 v _64067_/Y (MAJIxp5_ASAP7_75t_R)
+      42.00  649.41 ^ _64122_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      34.67  684.09 ^ _64161_/Y (MAJx2_ASAP7_75t_R)
+      10.84  694.93 v _64162_/Y (OAI21x1_ASAP7_75t_R)
+      24.24  719.17 ^ _64164_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      22.71  741.88 ^ _64165_/Y (BUFx3_ASAP7_75t_R)
+       0.00  741.88 ^ vh_2f5f61c58b47/D (DFFHQNx1_ASAP7_75t_R)
+             741.88   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ vh_2f5f61c58b47/CLK (DFFHQNx1_ASAP7_75t_R)
+     -15.37  484.63   library setup time
+             484.63   data required time
+    ---------------------------------------------------------
+             484.63   data required time
+            -741.88   data arrival time
+    ---------------------------------------------------------
+            -257.25   slack (VIOLATED)
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> edit_file(filename='tpu_parallel.sv', old_string='assign prod[i][j] = $signed(adly[LAT-1][i*DW +: DW])\n                              * $signed(Breg[i][j]);', new_string='assign prod[i][j] = $signed(adly[N-1+i][i*DW +: DW])\n                              * $signed(Breg[i][j]);')
+
+[TOOL RESULT]
+[Step 42/60]
+Edited file: tpu_parallel.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_parallel.sv')
+
+[TOOL RESULT]
+[Step 43/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 21/110
+  Sim output: TB_ERROR line=61 exp(cv=1 cd=00002c27ffffd752fffffd85ffffd1dd00002aaa00002ea2ffffd654ffffc9ed) got(cv=1 cd=00002c27fffff88f00000e63ffffcf6200001c4700003e03ffffea2c00000fe0)
+TB_ERROR line=62 exp(cv=1 .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction timed out after 1800s
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> read_file(filename='vectors.dat', offset=47, limit=19)
+
+[TOOL RESULT]
+[Step 44/60]
+0 0000000000000000 1 59aefba3565eac93 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 97f1994b9ff2bf9e 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 b4dc1dbcc95614c4 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 5a7ee99ea0b13ee0 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 fcdcff1939686e20 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 bca513652f7d19a9 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 a794577acd2fd456 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0aafa3697e332e20 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 1 00002c27ffffd752fffffd85ffffd1dd00002aaa00002ea2ffffd654ffffc9ed
+0 0000000000000000 0 0000000000000000 1 ffffcbe9fffff88fffffcce700002535ffffcfe1fffff90effffdfc1ffffcf62
+0 0000000000000000 0 0000000000000000 1 ffffda4cffffee2400000e63ffffde44ffffe4b700002aaa000009ecffffe23c
+0 0000000000000000 0 0000000000000000 1 00002ca600003e82fffff497ffffcf62ffffd060ffffd8cf00001ec2fffff020
+0 0000000000000000 0 0000000000000000 1 fffffe04ffffee24ffffff8100000c6700001c47000033980000369200000fe0
+
+... (showing lines 47-65 of 6782; use offset/limit for more)
+
+[ASSISTANT]
+  -> read_file(filename='tpu_parallel.sv', offset=14, limit=80)
+
+[TOOL RESULT]
+[Step 45/60]
+   localparam LAT = 2*N - 1;
+
+   // Weight matrix B[i][j], i = row, j = column. Load shifts south:
+   // bottom matrix row first, so B[0] ends up in Breg[0] after N cycles.
+   logic [DW-1:0] Breg [0:N-1][0:N-1];
+
+   integer bi, bj;
+   always_ff @(posedge clk) begin
+      if (rst) begin
+         for (bi = 0; bi < N; bi = bi + 1) begin
+            for (bj = 0; bj < N; bj = bj + 1)
+              Breg[bi][bj] <= '0;
+         end
+      end else if (w_valid) begin
+         for (bj = 0; bj < N; bj = bj + 1)
+           Breg[0][bj] <= w_data[bj*DW +: DW];
+         for (bi = 1; bi < N; bi = bi + 1)
+           for (bj = 0; bj < N; bj = bj + 1)
+             Breg[bi][bj] <= Breg[bi-1][bj];
+      end
+   end
+
+   // Activation row shift register: depth LAT (15). Shifts only while ~w_valid,
+   // and zero is injected when a_valid is low (same as the systolic datapath).
+   logic [N*DW-1:0] adly [0:LAT-1];
+   integer ai;
+   always_ff @(posedge clk) begin
+      if (rst) begin
+         for (ai = 0; ai < LAT; ai = ai + 1)
+           adly[ai] <= '0;
+      end else if (!w_valid) begin
+         adly[0] <= a_valid ? a_data : {N*DW{1'b0}};
+         for (ai = 1; ai < LAT; ai = ai + 1)
+           adly[ai] <= adly[ai-1];
+      end
+   end
+
+   // Compute C = A * B from the delayed activation row. Balanced addition tree.
+   wire signed [15:0] prod [0:7][0:7];
+   wire signed [ACCW-1:0] sum01 [0:3][0:7];
+   wire signed [ACCW-1:0] sum23 [0:1][0:7];
+   wire signed [ACCW-1:0] dot   [0:7];
+   genvar j, i;
+   generate
+      for (j = 0; j < N; j = j + 1) begin : g_col_prod
+         for (i = 0; i < N; i = i + 1) begin : g_prod_i
+            assign prod[i][j] = $signed(adly[N-1+i][i*DW +: DW])
+                              * $signed(Breg[i][j]);
+         end
+      end
+
+      for (j = 0; j < N; j = j + 1) begin : g_col_s01
+         for (i = 0; i < N/2; i = i + 1) begin : g_s01_i
+            assign sum01[i][j] =
+                $signed({{(ACCW-2*DW){prod[2*i][j][15]}}, prod[2*i][j]})
+              + $signed({{(ACCW-2*DW){prod[2*i+1][j][15]}}, prod[2*i+1][j]});
+         end
+      end
+
+      for (j = 0; j < N; j = j + 1) begin : g_col_s23
+         for (i = 0; i < N/4; i = i + 1) begin : g_s23_i
+            assign sum23[i][j] = sum01[2*i][j] + sum01[2*i+1][j];
+         end
+      end
+
+      for (j = 0; j < N; j = j + 1) begin : g_col_out
+         assign dot[j] = sum23[0][j] + sum23[1][j];
+         assign c_data[j*ACCW +: ACCW] = dot[j];
+      end
+   endgenerate
+
+   // Valid pipeline: a_valid delayed 15 en-cycles.
+   logic [LAT-1:0] vpipe;
+   always_ff @(posedge clk) begin
+      if (rst)
+        vpipe <= '0;
+      else if (!w_valid)
+        vpipe <= {vpipe[LAT-2:0], a_valid};
+   end
+   assign c_valid = vpipe[LAT-1];
+
+... (showing lines 14-93 of 94; use offset/limit for more)
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_var_width.sv', target_delay=300)
+
+[TOOL RESULT]
+[Step 46/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 3116374.9562736596
+  Metrics:
+    area_delay_product: 3116374.9562736596
+    delay: 741.8829
+    area: 4200.629177830706
+    power_probabilistic_fixed_clock: 0.0689
+    target_delay: 300
+    worst_slack: -457.25
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_2f5f61c58b47 (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      85.07   85.07 v u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      61.69  146.77 v _63750_/Y (OR4x2_ASAP7_75t_R)
+      18.79  165.56 ^ _63751_/Y (NAND2xp5_ASAP7_75t_R)
+      33.25  198.81 v _63752_/Y (XOR2x2_ASAP7_75t_R)
+      27.40  226.21 v _63753_/Y (XOR2x1_ASAP7_75t_R)
+      26.67  252.88 v _63754_/Y (XNOR2x1_ASAP7_75t_R)
+      19.45  272.33 ^ _63755_/Y (XNOR2xp5_ASAP7_75t_R)
+      41.39  313.71 v _63756_/Y (XNOR2x2_ASAP7_75t_R)
+      27.98  341.70 v _63757_/Y (XOR2x1_ASAP7_75t_R)
+      31.89  373.59 ^ _63763_/Y (MAJIxp5_ASAP7_75t_R)
+      34.48  408.07 v _63795_/Y (MAJIxp5_ASAP7_75t_R)
+      38.27  446.34 ^ _63831_/Y (MAJIxp5_ASAP7_75t_R)
+      33.84  480.18 v _63869_/Y (MAJIxp5_ASAP7_75t_R)
+      48.58  528.76 ^ _63986_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.89  556.65 v _64028_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      22.83  579.48 ^ _64029_/Y (AOI21x1_ASAP7_75t_R)
+      27.93  607.41 v _64067_/Y (MAJIxp5_ASAP7_75t_R)
+      42.00  649.41 ^ _64122_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      34.67  684.09 ^ _64161_/Y (MAJx2_ASAP7_75t_R)
+      10.84  694.93 v _64162_/Y (OAI21x1_ASAP7_75t_R)
+      24.24  719.17 ^ _64164_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      22.71  741.88 ^ _64165_/Y (BUFx3_ASAP7_75t_R)
+       0.00  741.88 ^ vh_2f5f61c58b47/D (DFFHQNx1_ASAP7_75t_R)
+             741.88   data arrival time
+    
+     300.00  300.00   clock clk (rise edge)
+       0.00  300.00   clock network delay (ideal)
+       0.00  300.00   clock reconvergence pessimism
+             300.00 ^ vh_2f5f61c58b47/CLK (DFFHQNx1_ASAP7_75t_R)
+     -15.37  284.63   library setup time
+             284.63   data required time
+    ---------------------------------------------------------
+             284.63   data required time
+            -741.88   data arrival time
+    ---------------------------------------------------------
+            -457.25   slack (VIOLATED)
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> create_file(filename='tpu_pipe2.sv', content="module tpu\n  #(parameter N = 8, DW = 8, ACCW = 32)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic w_valid,\n    input  logic [N*DW-1:0]   w_data,\n    input  logic a_valid,\n    input  logic [N*DW-1:0]   a_data,\n    output logic c_valid,\n    output logic [N*ACCW-1:0] c_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   // Weight matrix register file, same load/reload/stall behavior.\n   logic [DW-1:0] Breg [0:N-1][0:N-1];\n   integer bi, bj;\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         for (bi = 0; bi < N; bi = bi + 1)\n           for (bj = 0; bj < N; bj = bj + 1)\n             Breg[bi][bj] <= '0;\n      end else if (w_valid) begin\n         for (bj = 0; bj < N; bj = bj + 1)\n           Breg[0][bj] <= w_data[bj*DW +: DW];\n         for (bi = 1; bi < N; bi = bi + 1)\n           for (bj = 0; bj < N; bj = bj + 1)\n             Breg[bi][bj] <= Breg[bi-1][bj];\n      end\n   end\n\n   // Activation row delay line. Depth 16: stage 0 is the current input.\n   logic [N*DW-1:0] adly [0:LAT];\n   integer ai;\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         for (ai = 0; ai <= LAT; ai = ai + 1)\n           adly[ai] <= '0;\n      end else if (!w_valid) begin\n         adly[0] <= a_valid ? a_data : {N*DW{1'b0}};\n         for (ai = 1; ai <= LAT; ai = ai + 1)\n           adly[ai] <= adly[ai-1];\n      end\n   end\n\n   // products for the eight A rows currently in the pipeline.\n   // The row i partial products are built from adly[i+1], i.e. with the\n   // systolic arrival skew (activation row r is at stage r+1 after r en-cycles).\n   wire signed [15:0] prod_i [0:N-1][0:N-1];\n   wire signed [ACCW-1:0] partial_i [0:N-1][0:N-1];\n   genvar i, j;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_row\n         for (j = 0; j < N; j = j + 1) begin : g_col\n            assign prod_i[i][j] = $signed(adly[i+1][i*DW +: DW])\n                                * $signed(Breg[i][j]);\n            assign partial_i[i][j] =\n                {{(ACCW-2*DW){prod_i[i][j][15]}}, prod_i[i][j]};\n         end\n      end\n\n      // Add partial products along the A-row dimension. This is intentionally\n      // left as a simple expression so Yosys sees a wide carry-save tree.\n      for (j = 0; j < N; j = j + 1) begin : g_out\n         assign c_data[j*ACCW +: ACCW] =\n             partial_i[0][j] + partial_i[1][j] + partial_i[2][j] +\n             partial_i[3][j] + partial_i[4][j] + partial_i[5][j] +\n             partial_i[6][j] + partial_i[7][j];\n      end\n   endgenerate\n\n   // Result row r is valid LAT cycles after its input row, still in slot LAT.\n   logic [LAT:0] vpipe;\n   always_ff @(posedge clk) begin\n      if (rst)\n        vpipe <= '0;\n      else if (!w_valid)\n        vpipe <= {vpipe[LAT-1:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT];\nendmodule")
+
+[TOOL RESULT]
+[Step 47/60]
+Created file: tpu_pipe2.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_pipe2.sv')
+
+[TOOL RESULT]
+[Step 48/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 21/104
+  Sim output: TB_ERROR line=27 exp(cv=1 cd=0000000000000000000000000000000000000000000000000000000000000000) got(cv=0 cd=0000000000000000000000000000000000000000000000000000000000000000)
+TB_ERROR line=35 exp(cv=0 .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction timed out after 1800s
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_var_width.sv', target_delay=600)
+
+[TOOL RESULT]
+[Step 49/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 3116374.9562736596
+  Metrics:
+    area_delay_product: 3116374.9562736596
+    delay: 741.8829
+    area: 4200.629177830706
+    power_probabilistic_fixed_clock: 0.0344
+    target_delay: 600
+    worst_slack: -157.25
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_2f5f61c58b47 (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      85.07   85.07 v u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      61.69  146.77 v _63750_/Y (OR4x2_ASAP7_75t_R)
+      18.79  165.56 ^ _63751_/Y (NAND2xp5_ASAP7_75t_R)
+      33.25  198.81 v _63752_/Y (XOR2x2_ASAP7_75t_R)
+      27.40  226.21 v _63753_/Y (XOR2x1_ASAP7_75t_R)
+      26.67  252.88 v _63754_/Y (XNOR2x1_ASAP7_75t_R)
+      19.45  272.33 ^ _63755_/Y (XNOR2xp5_ASAP7_75t_R)
+      41.39  313.71 v _63756_/Y (XNOR2x2_ASAP7_75t_R)
+      27.98  341.70 v _63757_/Y (XOR2x1_ASAP7_75t_R)
+      31.89  373.59 ^ _63763_/Y (MAJIxp5_ASAP7_75t_R)
+      34.48  408.07 v _63795_/Y (MAJIxp5_ASAP7_75t_R)
+      38.27  446.34 ^ _63831_/Y (MAJIxp5_ASAP7_75t_R)
+      33.84  480.18 v _63869_/Y (MAJIxp5_ASAP7_75t_R)
+      48.58  528.76 ^ _63986_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.89  556.65 v _64028_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      22.83  579.48 ^ _64029_/Y (AOI21x1_ASAP7_75t_R)
+      27.93  607.41 v _64067_/Y (MAJIxp5_ASAP7_75t_R)
+      42.00  649.41 ^ _64122_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      34.67  684.09 ^ _64161_/Y (MAJx2_ASAP7_75t_R)
+      10.84  694.93 v _64162_/Y (OAI21x1_ASAP7_75t_R)
+      24.24  719.17 ^ _64164_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      22.71  741.88 ^ _64165_/Y (BUFx3_ASAP7_75t_R)
+       0.00  741.88 ^ vh_2f5f61c58b47/D (DFFHQNx1_ASAP7_75t_R)
+             741.88   data arrival time
+    
+     600.00  600.00   clock clk (rise edge)
+       0.00  600.00   clock network delay (ideal)
+       0.00  600.00   clock reconvergence pessimism
+             600.00 ^ vh_2f5f61c58b47/CLK (DFFHQNx1_ASAP7_75t_R)
+     -15.37  584.63   library setup time
+             584.63   data required time
+    ---------------------------------------------------------
+             584.63   data required time
+            -741.88   data arrival time
+    ---------------------------------------------------------
+            -157.25   slack (VIOLATED)
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> create_file(filename='tpu_direct.sv', content="module tpu\n  #(parameter N = 8, DW = 8, ACCW_TOP = 32, DOTW = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic w_valid,\n    input  logic [N*DW-1:0]   w_data,\n    input  logic a_valid,\n    input  logic [N*DW-1:0]   a_data,\n    output logic c_valid,\n    output logic [N*ACCW_TOP-1:0] c_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   //////////////////////////////////////////////////////////////////////////\n   // Stationary weight matrix. Load/reload/stall behavior identical to the\n   // systolic array.\n   //////////////////////////////////////////////////////////////////////////\n   logic [DW-1:0] Breg [0:N-1][0:N-1];\n   integer bi, bj;\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         for (bi = 0; bi < N; bi = bi + 1)\n           for (bj = 0; bj < N; bj = bj + 1)\n             Breg[bi][bj] <= '0;\n      end else if (w_valid) begin\n         for (bj = 0; bj < N; bj = bj + 1)\n           Breg[0][bj] <= w_data[bj*DW +: DW];\n         for (bi = 1; bi < N; bi = bi + 1)\n           for (bj = 0; bj < N; bj = bj + 1)\n             Breg[bi][bj] <= Breg[bi-1][bj];\n      end\n   end\n\n   //////////////////////////////////////////////////////////////////////////\n   // Dot-product matrix: c_row[j] = sum_i a_row[i] * B[i][j].\n   // Zeros are injected when a_valid is low, exactly as in the reference.\n   //////////////////////////////////////////////////////////////////////////\n   wire signed [DW-1:0] a_cur [0:N-1];\n   wire signed [15:0]   prod  [0:N-1][0:N-1];\n   wire signed [DOTW-1:0] psum01 [0:N/2-1][0:N-1];\n   wire signed [DOTW-1:0] psum23 [0:N/4-1][0:N-1];\n   wire signed [DOTW-1:0] dot    [0:N-1];\n\n   genvar i, j;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_a\n         assign a_cur[i] = a_valid ? $signed(a_data[i*DW +: DW])\n                                   : $signed({DW{1'b0}});\n      end\n\n      for (i = 0; i < N; i = i + 1) begin : g_products\n         for (j = 0; j < N; j = j + 1) begin : g_col\n            assign prod[i][j] = a_cur[i] * $signed(Breg[i][j]);\n         end\n      end\n\n      for (j = 0; j < N; j = j + 1) begin : g_l1\n         for (i = 0; i < N/2; i = i + 1) begin : g_pairs\n            assign psum01[i][j] =\n                $signed({{(DOTW-2*DW){prod[2*i][j][15]}}, prod[2*i][j]})\n              + $signed({{(DOTW-2*DW){prod[2*i+1][j][15]}}, prod[2*i+1][j]});\n         end\n      end\n\n      for (j = 0; j < N; j = j + 1) begin : g_l2\n         for (i = 0; i < N/4; i = i + 1) begin : g_pairs2\n            assign psum23[i][j] = psum01[2*i][j] + psum01[2*i+1][j];\n         end\n      end\n\n      for (j = 0; j < N; j = j + 1) begin : g_l3\n         assign dot[j] = psum23[0][j] + psum23[1][j];\n      end\n   endgenerate\n\n   //////////////////////////////////////////////////////////////////////////\n   // Output de-skew / latency pipeline. Dot rows are captured and advanced\n   // only on compute cycles (~w_valid), matching the systolic stall behavior.\n   //////////////////////////////////////////////////////////////////////////\n   logic [DOTW-1:0] pipe [0:LAT-1][0:N-1];\n   integer aip, cj;\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         for (aip = 0; aip < LAT; aip = aip + 1)\n           for (cj = 0; cj < N; cj = cj + 1)\n             pipe[aip][cj] <= '0;\n      end else if (!w_valid) begin\n         for (cj = 0; cj < N; cj = cj + 1)\n           pipe[0][cj] <= dot[cj];\n         for (aip = 1; aip < LAT; aip = aip + 1)\n           for (cj = 0; cj < N; cj = cj + 1)\n             pipe[aip][cj] <= pipe[aip-1][cj];\n      end\n   end\n\n   genvar oj;\n   generate\n      for (oj = 0; oj < N; oj = oj + 1) begin : g_out\n         assign c_data[oj*ACCW_TOP +: ACCW_TOP] =\n             {{(ACCW_TOP-DOTW){pipe[LAT-1][oj][DOTW-1]}}, pipe[LAT-1][oj]};\n      end\n   endgenerate\n\n   //////////////////////////////////////////////////////////////////////////\n   // Valid pipeline.\n   //////////////////////////////////////////////////////////////////////////\n   logic [LAT-1:0] vpipe;\n   always_ff @(posedge clk) begin\n      if (rst)\n        vpipe <= '0;\n      else if (!w_valid)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\nendmodule")
+
+[TOOL RESULT]
+[Step 50/60]
+Created file: tpu_direct.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_direct.sv')
+
+[TOOL RESULT]
+[Step 51/60]
+=== Evaluation Result ===
+Correctness: FAIL
+  Lint: OK
+  Sim:  FAIL
+  Checks (fails/tot): 21/516
+  Sim output: TB_ERROR line=271 exp(cv=1 cd=00004376ffffcd1d00004432ffffcff1000074e700001e12000082bd00001f97) got(cv=1 cd=ffffdf15ffff83d900003286ffffe3dd000074e700001e12000082bd00001f97)
+TB_ERROR line=272 exp(cv .. ratch/farnold/eda_package/rtlscout_pkg_bench_work/rtlscout-bench/runs/tpu-adp/deepseek-v4-pro/tpu_verilog/deepseek_deepseek-v4-pro-0813/20261014_214629/workspace/tb.sv:60: Verilog $stop
+Aborting...
+
+Cost: FAIL
+  Cost error: PPA extraction timed out after 1800s
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> read_file(filename='vectors.dat', offset=240, limit=40)
+
+[TOOL RESULT]
+[Step 52/60]
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 3fe1215f08ffcc12 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 9ab40f980c5b38a7 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 4749a13e011486e4 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 bd4b2d268029bd21 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 403055c81a4f667b 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 81d18c49787ef63a 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 b90fc33806c8aea6 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 ebeb460966a76a14 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 665299a9e84c8e5b 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 5471d7c1997812c6 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 1afa4f050218102f 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 7eeaa6d2d5bd4977 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 fce2c75a662a67f0 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 043cfa23ae2fd9ae 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 0a40eb5344538ae7 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 afeec0380e7f9f2d 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 4a39572d917cf43d 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 59f403a9577fe38b 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 9c1d528efef873fc 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 210e6b1a8580f205 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 46e219a4b2b95f00 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 c11b93f7c08094ab 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 6ab7cdcff2b7ff65 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+1 6f48a5807a725990 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 1fe67de9a21583e5 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 7db71707f16ef6e3 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 9b49ca9c5578f2df 0 0000000000000000000000000000000000000000000000000000000000000000
+0 0000000000000000 1 49de9e9a54c88ced 1 00004376ffffcd1d00004432ffffcff1000074e700001e12000082bd00001f97
+0 0000000000000000 1 dee128d4a8b92066 1 ffffef88ffffe1c9ffff98f100000fbb000017510000460dffffe02dffffb9d3
+0 0000000000000000 1 d662293f411f906f 1 ffffd990000007bc000022fdffffefbb00000f0d00000a06ffffe0a50000005d
+0 0000000000000000 1 bf5733a90fa881b7 1 00005332000008dd000023d000004b7cffffe6f2ffffbc2200003796ffffe037
+0 0000000000000000 1 7299ac5d1e3642ea 1 00004b8cffffdb66ffffeccf0000294effffe6d40000228e0000069400003060
+0 0000000000000000 0 0000000000000000 1 ffffc72e000001f0ffffe419000002f100000f5100003142ffffb531ffffd541
+0 0000000000000000 0 0000000000000000 1 ffffee8300001cca000023cffffff824ffffb3810000343f00001d9b00004b2b
+0 0000000000000000 0 0000000000000000 1 ffffd27800001eb1ffffb5ca00000ca3fffff5d1ffff7807000017f600004023
+0 0000000000000000 0 0000000000000000 0 0000000000000000000000000000000000000000000000000000000000000000
+
+... (showing lines 240-279 of 6782; use offset/limit for more)
+
+[ASSISTANT]
+  -> create_file(filename='tpu_direct2.sv', content="module tpu\n  #(parameter N = 8, DW = 8, ACCW_TOP = 32, DOTW = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic w_valid,\n    input  logic [N*DW-1:0]   w_data,\n    input  logic a_valid,\n    input  logic [N*DW-1:0]   a_data,\n    output logic c_valid,\n    output logic [N*ACCW_TOP-1:0] c_data\n    );\n\n   localparam LAT = 2*N - 1;   // 15\n   localparam PIPE_W = LAT*N*2*DW;  // 15*8*16 = 1920 bits\n\n   //////////////////////////////////////////////////////////////////////////\n   // Static weight matrix. Load/reload/stall behavior identical to the\n   // systolic array.\n   //////////////////////////////////////////////////////////////////////////\n   logic [DW-1:0] Breg [0:N-1][0:N-1];\n   integer bi, bj;\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         for (bi = 0; bi < N; bi = bi + 1)\n           for (bj = 0; bj < N; bj = bj + 1)\n             Breg[bi][bj] <= '0;\n      end else if (w_valid) begin\n         for (bj = 0; bj < N; bj = bj + 1)\n           Breg[0][bj] <= w_data[bj*DW +: DW];\n         for (bi = 1; bi < N; bi = bi + 1)\n           for (bj = 0; bj < N; bj = bj + 1)\n             Breg[bi][bj] <= Breg[bi-1][bj];\n      end\n   end\n\n   //////////////////////////////////////////////////////////////////////////\n   // Activation row delay line, depth 15. Stage t is the input seen t compute\n   // cycles ago (zero-padded when a_valid was low).\n   //////////////////////////////////////////////////////////////////////////\n   logic [N*DW-1:0] adly [0:LAT-1];\n   integer ai;\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         for (ai = 0; ai < LAT; ai = ai + 1)\n           adly[ai] <= '0;\n      end else if (!w_valid) begin\n         adly[0] <= a_valid ? a_data : {N*DW{1'b0}};\n         for (ai = 1; ai < LAT; ai = ai + 1)\n           adly[ai] <= adly[ai-1];\n      end\n   end\n\n   //////////////////////////////////////////////////////////////////////////\n   // Deferred scalar products. Each delayed A-column byte is multiplied on\n   // first use by its stationary B value, then the 16-bit product is pushed\n   // through the remaining stages. The result row c_row[j] =\n   // sum_i partial_i_j(t = N-1-i + (LAT-1)) = sum_i B[i][j]*A_row[i]\n   // is valid together with vpipe[LAT-1].\n   //////////////////////////////////////////////////////////////////////////\n   logic [PIPE_W-1:0] pipe;\n\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         pipe <= '0;\n      end else if (!w_valid) begin\n         for (int s = 0; s < LAT; s = s + 1)\n           for (int j = 0; j < N; j = j + 1)\n             pipe[(s*N + j)*2*DW +: 2*DW] <=\n                 (s < N-1) ? pipe[((s+1)*N + j)*2*DW +: 2*DW] :\n                             ($signed(adly[s][j*DW +: DW]) * $signed(Breg[j][j]));\n      end\n   end\n\n   generate\n      for (genvar j = 0; j < N; j = j + 1) begin : g_out\n         assign c_data[j*ACCW_TOP +: ACCW_TOP] =\n             {{(ACCW_TOP-DOTW){pipe[(LAT-1)*N*2*DW + j*2*DW + 15]}}, \n              pipe[(LAT-1)*N*2*DW + j*2*DW +: 2*DW]};\n      end\n   endgenerate\n\n   //////////////////////////////////////////////////////////////////////////\n   // Valid pipeline.\n   //////////////////////////////////////////////////////////////////////////\n   logic [LAT-1:0] vpipe;\n   always_ff @(posedge clk) begin\n      if (rst)\n        vpipe <= '0;\n      else if (!w_valid)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\nendmodule")
+
+[TOOL RESULT]
+[Step 53/60]
+Created file: tpu_direct2.sv
+
+[ASSISTANT]
+  -> read_file(filename='tpu_var_width.sv', limit=45)
+
+[TOOL RESULT]
+[Step 54/60]
+module tpu_pe
+  #(parameter DW = 8,
+    parameter ACCW = 16,
+    parameter ACCW_IN = 16)
+   (
+    input  logic clk,
+    input  logic rst,
+    input  logic ld,
+    input  logic en,
+    input  logic [DW-1:0]        w_north,
+    input  logic [DW-1:0]        a_west,
+    input  logic [ACCW_IN-1:0]   psum_north,
+    output logic [DW-1:0]        w_south,
+    output logic [DW-1:0]        a_east,
+    output logic [ACCW-1:0]      psum_south
+    );
+
+   logic [DW-1:0] w;
+   assign w_south = w;
+
+   logic [2*DW-1:0] prod;
+   logic [ACCW-1:0]  psum_ext;
+
+   always_comb begin
+      prod = $signed(a_west) * $signed(w);
+   end
+   assign psum_ext = {{(ACCW-ACCW_IN){psum_north[ACCW_IN-1]}}, psum_north};
+
+   always_ff @(posedge clk) begin
+      if (rst) begin
+         w          <= '0;
+         a_east     <= '0;
+         psum_south <= '0;
+      end else begin
+         if (ld)
+           w <= w_north;
+         if (en) begin
+            a_east     <= a_west;
+            psum_south <= $signed(psum_ext) +
+                          $signed({{(ACCW-2*DW){prod[2*DW-1]}}, prod});
+         end
+      end
+   end
+endmodule
+
+
+... (showing lines 1-45 of 217; use offset/limit for more)
+
+[ASSISTANT]
+  -> replace_file(filename='tpu_var_width.sv', content="module tpu_pe\n  #(parameter DW = 8,\n    parameter ACCW = 16,\n    parameter ACCW_IN = 16)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic ld,\n    input  logic en,\n    input  logic [DW-1:0]        w_north,\n    input  logic [DW-1:0]        a_west,\n    input  logic [ACCW_IN-1:0]   psum_north,\n    output logic [DW-1:0]        w_south,\n    output logic [DW-1:0]        a_east,\n    output logic [ACCW-1:0]      psum_south\n    );\n\n   logic [DW-1:0] w;\n   assign w_south = w;\n\n   logic [2*DW-1:0] prod;\n   logic [ACCW-1:0]  psum_ext;\n\n   always_comb begin\n      prod = $signed(a_west) * $signed(w);\n   end\n   assign psum_ext = {{(ACCW-ACCW_IN){psum_north[ACCW_IN-1]}}, psum_north};\n\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         w          <= '0;\n         a_east     <= '0;\n         psum_south <= '0;\n      end else begin\n         if (ld)\n           w <= w_north;\n         if (en) begin\n            a_east     <= a_west;\n            psum_south <= $signed(psum_ext) +\n                          $signed({{(ACCW-2*DW){prod[2*DW-1]}}, prod});\n         end\n      end\n   end\nendmodule\n\nmodule tpu_array\n  #(parameter N = 8, DW = 8, ACCW_MAX = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic ld,\n    input  logic en,\n    input  logic [N*DW-1:0]      w_top,\n    input  logic [N*DW-1:0]      a_left,\n    output logic [N*ACCW_MAX-1:0] c_bot\n    );\n\n   // Adder widths, just wide enough: after summing k terms the exact range is\n   // [-k*2^14, k*2^14], representable in floor(log2(2*k*2^14))+1 bits.\n   function integer psum_width(input integer r);\n      begin\n         case (r)\n           0: psum_width = 16;\n           1: psum_width = 16;\n           2: psum_width = 17;\n           3: psum_width = 17;\n           4: psum_width = 18;\n           5: psum_width = 18;\n           6: psum_width = 18;\n           7: psum_width = 18;\n           default: psum_width = 19;\n         endcase\n      end\n   endfunction\n\n   logic [DW-1:0]        a_h    [0:N-1][0:N];\n   logic [ACCW_MAX-1:0]  psum_v [0:N][0:N-1];\n   logic [DW-1:0]        w_v    [0:N][0:N-1];\n\n   genvar i, j;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_west\n         assign a_h[i][0] = a_left[i*DW +: DW];\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_top\n         assign psum_v[0][j] = '0;\n         assign w_v[0][j]    = w_top[j*DW +: DW];\n      end\n      for (i = 0; i < N; i = i + 1) begin : g_pe_row\n         localparam INW  = psum_width(i);\n         localparam OUTW = psum_width(i+1);\n         for (j = 0; j < N; j = j + 1) begin : g_pe_col\n            logic [INW-1:0]  psum_in_n;\n            logic [OUTW-1:0] psum_out_n;\n            logic [ACCW_MAX-1:0] psum_out_full;\n\n            assign psum_in_n = psum_v[i][j][INW-1:0];\n            tpu_pe #(.DW(DW), .ACCW(OUTW), .ACCW_IN(INW)) u_pe\n              (.clk(clk), .rst(rst), .ld(ld), .en(en),\n               .w_north(w_v[i][j]), .a_west(a_h[i][j]),\n               .psum_north(psum_in_n),\n               .w_south(w_v[i+1][j]), .a_east(a_h[i][j+1]),\n               .psum_south(psum_out_n));\n            assign psum_out_full =\n              {{(ACCW_MAX-OUTW){psum_out_n[OUTW-1]}}, psum_out_n};\n            assign psum_v[i+1][j] = psum_out_full;\n         end\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_bot\n         assign c_bot[j*ACCW_MAX +: ACCW_MAX] = psum_v[N][j];\n      end\n   endgenerate\nendmodule\n\nmodule tpu\n  #(parameter N = 8, DW = 8, ACCW_TOP = 32,\n    parameter ACCW_INT = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic w_valid,\n    input  logic [N*DW-1:0]   w_data,\n    input  logic a_valid,\n    input  logic [N*DW-1:0]   a_data,\n    output logic c_valid,\n    output logic [N*ACCW_TOP-1:0] c_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   logic ld = w_valid;\n   logic en = ~w_valid;\n\n   //////////////////////////////////////////////////////////////////////////\n   // Activation input skew: row i is delayed i cycles.\n   //////////////////////////////////////////////////////////////////////////\n   logic [N*DW-1:0] a_left;\n   genvar i;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_skew\n         logic [DW-1:0] din;\n         assign din = a_valid ? a_data[i*DW +: DW] : {DW{1'b0}};\n         if (i == 0) begin : g_skew0\n            assign a_left[i*DW +: DW] = din;\n         end else begin : g_skewn\n            logic [DW-1:0] sr [0:i-1];\n            integer k;\n            always_ff @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < i; k = k + 1)\n                    sr[k] <= '0;\n               end else if (en) begin\n                  sr[0] <= din;\n                  for (k = 1; k < i; k = k + 1)\n                    sr[k] <= sr[k-1];\n               end\n            end\n            assign a_left[i*DW +: DW] = sr[i-1];\n         end\n      end\n   endgenerate\n\n   //////////////////////////////////////////////////////////////////////////\n   // 8x8 systolic array.\n   //////////////////////////////////////////////////////////////////////////\n   logic [N*ACCW_INT-1:0] c_bot;\n   tpu_array #(.N(N), .DW(DW), .ACCW_MAX(ACCW_INT)) u_array\n     (.clk(clk), .rst(rst), .ld(ld), .en(en),\n      .w_top(w_data), .a_left(a_left), .c_bot(c_bot));\n\n   //////////////////////////////////////////////////////////////////////////\n   // Output de-skew: column j is delayed N-1-j cycles.\n   //////////////////////////////////////////////////////////////////////////\n   genvar j;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_deskew\n         localparam D = N - 1 - j;\n         logic [ACCW_INT-1:0] cin;\n         assign cin = c_bot[j*ACCW_INT +: ACCW_INT];\n         if (D == 0) begin : g_deskew0\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] =\n                {{(ACCW_TOP-ACCW_INT){cin[ACCW_INT-1]}}, cin};\n         end else begin : g_deskewn\n            logic [ACCW_INT-1:0] dr [0:D-1];\n            integer k;\n            always_ff @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < D; k = k + 1)\n                    dr[k] <= '0;\n               end else if (en) begin\n                  dr[0] <= cin;\n                  for (k = 1; k < D; k = k + 1)\n                    dr[k] <= dr[k-1];\n               end\n            end\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] =\n                {{(ACCW_TOP-ACCW_INT){dr[D-1][ACCW_INT-1]}}, dr[D-1]};\n         end\n      end\n   endgenerate\n\n   //////////////////////////////////////////////////////////////////////////\n   // Valid pipeline: c_valid is a_valid delayed LAT compute cycles.\n   //////////////////////////////////////////////////////////////////////////\n   logic [LAT-1:0] vpipe;\n   always_ff @(posedge clk) begin\n      if (rst)\n        vpipe <= '0;\n      else if (en)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\nendmodule")
+
+[TOOL RESULT]
+[Step 55/60]
+Replaced file: tpu_var_width.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_var_width.sv', target_delay=500)
+
+[TOOL RESULT]
+[Step 56/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 3116374.9562736596
+  Metrics:
+    area_delay_product: 3116374.9562736596
+    delay: 741.8829
+    area: 4200.629177830706
+    power_probabilistic_fixed_clock: 0.0413
+    target_delay: 500
+    worst_slack: -257.25
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_2f5f61c58b47 (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+      85.07   85.07 v u_array.g_pe_row[3].g_pe_col[4].u_pe.a_east_$_NOT__Y_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      61.69  146.77 v _63750_/Y (OR4x2_ASAP7_75t_R)
+      18.79  165.56 ^ _63751_/Y (NAND2xp5_ASAP7_75t_R)
+      33.25  198.81 v _63752_/Y (XOR2x2_ASAP7_75t_R)
+      27.40  226.21 v _63753_/Y (XOR2x1_ASAP7_75t_R)
+      26.67  252.88 v _63754_/Y (XNOR2x1_ASAP7_75t_R)
+      19.45  272.33 ^ _63755_/Y (XNOR2xp5_ASAP7_75t_R)
+      41.39  313.71 v _63756_/Y (XNOR2x2_ASAP7_75t_R)
+      27.98  341.70 v _63757_/Y (XOR2x1_ASAP7_75t_R)
+      31.89  373.59 ^ _63763_/Y (MAJIxp5_ASAP7_75t_R)
+      34.48  408.07 v _63795_/Y (MAJIxp5_ASAP7_75t_R)
+      38.27  446.34 ^ _63831_/Y (MAJIxp5_ASAP7_75t_R)
+      33.84  480.18 v _63869_/Y (MAJIxp5_ASAP7_75t_R)
+      48.58  528.76 ^ _63986_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      27.89  556.65 v _64028_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      22.83  579.48 ^ _64029_/Y (AOI21x1_ASAP7_75t_R)
+      27.93  607.41 v _64067_/Y (MAJIxp5_ASAP7_75t_R)
+      42.00  649.41 ^ _64122_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      34.67  684.09 ^ _64161_/Y (MAJx2_ASAP7_75t_R)
+      10.84  694.93 v _64162_/Y (OAI21x1_ASAP7_75t_R)
+      24.24  719.17 ^ _64164_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      22.71  741.88 ^ _64165_/Y (BUFx3_ASAP7_75t_R)
+       0.00  741.88 ^ vh_2f5f61c58b47/D (DFFHQNx1_ASAP7_75t_R)
+             741.88   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ vh_2f5f61c58b47/CLK (DFFHQNx1_ASAP7_75t_R)
+     -15.37  484.63   library setup time
+             484.63   data required time
+    ---------------------------------------------------------
+             484.63   data required time
+            -741.88   data arrival time
+    ---------------------------------------------------------
+            -257.25   slack (VIOLATED)
+
+Best so far: 3116374.9562736596 area_delay_product (eval 7)
+
+[ASSISTANT]
+  -> ls(filename='')
+
+[TOOL RESULT]
+[Step 57/60]
+Files:
+starting_point.v
+tb.sv
+tpu_direct.sv
+tpu_direct2.sv
+tpu_narrow.sv
+tpu_parallel.sv
+tpu_pipe2.sv
+tpu_var_width.sv
+vectors.dat
+
+[ASSISTANT]
+  -> create_file(filename='tpu_csa.sv', content="module tpu_pe_csa\n  #(parameter DW = 8,\n    parameter ACCW = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic ld,\n    input  logic en,\n    input  logic [DW-1:0]      w_north,\n    input  logic [DW-1:0]      a_west,\n    input  logic [ACCW-1:0]    psum_north_sum,\n    input  logic [ACCW-1:0]    psum_north_carry,\n    output logic [DW-1:0]      w_south,\n    output logic [DW-1:0]      a_east,\n    output logic [ACCW-1:0]    psum_south_sum,\n    output logic [ACCW-1:0]    psum_south_carry\n    );\n\n   logic [DW-1:0] w;\n   assign w_south = w;\n\n   logic [2*DW-1:0]  prod;\n   logic [ACCW-1:0]  prod_ext;\n   logic [ACCW-1:0]  sum_next, carry_next;\n\n   assign prod = $signed(a_west) * $signed(w);\n   assign prod_ext = {{(ACCW-2*DW){prod[2*DW-1]}}, prod};\n\n   // Carry-save accumulator: one 3:2 compressor layer, then registers.\n   // The redundant state (sum, carry) keeps the same modular value as the\n   // binary partial sum, so the final stage only needs one carry-propagate add.\n   integer b;\n   always_comb begin\n      carry_next = '0;\n      for (b = 0; b < ACCW; b = b + 1) begin\n         sum_next[b] = psum_north_sum[b] ^ psum_north_carry[b] ^ prod_ext[b];\n         if (b < ACCW-1)\n           carry_next[b+1] = (psum_north_sum[b] & psum_north_carry[b]) |\n                             (psum_north_sum[b] & prod_ext[b]) |\n                             (psum_north_carry[b] & prod_ext[b]);\n      end\n   end\n\n   always_ff @(posedge clk) begin\n      if (rst) begin\n         w                <= '0;\n         a_east           <= '0;\n         psum_south_sum   <= '0;\n         psum_south_carry <= '0;\n      end else begin\n         if (ld)\n           w <= w_north;\n         if (en) begin\n            a_east           <= a_west;\n            psum_south_sum   <= sum_next;\n            psum_south_carry <= carry_next;\n         end\n      end\n   end\nendmodule\n\nmodule tpu_array_csa\n  #(parameter N = 8, DW = 8, ACCW = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic ld,\n    input  logic en,\n    input  logic [N*DW-1:0]      w_top,\n    input  logic [N*DW-1:0]      a_left,\n    output logic [N*ACCW-1:0]    c_bot\n    );\n\n   logic [DW-1:0]   a_h    [0:N-1][0:N];\n   logic [ACCW-1:0] sum_v  [0:N][0:N-1];\n   logic [ACCW-1:0] car_v  [0:N][0:N-1];\n   logic [DW-1:0]   w_v    [0:N][0:N-1];\n   logic [ACCW-1:0] c_bin  [0:N-1];\n\n   genvar i, j;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_west\n         assign a_h[i][0] = a_left[i*DW +: DW];\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_top\n         assign sum_v[0][j] = '0;\n         assign car_v[0][j] = '0;\n         assign w_v[0][j]   = w_top[j*DW +: DW];\n      end\n      for (i = 0; i < N; i = i + 1) begin : g_pe_row\n         for (j = 0; j < N; j = j + 1) begin : g_pe_col\n            tpu_pe_csa #(.DW(DW), .ACCW(ACCW)) u_pe\n              (.clk(clk), .rst(rst), .ld(ld), .en(en),\n               .w_north(w_v[i][j]), .a_west(a_h[i][j]),\n               .psum_north_sum(sum_v[i][j]),\n               .psum_north_carry(car_v[i][j]),\n               .w_south(w_v[i+1][j]), .a_east(a_h[i][j+1]),\n               .psum_south_sum(sum_v[i+1][j]),\n               .psum_south_carry(car_v[i+1][j]));\n         end\n      end\n      for (j = 0; j < N; j = j + 1) begin : g_bot\n         assign c_bin[j] = $signed(sum_v[N][j]) + $signed(car_v[N][j]);\n         assign c_bot[j*ACCW +: ACCW] = c_bin[j];\n      end\n   endgenerate\nendmodule\n\nmodule tpu\n  #(parameter N = 8, DW = 8, ACCW_TOP = 32,\n    parameter ACCW_INT = 19)\n   (\n    input  logic clk,\n    input  logic rst,\n    input  logic w_valid,\n    input  logic [N*DW-1:0]   w_data,\n    input  logic a_valid,\n    input  logic [N*DW-1:0]   a_data,\n    output logic c_valid,\n    output logic [N*ACCW_TOP-1:0] c_data\n    );\n\n   localparam LAT = 2*N - 1;\n\n   logic ld = w_valid;\n   logic en = ~w_valid;\n\n   logic [N*DW-1:0] a_left;\n   genvar i;\n   generate\n      for (i = 0; i < N; i = i + 1) begin : g_skew\n         logic [DW-1:0] din;\n         assign din = a_valid ? a_data[i*DW +: DW] : {DW{1'b0}};\n         if (i == 0) begin : g_skew0\n            assign a_left[i*DW +: DW] = din;\n         end else begin : g_skewn\n            logic [DW-1:0] sr [0:i-1];\n            integer k;\n            always_ff @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < i; k = k + 1)\n                    sr[k] <= '0;\n               end else if (en) begin\n                  sr[0] <= din;\n                  for (k = 1; k < i; k = k + 1)\n                    sr[k] <= sr[k-1];\n               end\n            end\n            assign a_left[i*DW +: DW] = sr[i-1];\n         end\n      end\n   endgenerate\n\n   logic [N*ACCW_INT-1:0] c_bot;\n   tpu_array_csa #(.N(N), .DW(DW), .ACCW(ACCW_INT)) u_array\n     (.clk(clk), .rst(rst), .ld(ld), .en(en),\n      .w_top(w_data), .a_left(a_left), .c_bot(c_bot));\n\n   genvar j;\n   generate\n      for (j = 0; j < N; j = j + 1) begin : g_deskew\n         localparam D = N - 1 - j;\n         logic [ACCW_INT-1:0] cin;\n         assign cin = c_bot[j*ACCW_INT +: ACCW_INT];\n         if (D == 0) begin : g_deskew0\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] =\n                {{(ACCW_TOP-ACCW_INT){cin[ACCW_INT-1]}}, cin};\n         end else begin : g_deskewn\n            logic [ACCW_INT-1:0] dr [0:D-1];\n            integer k;\n            always_ff @(posedge clk) begin\n               if (rst) begin\n                  for (k = 0; k < D; k = k + 1)\n                    dr[k] <= '0;\n               end else if (en) begin\n                  dr[0] <= cin;\n                  for (k = 1; k < D; k = k + 1)\n                    dr[k] <= dr[k-1];\n               end\n            end\n            assign c_data[j*ACCW_TOP +: ACCW_TOP] =\n                {{(ACCW_TOP-ACCW_INT){dr[D-1][ACCW_INT-1]}}, dr[D-1]};\n         end\n      end\n   endgenerate\n\n   logic [LAT-1:0] vpipe;\n   always_ff @(posedge clk) begin\n      if (rst)\n        vpipe <= '0;\n      else if (en)\n        vpipe <= {vpipe[LAT-2:0], a_valid};\n   end\n   assign c_valid = vpipe[LAT-1];\nendmodule")
+
+[TOOL RESULT]
+[Step 58/60]
+Created file: tpu_csa.sv
+
+[ASSISTANT]
+  -> run_evaluation(filename='tpu_csa.sv')
+
+[TOOL RESULT]
+[Step 59/60]
+=== Evaluation Result ===
+Correctness: PASS
+  Lint: OK
+  Sim:  OK
+  Checks (fails/tot): 0/6782
+Cost: OK
+  area_delay_product: 2878508.0240680827
+  Metrics:
+    area_delay_product: 2878508.0240680827
+    delay: 656.928
+    area: 4381.770946082497
+    power_probabilistic_fixed_clock: 0.0402
+    target_delay: 500.0
+    worst_slack: -162.03
+  Worst timing path:
+    Startpoint: u_array.g_pe_row[3].g_pe_col[0].u_pe.w_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN
+                (rising edge-triggered flip-flop clocked by clk)
+    Endpoint: vh_4ce8c6015473 (rising edge-triggered flip-flop clocked by clk)
+    Path Group: clk
+    Path Type: max
+    
+      Delay    Time   Description
+    ---------------------------------------------------------
+       0.00    0.00   clock clk (rise edge)
+       0.00    0.00   clock network delay (ideal)
+       0.00    0.00 ^ u_array.g_pe_row[3].g_pe_col[0].u_pe.w_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/CLK (DFFHQNx1_ASAP7_75t_R)
+     100.00  100.00 ^ u_array.g_pe_row[3].g_pe_col[0].u_pe.w_$_NOT__Y_1_A_DFFHQNx1_ASAP7_75t_R_QN/QN (DFFHQNx1_ASAP7_75t_R)
+      36.15  136.14 v _43796_/Y (NOR2xp33_ASAP7_75t_R)
+      24.98  161.13 ^ _43798_/Y (NAND2xp33_ASAP7_75t_R)
+      14.57  175.70 v _43800_/Y (NAND2xp5_ASAP7_75t_R)
+      27.25  202.95 v _43801_/Y (XOR2xp5_ASAP7_75t_R)
+      34.03  236.98 v _43804_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.69  267.67 v _43805_/Y (XNOR2xp5_ASAP7_75t_R)
+      34.69  302.35 v _43819_/Y (XNOR2xp5_ASAP7_75t_R)
+      29.79  332.14 v _43820_/Y (XNOR2xp5_ASAP7_75t_R)
+      33.14  365.28 v _43821_/Y (XNOR2xp5_ASAP7_75t_R)
+      30.55  395.83 ^ _43830_/Y (MAJIxp5_ASAP7_75t_R)
+      33.36  429.19 ^ _43867_/Y (MAJx2_ASAP7_75t_R)
+      19.07  448.26 v _43932_/Y (A2O1A1Ixp33_ASAP7_75t_R)
+      31.96  480.22 ^ _43995_/Y (A2O1A1O1Ixp25_ASAP7_75t_R)
+      26.35  506.56 v _44023_/Y (O2A1O1Ixp5_ASAP7_75t_R)
+      66.66  573.22 ^ _44055_/Y (OAI211xp5_ASAP7_75t_R)
+      42.64  615.87 ^ _44069_/Y (OA21x2_ASAP7_75t_R)
+      17.72  633.58 v _44070_/Y (AOI221x1_ASAP7_75t_R)
+      23.35  656.93 v _44071_/Y (BUFx6f_ASAP7_75t_R)
+       0.00  656.93 v vh_4ce8c6015473/D (DFFHQNx1_ASAP7_75t_R)
+             656.93   data arrival time
+    
+     500.00  500.00   clock clk (rise edge)
+       0.00  500.00   clock network delay (ideal)
+       0.00  500.00   clock reconvergence pessimism
+             500.00 ^ vh_4ce8c6015473/CLK (DFFHQNx1_ASAP7_75t_R)
+      -5.10  494.90   library setup time
+             494.90   data required time
+    ---------------------------------------------------------
+             494.90   data required time
+            -656.93   data arrival time
+    ---------------------------------------------------------
+            -162.03   slack (VIOLATED)
+
+Best so far: 2878508.0240680827 area_delay_product (eval 22)
+
+[ASSISTANT]
+Implemented and evaluated several design variants. The best passing design is **`tpu_csa.sv`**.
+
+Summary of optimization path:
+1. **starting_point.v** — original systolic PE mesh: PASS, area-delay product **4,624,409**.
+2. **tpu_narrow.sv** — reduced internal accumulation width from 32 to 19 bits: PASS, **3,283,108**.
+3. **tpu_var_width.sv** — per-stage minimum accumulator widths: PASS, **3,116,375**.
+4. **tpu_csa.sv** — 19-bit internal accumulation with carry-save redundant addition per PE, single carry-propagate add at the bottom: **PASS**, area-delay product **2,878,508**.
+
+Final best metrics (`tpu_csa.sv`):
+- Correctness: PASS (0 errors / 6782 checks)
+- area_delay_product: **2,878,508.02**
+- delay: 656.93 ps
+- area: 4381.77
+
+The final design preserves the exact cycle-accurate behavior: weight load shift semantics, `a_valid` zero injection, stall on `w_valid`, 15-cycle compute latency, back-to-back streams, and mid-drain reloads.
+
+[USER]
+[Step 60/60] Please use a tool. The run ends automatically at the step limit.
+
+[USER]
+The design session is now over. Final result: PASS, best cost: 2.879e+06 area_delay_product.
+
+Please write a brief summary covering:
+1. What approaches did you try and what worked best?
+2. What optimizations had the most impact?
+3. What didn't work or caused regressions?
+4. Lessons learned and what you would do differently next time.
+
+Your design files are carried over to the next agent, so refer to them by filename where useful.
+Be concise and specific.
+
+[ASSISTANT]
+
+================================================================================

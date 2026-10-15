@@ -1,0 +1,32 @@
+## Summary
+
+**Final result:** `design_csa2.sv` — PASS (6782/6782 checks), ADP **1.933e6** (area 4206, delay 459ps) vs. baseline `starting_point.v` **4.62e6** (area 4604, delay 1004ps) = **58% improvement**.
+
+### 1. Approaches tried / what worked
+- **Kept the systolic wavefront** (weight-shift chain, west→east activations, south→south partial sums, input skew, output de-skew) — I proved this is semantically forced: mid-drain weight reloads make each product's formation cycle (s+i+j) observable, so a "compute everything at once" design cannot be exact.
+- **Winning combination** (all in `design_csa2.sv`):
+  - Accumulator narrowed 32→19 bits (|C| ≤ 8·16384; sign-extend to c_data).
+  - Carry-save column sums (2 redundant words per PE); one 19-bit CPA per column at the bottom feeds de-skew — removes the adder from the PE critical path.
+  - Explicit **Baugh-Wooley** 8×8 partial-product matrix (64 AND terms, sign fixes in row 7 + constant K=0x78100) feeding the CSA tree directly — no inferred multiplier CPA. Biggest single win (−25% ADP).
+  - Reset removed from datapath registers (state flushes before first c_valid); reset kept only on `vpipe`.
+  - CSA tree shaped so the incoming psum pair merges at level 3 with K; target_delay=350 for the mapper.
+
+### 2. Highest-impact optimizations
+1. Baugh-Wooley explicit partial products (area −15%, delay −13%).
+2. Carry-save accumulation (delay 842→567ps).
+3. Accumulator narrowing 32→19 bits.
+4. Target-delay tuning + mapper-nudging source perturbations (worth ~3–5% each when lucky).
+
+### 3. What didn't work (revert/regress)
+- **Direct/folded architectures** (`design_flat.sv`, `design_direct.sv`, `design_prod.sv`): exact cycle behavior breaks on weight reloads; `design_flat` also hit a 1800s PPA timeout (cones too big, multipliers inflated by 18-bit context).
+- **3-/4-word accumulators** (`design_w3.sv`, `design_csa4.sv`): bottom CPA became critical (533–560ps), extra flops cost area — net regression.
+- **Per-row accumulator narrowing**: CSA pairs are only defined mod 2^W; truncating then zero-extending injects a wrap error. Reverted.
+- **Enable-mux removal on psum registers** (row/K zeroing during stall): math said value-preserving, but simulation failed (partial-column corruption) — abandoned as not worth debugging for ~3%.
+- Small perturbations (operand order, sreg/creg swap, tree re-pairings, comment edits) were hit-or-miss for the mapper: several gave 2.0–2.08M; kept only the 1.933M configuration.
+
+### 4. Lessons / next time
+- Establish semantic constraints *first* (weight-reload observability) before architecting — saves entire dead-end branches.
+- In carry-save designs, the **column-bottom CPA** silently becomes the critical path; balance it against the PE tree from the start.
+- Watch Verilog context-determined widths on `$signed(a)*$signed(b)` — a wide LHS can inflate the multiplier (the PPA timeout).
+- Modular-width invariants (value-preservation of CSA pairs) must be proven before narrowing redundant representations.
+- ABC mapping is sensitive to source text and target_delay near the timing knee — cheap lottery tickets, but only after the structure is at its floor.

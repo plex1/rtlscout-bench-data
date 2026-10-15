@@ -1,0 +1,251 @@
+//#############################################################################
+// Weight-stationary systolic matrix-multiply tile (TPU MXU).
+// Booth variant: the activation stream is radix-4 Booth recoded once at the
+// input (digit bundle {t1,t2,neg} x 4 shifts through the skew/a_east chains),
+// so each PE forms its product as 4 signed term rows
+//     T_k = (neg ? -1 : 1) * (t1 ? w<<2k : (t2 ? w<<(2k+1) : 0))
+// and compresses {T0..T3, corr, s_north, c_north} (7 rows) with one balanced
+// 3:2 CSA tree (4 levels). The only carry-propagate adders are at the bottom
+// of the columns (one per column).
+//
+//   a = sum_k d_k 4^k,  d_k = a[2k] + a[2k-1] - 2 a[2k+1] in {-2..2}
+//   product = sum_k d_k * (w_sext << 2k)
+//   corr = sum_k neg_k (0..4) at bit 0  (each -x == ~x + 1)
+//
+// Invariant: (s + c) mod 2^AW = partial sum (two's complement, AW = 19 bits).
+//#############################################################################
+
+module tpu_pe
+  #(parameter DW = 8,
+    parameter AW = 19)
+   (
+    input               clk,
+    input               ld,
+    input               en,
+    input  [DW-1:0]     w_north,
+    input  [11:0]       d_west,     // Booth digit bundle of the activation
+    input  [AW-1:0]     s_north,
+    input  [AW-1:0]     c_north,
+    output [DW-1:0]     w_south,
+    output reg [11:0]   d_east,
+    output reg [AW-1:0] s_south,
+    output reg [AW-1:0] c_south
+    );
+
+   reg [DW-1:0] w;
+   assign w_south = w;
+
+   wire signed [AW-1:0] ws = $signed(w);
+
+   // ---- 4 Booth term rows + correction row + psum pair ---------------------
+   wire [AW-1:0] row [0:6];
+   genvar k;
+   generate
+      for (k = 0; k < 4; k = k + 1) begin : g_term
+         wire [AW-1:0] sel =
+              ((ws << (2*k))     & {AW{d_west[3*k]}}) |
+              ((ws << (2*k + 1)) & {AW{d_west[3*k+1]}});
+         assign row[k] = sel ^ {AW{d_west[3*k+2]}};
+      end
+   endgenerate
+   wire [3:0] cnt4 = {3'b0, d_west[2]} + {3'b0, d_west[5]} +
+                     {3'b0, d_west[8]} + {3'b0, d_west[11]};
+   assign row[4] = {{(AW-3){1'b0}}, cnt4[2:0]};
+   assign row[5] = s_north;
+   assign row[6] = c_north;
+
+   // ---- balanced 3:2 CSA tree: 7 -> 5 -> 4 -> 3 -> 2 ----------------------
+   wire [AW-1:0] l1 [0:3];
+   wire [AW-1:0] l2 [0:2];
+   wire [AW-1:0] l3 [0:1];
+
+   assign l1[0] = row[0] ^ row[1] ^ row[2];
+   assign l1[1] = ((row[0] & row[1]) | (row[0] & row[2]) |
+                   (row[1] & row[2])) << 1;
+   assign l1[2] = row[3] ^ row[4] ^ row[5];
+   assign l1[3] = ((row[3] & row[4]) | (row[3] & row[5]) |
+                   (row[4] & row[5])) << 1;
+
+   assign l2[0] = l1[0] ^ l1[1] ^ l1[2];
+   assign l2[1] = ((l1[0] & l1[1]) | (l1[0] & l1[2]) |
+                   (l1[1] & l1[2])) << 1;
+   assign l2[2] = l1[3];
+
+   assign l3[0] = l2[0] ^ l2[1] ^ l2[2];
+   assign l3[1] = ((l2[0] & l2[1]) | (l2[0] & l2[2]) |
+                   (l2[1] & l2[2])) << 1;
+
+   wire [AW-1:0] s_next = l3[0] ^ l3[1] ^ row[6];
+   wire [AW-1:0] c_next = ((l3[0] & l3[1]) | (l3[0] & row[6]) |
+                           (l3[1] & row[6])) << 1;
+
+   always @(posedge clk) begin
+      if (ld) w <= w_north;
+      if (en) begin
+         d_east  <= d_west;
+         s_south <= s_next;
+         c_south <= c_next;
+      end
+   end
+
+endmodule
+
+//#############################################################################
+// N x N PE mesh. Slot packing as before; digit bundles flow west->east,
+// weights south, {s,c} psum pairs south.
+//#############################################################################
+module tpu_array
+  #(parameter N  = 8,
+    parameter DW = 8,
+    parameter AW = 19)
+   (
+    input               clk,
+    input               ld,
+    input               en,
+    input  [N*DW-1:0]   w_top,
+    input  [N*12-1:0]   d_left,
+    output [N*AW-1:0]   c_bot
+    );
+
+   wire [N*(N+1)*AW-1:0] s_v, c_v;
+   wire [N*(N+1)*DW-1:0] w_v;
+   wire [N*(N+1)*12-1:0] d_v;
+
+   genvar i, j;
+   generate
+      for (j = 0; j < N; j = j + 1) begin : g_top
+         assign s_v[j*AW +: AW] = {AW{1'b0}};
+         assign c_v[j*AW +: AW] = {AW{1'b0}};
+      end
+      for (j = 0; j < N; j = j + 1) begin : g_wtop
+         assign w_v[j*DW +: DW] = w_top[j*DW +: DW];
+      end
+      for (i = 0; i < N; i = i + 1) begin : g_dwest
+         assign d_v[(i*(N+1))*12 +: 12] = d_left[i*12 +: 12];
+      end
+      for (j = 0; j < N; j = j + 1) begin : g_bot
+         assign c_bot[j*AW +: AW] =
+                s_v[(N*N+j)*AW +: AW] + c_v[(N*N+j)*AW +: AW];
+      end
+      for (i = 0; i < N; i = i + 1) begin : g_row
+         for (j = 0; j < N; j = j + 1) begin : g_col
+            tpu_pe #(.DW(DW), .AW(AW)) u_pe
+              (.clk     (clk),
+               .ld      (ld),
+               .en      (en),
+               .w_north (w_v[(i*N+j)*DW +: DW]),
+               .d_west  (d_v[(i*(N+1)+j)*12 +: 12]),
+               .s_north (s_v[(i*N+j)*AW +: AW]),
+               .c_north (c_v[(i*N+j)*AW +: AW]),
+               .w_south (w_v[((i+1)*N+j)*DW +: DW]),
+               .d_east  (d_v[(i*(N+1)+j+1)*12 +: 12]),
+               .s_south (s_v[((i+1)*N+j)*AW +: AW]),
+               .c_south (c_v[((i+1)*N+j)*AW +: AW]));
+         end
+      end
+   endgenerate
+
+endmodule
+
+//#############################################################################
+// Top: Booth recode -> input skew -> systolic array -> de-skew -> valid pipe.
+//#############################################################################
+module tpu
+  #(parameter N    = 8,
+    parameter DW   = 8,
+    parameter ACCW = 32)
+   (
+    input               clk,
+    input               rst,
+    input               w_valid,
+    input  [N*DW-1:0]   w_data,
+    input               a_valid,
+    input  [N*DW-1:0]   a_data,
+    output              c_valid,
+    output [N*ACCW-1:0] c_data
+    );
+
+   localparam LAT = 2*N - 1;
+   localparam AW  = $clog2((((1<<(DW-1))*(1<<(DW-1)))*N) + 1) + 1;
+
+   wire ld = w_valid;
+   wire en = ~w_valid;
+
+   // radix-4 Booth recode of an activation element
+   function [11:0] booth (input [DW-1:0] a);
+      integer k;
+      reg y, y1, y2;
+      begin
+         for (k = 0; k < 4; k = k + 1) begin
+            y  = a[2*k];
+            y1 = (k == 0) ? 1'b0 : a[2*k-1];
+            y2 = a[2*k+1];
+            booth[3*k]   = y ^ y1;
+            booth[3*k+1] = (y1 & y & ~y2) | (~y1 & ~y & y2);
+            booth[3*k+2] = y2 & ~(y1 & y);
+         end
+      end
+   endfunction
+
+   // input skew on digit bundles
+   wire [N*12-1:0] d_left;
+   genvar i, j;
+   generate
+      for (i = 0; i < N; i = i + 1) begin : g_skew
+         wire [11:0] din = a_valid ? booth(a_data[i*DW +: DW]) : 12'b0;
+         if (i == 0) begin : g_skew0
+            assign d_left[i*12 +: 12] = din;
+         end
+         else begin : g_skewn
+            reg [11:0] sr [0:i-1];
+            integer k;
+            always @(posedge clk) begin
+               if (en) begin
+                  sr[0] <= din;
+                  for (k = 1; k < i; k = k + 1)
+                    sr[k] <= sr[k-1];
+               end
+            end
+            assign d_left[i*12 +: 12] = sr[i-1];
+         end
+      end
+   endgenerate
+
+   wire [N*AW-1:0] c_bot;
+   tpu_array #(.N(N), .DW(DW), .AW(AW)) u_array
+     (.clk(clk), .ld(ld), .en(en),
+      .w_top(w_data), .d_left(d_left), .c_bot(c_bot));
+
+   generate
+      for (j = 0; j < N; j = j + 1) begin : g_deskew
+         localparam D = N - 1 - j;
+         wire [AW-1:0] cin = c_bot[j*AW +: AW];
+         if (D == 0) begin : g_deskew0
+            assign c_data[j*ACCW +: ACCW] = {{(ACCW-AW){cin[AW-1]}}, cin};
+         end
+         else begin : g_deskewn
+            reg [AW-1:0] dr [0:D-1];
+            integer k;
+            always @(posedge clk) begin
+               if (en) begin
+                  dr[0] <= cin;
+                  for (k = 1; k < D; k = k + 1)
+                    dr[k] <= dr[k-1];
+               end
+            end
+            assign c_data[j*ACCW +: ACCW] =
+                   {{(ACCW-AW){dr[D-1][AW-1]}}, dr[D-1]};
+         end
+      end
+   endgenerate
+
+   reg [LAT-1:0] vpipe;
+   always @(posedge clk) begin
+      if (rst)
+        vpipe <= {LAT{1'b0}};
+      else if (en)
+        vpipe <= {vpipe[LAT-2:0], a_valid};
+   end
+   assign c_valid = vpipe[LAT-1];
+
+endmodule

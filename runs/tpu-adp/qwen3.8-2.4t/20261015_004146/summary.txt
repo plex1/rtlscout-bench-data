@@ -1,0 +1,33 @@
+# Session Summary: tpu (weight-stationary systolic matmul tile)
+
+**Final result: PASS — best cost 2,155,948 area_delay_product** (`tpu_v9.v`, target_delay=350), vs baseline `starting_point.v` at 4,624,409 (2.15× improvement; area 4299 vs 4604, delay 501ps vs 1004ps).
+
+## Progression
+| Variant | Cost | Key idea |
+|---|---|---|
+| starting_point.v | 4.62M | reference: 32-bit CPA accumulation |
+| tpu_v1_narrow.v | 3.22M | narrow accumulator to 19 bits (exact: 8×2¹⁴ = 2¹⁷ max sum) |
+| tpu_v2_csa.v | 2.96M | carry-save {s,c} accumulator, 1 FA level per PE |
+| tpu_v3_mac.v | 2.66M | fused multiplier-accumulator: product rows reduced directly into CSA tree |
+| tpu_v4_booth.v | 2.50M | radix-4 Booth recode of w (8→4 product rows) |
+| **tpu_v9.v** | **2.16M** | Booth + exact two's-complement rows (`mpa = -pa`) → 6 rows, 3-level CSA, reset-stripped datapath |
+
+## What worked
+1. **19-bit accumulator**: max |sum| = 8·(−128·−128) = 2¹⁷, so mod-2¹⁹ never wraps; 32-bit sign-extend is free wiring at the output.
+2. **Fused Booth MAC**: stationary weight w Booth-recoded (4 digits), rows `{(±a)<<s}` reduced with s/c through 3 levels of 3:2 compressors. The critical path shrank from multiplier+CPA to ~decode+3 FA levels.
+3. **Exact negative rows via `mpa = -pa`**: avoids the +1 correction row entirely (vs v4's 7-row/4-level tree) — this dropped a whole tree level without needing error counters.
+4. **Reset removal from datapath flops** (safe: zeros shift in when idle; weights overwritten by 8-cycle load; skew/deskew fed zeros when !a_valid) saved area; **vpipe kept reset** since PPA-extraction sim does not zero-init.
+
+## What didn't work
+- `tpu_v5/v7` (ones'-complement rows + south-flowing negative-digit counter): correct after bugs, but the 64×6-bit counters + bottom correction adder cost more than the saved tree level (2.72M/2.67M).
+- `tpu_v6` (store Booth decode in the weight reg): 2.87M — extra FFs + load-path byte reconstruction outweighed decode removal; also hit a subtle bug (`2'd4`/`2'd6` literals truncate to 2 bits in the shift amounts).
+- `tpu_v10` (18-bit carry word), `tpu_v11` (regrouped CSA tree): no improvement.
+- `tpu_v12` (remove vpipe reset): **fails PPA extraction** — its sim leaves unreset flops X/unknown (TB errors at line 12). Only the correctness check zero-inits.
+- target_delay sweep: 250–380ps all gave identical results on v9; ~350 is the sweet spot (higher values like 450/600 degraded delay more than area saved).
+
+## Lessons learned
+- Preserve the tile-boundary microarchitecture (skew/deskew/valid pipeline/stall semantics) exactly and only transform the *internal arithmetic* — cycle accuracy falls out naturally.
+- Redundant arithmetic (CSA) wins big here since only 1 CPA exists per column at the output; do error-accounting (Booth corrections) structurally (exact rows) rather than with counters.
+- Careful with Verilog literal widths in shifts, and with declared-vs-assigned bit widths (`[IW-2:1]` bug in v2's first attempt silently truncated a carry).
+- PPA-extraction sim and correctness sim differ in unreset-flop initialization — never rely on zero-init for functional behavior.
+- Next time: explore precomputing per-PE rows during weight load (store shifted a-multiples only works if a were stationary — it isn't), or a 5:3/4:2 compressor front-end; also try storing w and its decode jointly to shorten the load-path reconstruct.

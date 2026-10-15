@@ -1,0 +1,35 @@
+## Summary
+
+**Final result: `design14.v` — PASS, ADP 1.976e6** (area 4277, delay 462ps), down **57%** from the 4.62e6 baseline.
+
+### 1. Approaches tried and what worked
+
+| File | Idea | ADP |
+|---|---|---|
+| `starting_point.v` | original | 4.62M |
+| `design.v` | 19-bit accumulators + no datapath resets | 3.22M |
+| `design2.v` | carry-save (sum,carry) descent, 1 CPA/column | 2.82M |
+| `design5-7.v` | radix-4 Booth multiply fused with accumulate | 2.64→2.53M |
+| `design8/10.v` | exact −A rows → no +1 correction vector, 3-level tree | 2.46→2.36M |
+| `design12/13.v` | Booth code (not raw weight) shifts south; 12-bit ctl; factored row-gen | 2.17M |
+| **`design14.v`** | **18-bit accumulator + `sel` recovery bit** | **1.976M** |
+
+### 2. Most impactful optimizations
+- **Exact-width carry-save accumulators** replacing 32-bit ripple adders — biggest single win (3.2→2.8M), then further proof that only **18 bits** are needed (result range [−130048, +131072] is injective mod 2¹⁸; one `sel = sum[17]&|sum[16:10]` bit recovers +131072) — another −9%.
+- **Fused Booth MAC**: exact rows `(one&X | two&X<<1)<<2i` with `X = neg?−A:A` eliminated the +1 correction vector, enabling a **3-level tree** (Dadda minimum for 6 vectors) instead of 4-5 levels.
+- **−A precomputed once per array row** and registered alongside A (na_west/na_east path) — removed incrementers from all PE critical paths.
+- **Weight decoded at load** into a 12-bit Booth code that shifts south — deleted the per-PE weight register.
+
+### 3. Regressions / dead ends
+- Fully fused 11-operand tree (`design3`): faster but area exploded (5.1M).
+- Verilog width trap (`c1 & a19` zero-extends instead of replicating) — broke `design7` until `{ACCW{...}}` was used.
+- Kogge-Stone bottom adder and "sel at output" variants degraded abc's *global* mapping (2.15M, 2.02M) — the balanced ripple version was better.
+- Unshifted-carry pair (`value = s+2c`) broke FA weight assumptions — failed sim; reverted.
+- Flat AND-OR row-gen, swapped tree groupings, OR-after-shift rows — all slightly worse.
+- `target_delay` sweeps were mostly inert (best: 480 ≈ default 500).
+
+### 4. Lessons
+- **Value-range proofs enable real width cuts** — the 18-bit accumulator insight was the largest single gain after CSA.
+- **Signed negation tricks matter**: `−A` as a registered operand beats `~A+1` corrections scattered into compressor columns (the correction budget at low columns is provably insufficient: 82 < 85).
+- **abc optimizes the flattened AIG globally** — "faster" hand structures (prefix adders) can backfire; measure every variant.
+- Early bug (`1-bit & vector` zero-extension) cost a cycle; always use explicit replication masks in structural RTL.

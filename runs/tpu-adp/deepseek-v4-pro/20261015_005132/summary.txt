@@ -1,0 +1,35 @@
+1. **Approaches tried and what worked best**
+
+   - **Progressive arithmetic-width reduction** (`tpu_v2_narrow`, `tpu_v3_19`, `tpu_v4_varw`): narrow accumulators from 32 down to 19 bits, then per-row minimum psum widths `{1,16,17,17,18,18,18,18,19}`. This substantially cut area/delay.
+   - **Carry-save PE accumulation** (`tpu_v5_csa`, `tpu_v6_csa19`): replace each PE’s carry-propagate add with a 3:2 CSA and perform one carry-propagate add only at the column bottom. This was the biggest timing/area-delay win.
+   - **Global per-row activation delay line** (`tpu_v10_global_a`): removed the per-PE `a_east` registers and replaced them with tapped enabled shift registers.
+   - **Removing datapath reset** (`tpu_v13_noreset`): only reset the valid pipeline, leaving datapath registers to zero-initialization. This gave the final best result.
+
+   **Best passing design:** `tpu_v13_noreset.sv`  
+   **Final cost:** `2,797,344.23` area_delay_product, with area `4345.39` and delay `643.75 ps`.
+
+2. **Optimizations with the most impact**
+
+   - Carry-save accumulation instead of propagate-add accumulation: ~11-13% cost reduction from the 19-bit non-CSA variant.
+   - Narrowing the accumulator to the exact signed 8x8 dot-product bound (19 bits): both area and delay fell significantly.
+   - Removing reset from wide datapath registers (`tpu_v13_noreset`): small but useful area improvement while preserving the required cycle-accurate behavior.
+
+3. **What didn’t work or caused regressions**
+
+   - **Fully combinational/wavefront dot-product implementation** (`tpu_v7_dotdly`): failed functional checks. My simplified delay mapping did not reproduce the systolic timing/partial-sum sequence, and synthesis timed out.
+   - **Variable-width carry-save accumulator** (`tpu_v8_varw_csa`): passed lint but failed word/sign-extension behavior. The variable-width carry-save representation was not exact for signed column-slice endpoints.
+   - **Shared XOR carry formulation** (`tpu_v9_csa_opt`): functional, but slightly worse than the original full 3:2 compressor form.
+   - **Light-reset flush mask** (`tpu_v12_light_reset`): functional, but worse than simply leaving datapath registers unreset.
+   - **Pipelined per-row activation taps without reset** (`tpu_v14_pipe_noreset`): worse than the simpler global-delay-line no-reset variant.
+
+4. **Lessons learned and next steps**
+
+   - The systolic contract is exact per enabled cycle; restructuring activation-delivery networks is risky because input skew, horizontal skew, and valid/stall timing are tightly coupled.
+   - Arithmetic-level transformations, especially exact carry-save accumulation and exact width narrowing, are safer and more impactful than replacing the systolic scheduling.
+   - With Verilator/ASAP7 evaluation, register reset muxes are real area cost. Under the benchmark’s “reset only before streaming” discipline, resetting only the valid pipeline is sufficient.
+   - A small number of `target_delay` experiments was useful: `500 ps` generally struck the best area-delay balance for this design. Lower/higher targets often preserved nearly the same achieved delay but worse product.
+   - If continuing, I would focus next on:
+     - a more compact CSA cell or `cw=18`/stage-specific CSA widths with rigorous sign extension,
+     - reducing the final carry-propagate adder width,
+     - exploring a genuine row-broadcast multiplier/add tree that still matches the `2N-1` cycle latency,
+     - and more carefully proving the zero-injection/valid pipeline remains identical after removing reset.

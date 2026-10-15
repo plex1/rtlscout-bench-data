@@ -1,0 +1,30 @@
+## Summary
+
+**Final best: `design7.v` — 2.48M area_delay_product (PASS), vs. 4.62M for the `starting_point.v` (46% reduction).**
+
+### What worked
+
+1. **Replace the 64-PE systolic mesh with an equivalent, smaller structure.** The key realization was that only the cycle-accurate port behavior matters, not the internal architecture. I kept the original's exact product schedule — product (i,col) of the A row accepted at compute step t is formed at step t+i+col with the weight in force *at that step* — but implemented it with a shared per-element skew chain (tapped per column), one weight register file, and one narrow (19-bit) accumulator chain per column. This alone went 4.62M → 3.22M (`design2.v`).
+
+2. **Carry-save (3:2 compressor) accumulation** instead of a carry-propagate adder per row, with a single CPA per column placed in the de-skew slack: 3.22M → 2.90M (`design4.v`). Must remember the stored value is S + 2·C, so the carry vector shifts left by one.
+
+3. **Booth radix-4 multiply merged into the accumulator tree** — partial products feed straight into the carry-save tree, so a cycle contains no CPA at all (not even inside the multiplier): 2.90M → 2.48M (`design7.v`). The correction constant for negative Booth digits joins the tree as a 7th operand (4 CSA levels).
+
+4. **Removing resets from the data path** helped (2.90M → 2.83M, `design6.v`): only the 15-bit valid pipe needs reset, since every register on an output row's path is written during that row's own 15-cycle window.
+
+### What didn't work / regressions
+
+- **`design.v` (plain delay-line + tree multiplier)** failed: it samples the weight 14 cycles after injection instead of at the original array's staggered times, breaking mid-drain weight reloads. This is the central correctness constraint.
+- **Async reset** (`design5.v`): worse (3.08M).
+- **Per-stage narrowed accumulators** (`design8.v`): failed on mod-2ⁿ wraparound; flops turned out to be nearly free (~0.12 of ~4365 area units) so trimming widths bought nothing.
+- **Pre-decoded Booth selects in the skew chain** (`design9.v`): the wider mux chain became the critical path.
+- **Negated-weight register NW = −W** (`designC.v`, 2.54M): must be 9 bits (−(−128) = +128), and it cost more area than it saved.
+- **Product-register pipelining with look-ahead weights** (`designD/E/F.v`, never finished passing): `MW = w_valid ? {W<<8, w_data} : W` correctly predicts W(cycle+1), and early taps need `en ? sr[i+j-2] : sr[i+j-1]`. I ran out of steps debugging the 16→18-bit width fixes; this remains the most promising unverified direction (it splits multiply and accumulate into separate cycles).
+
+- **`target_delay` sweep** on the best design was flat/counterproductive (500 ps default ≈ best; 800 and 1200 both worse).
+
+### Lessons learned
+- Verify the *exact* staggered timing of weight sampling against the golden vectors before any architectural rewrite — that, not the arithmetic, is the hard part of this benchmark.
+- Check flops-vs-logic cost split early; here logic dominated, so delay (not flop count) was the lever.
+- Test arithmetic-structure changes against extreme vectors (0x7f/0x80 tiles) first — they immediately expose width/wraparound bugs that random data hides.
+- Budget more steps for the pipelined variant; it was conceptually sound and just needed one more debugging iteration.

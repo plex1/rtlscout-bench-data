@@ -1,0 +1,33 @@
+## Summary
+
+**Best design: `v12_booth.v`** — cost **1,628,389** (area 3475, delay 468.6ps @ target_delay=400), vs. 4,624,409 for the provided `starting_point.v` (2.8× better).
+
+### Progression of what worked
+| Step | Cost | Change |
+|---|---|---|
+| starting_point | 4.62M | baseline PE mesh |
+| `v2_systolic.v` | 3.21M | narrowed accumulators (16â19b per depth instead of 32b), depth-0 without adder, 19b deskew, shared per-row activation delay chain |
+| `v3_split.v` | 2.71M | split multiply and accumulate into separate cycles (products registered, then added one cycle later; deskew shortened by 1 to compensate) |
+| `v5_splitmult.v` | 2.50M | split 8Ã8 multiply into two 8Ã4 multiplies, recombined via CSA folded into the accumulate step |
+| `v8_gatedclk.v` | 1.90M | **gated clocks** (`gclk = clk & ~w_valid`, `wclk = clk & w_valid`) replacing ~3700 per-FF enable muxes |
+| `v10_narrowfix.v` | 1.83M | re-narrowed accumulators (with correct sign extension) |
+| `v12_booth.v` | **1.63M** | **Booth radix-4**: weights stored as pre-decoded 12-bit Booth codes in the weight shift registers; multiply cycle = mux+XOR+CSA(5â2); accumulate cycle = CSA+CPA |
+
+### Highest-impact optimizations
+1. **Gated clocks** (biggest single win): eliminated all enable muxes on the data paths.
+2. **Booth radix-4 with pre-decoded weights**: the weight load shift register stores Booth codes, so the per-cycle multiply is just a magnitude mux + XOR-negate + CSA tree â no general multiplier.
+3. **Pipeline splitting** of multiply vs. accumulate (with matched deskew reduction), enabled by deriving the exact per-cycle dataflow: `c_data[j](Ï) = Î£_i a_i(Ïâ15)Â·w_ij(Ïâ15+i+j)`.
+4. **Width narrowing**: per-depth accumulator widths 16/17/17/18/18/18/18/19 and 19-bit deskew registers (result provably fits in 19 bits; all arithmetic mod 2Â¹â¹ with truncated-carry shifting is exact).
+5. **Reset removal** on data arrays (only the 15-bit valid pipe resets) â safe because `c_valid` gates every data comparison and the pipes are structurally flushed.
+
+### What didn't work / regressions
+- **Fully carry-save accumulate chain** (`v13_csbooth.v`, 1.72M): no CPA per cycle, but the 7-input compression in the PE was both larger and slower than v12's split.
+- **Sklansky prefix adders** (`v15`, `v17`, ~1.83M): abc's default `+` mapping beat my hand-built prefix adders in both area and delay.
+- **Folding the Booth correction row into the multiply stage** (`v16`, 1.84M): smaller area but pushed delay up.
+- Several outright bugs caught by the vectors: zero-extension via concatenation when narrowing widths, an unused declared signal (`pc2`) that silently dropped a CSA row, Booth correction bits at wrong bit positions, and a wrong Sklansky partner index.
+
+### Lessons
+- Deriving the exact cycle-by-cycle dataflow equation first made aggressive retiming/narrowing safe and easy to verify.
+- Synthesis tool behavior (abc's adder mapping, clock-gating inference) matters as much as RTL structure â hand-optimized arithmetic often lost to the default mapping.
+- Reset removal and clock gating are huge area levers when the protocol guarantees structural flush and the output is valid-gated.
+- I'd budget more steps for exploring around v12 (e.g., different Booth groupings, hybrid CSA depths per column, and target_delay sweeps), since several late variants were within ~10% and close variants of the winner often pay off.

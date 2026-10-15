@@ -1,0 +1,24 @@
+## Summary
+
+### Final result
+**`design7.v`**: 2,043,832 ADP (area 4074, delay 501.7 ps), 100% correct on all 6782 cycle checks. This beats the starting point (4,624,409) by **2.26Ã**.
+
+### What worked (in order of impact)
+
+1. **Replace the PE mesh with a flat carry-save datapath** (`design3.v` â `design4.v`, 4.62M â 2.91M): Keep the systolic *timing* (taps at delay `i+j`, per-column accumulation, output de-skew `7-j`) but drop the module hierarchy; taper widths to 19 bits (results need only Â±8Â·128Â²); replace per-cell carry-propagate adders with 3:2 carry-save compressors plus one CPA per column off the critical path.
+
+2. **Hand-built Baugh-Wooley carry-save multiplier** (`design6.v`, 2.91M â 2.09M): The single biggest win. Yosys's `a*b` maps to a partial-product tree **plus a ripple-carry adder on the critical path**. Writing the multiplier as an explicit Baugh-Wooley partial-product array reduced by 3:2 compressors to a (sum, carry) pair removes that ripple entirely. The array's constant offset (+32512/product) is subtracted once at the final off-path adder (8Ã32512, mod 2Â¹â¹). This dropped delay 670â520 ps while also cutting area.
+
+3. **Balanced Wallace tree + fusing the multiplier tree with the chain compression** (`design7.v`, 2.09M â 2.04M): Instead of multiplier-tree (4 levels) then a separate 2-level chain compression, feed the incoming `S,C` state directly into the multiplier's reduction tree (10 rows â 2 in 5 levels), entering the register-sourced `S,C` at the shallow levels so the late-arriving FF outputs get the shortest logic depth.
+
+### What failed / regressed
+
+- **"Compute products later" restructures** (delay line + parallel per-column dot product, `design2.v`): broken by the **mid-drain weight reload** semantics â each product must use the weight value current at its exact original cycle. This pinning forbids almost all dataflow re-timing.
+- **Tapered carry-save widths**: the 3:2 identity `S+C â¡ value` requires a **fixed modulus** at every stage; widening loses the wrap multiple.
+- **Removing the enable mux via "recompress with zero products"**: fails because during `w_valid` the weights shift, so recompressing with the *new* weights corrupts in-flight sums.
+- **Hierarchical references into generate blocks** (`g_col[j].res`) and undriven array elements: these synthesized to `x` in the netlist and failed netlist sim despite passing RTL sim.
+
+### Lessons
+- The critical structural insight was that only the *product cycle* is pinned (weight-snapshot semantics); everything else (representation, adder structure, tree shape) is free.
+- Yosys's inferred multiplier/adder carry-propagate logic is the delay bottleneck; replacing it with explicit CSA trees was worth ~170 ps at no area cost.
+- Register enable muxes (`if (en)`) sit on every critical path â a real but unrecoverable ~20-40 ps cost here given the reload semantics.

@@ -61,6 +61,26 @@
    "20261014_091810",
    "20261014_092036",
    "20261014_113349"
+  ],
+  "deepseek-v4-pro": [
+   "20261014_214629",
+   "20261014_214637",
+   "20261015_005132"
+  ],
+  "qwen3.8-2.4t": [
+   "20261014_214635",
+   "20261015_004146",
+   "20261015_032348"
+  ],
+  "glm-5.3": [
+   "20261014_214631",
+   "20261014_214639",
+   "20261015_010601"
+  ],
+  "mimo-v2.6-pro": [
+   "20261014_214633",
+   "20261015_002057",
+   "20261015_014419"
   ]
  },
  "exclude": [
@@ -120,7 +140,11 @@
   "glm-5.3-flash": "Default effort, which Z.AI documents as max for this model; 13k to 18k output tokens per step, reasoning included. Pinned to Z.AI.",
   "glm-5.3-flash-high": "RTLSCOUT_REASONING_EFFORT=high, one level below Z.AI's default max for this model: 2k to 6k output tokens per step against 13k to 18k for the default row. Pinned to Z.AI.",
   "deepseek-v4.1-flash": "Default effort, which DeepSeek documents as high. Pinned to the CoreWeave endpoint (fp8).",
-  "mimo-v2.6-flash": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8)."
+  "mimo-v2.6-flash": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8).",
+  "mimo-v2.6-pro": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8). Run 20261014_214633: the recorded cost reproduces exactly when the design is re-synthesized from a path of the same length as the run's; from other paths the flow maps the design slightly differently (2.02M to 2.11M), a path dependence of the synthesis step.",
+  "glm-5.3": "Default effort, which Z.AI documents as max for this model. Pinned to Z.AI.",
+  "deepseek-v4-pro": "Default effort, which DeepSeek documents as high. Pinned to Alibaba's endpoint; DeepSeek's own endpoint is excluded by the OpenRouter account's data policy.",
+  "qwen3.8-2.4t": "The open-weight 2.4T-A95B variant of Qwen3.8 Max, always in thinking mode. Pinned to Alibaba's endpoint."
  },
  "footnotes": [
   "Rows labelled as measured before the current suite are earlier data (pre-v1 seed runs from July 2026 with an unpackaged rtlscout, or suite-v1 runs from October 2026 without the provider pin and completion cap). Each is replaced when reruns of that entry under the current suite are published.",

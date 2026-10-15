@@ -1,0 +1,31 @@
+Summary:
+
+1. **Approaches tried and best result**
+   - Started from the provided `starting_point.v` (32-bit partial sums, per-PE carry-propagate adds): **4.624e6 area-delay product**.
+   - Reduced internal accumulator width from 32 to 19 bits in `design_a.sv` / `design_c.sv` while sign-extending only at output: ~**3.226e6**.
+   - Replaced each PE’s carry-propagate accumulator with carry-save redundant accumulation (`s,c`) so the final propagate add happens once at the column bottom (`design_d.sv`): ~**2.869e6**.
+   - Removed resets from the PE datapath registers while keeping the `c_valid` pipeline reset (`design_n2.sv`): **2.782e6**, the best design this session.
+   - **Best file:** `design_n2.sv` — PASS, 0/6782 checks, area 4220, delay 659 ps, area-delay 2782014.9.
+
+2. **Most impactful optimizations**
+   - Narrowing the internal accumulator from 32 to 19 bits. The true signed 8-term result needs 19 bits, and this removed a large fraction of flip-flop/adder logic.
+   - Carry-save accumulation in the PE array. Moving the carry-propagate addition out of each PE reduced the systolic register-to-register logic substantially.
+   - Removing reset from the PE partial-sum/carry/weight/activation datapath registers. The cycle-accurate behavior is still correct because zeros flush the pipe before the first checked result; keeping reset only on the `c_valid` pipeline preserves simulation/check correctness.
+
+3. **What didn’t work or regressed**
+   - **18-bit internal accumulator** (`design_b.sv`, `design_e.sv`) failed. The extreme corner `8 * (-128 * -128) = 131072` requires signed 19 bits.
+   - **Removing all resets including `vpipe`** (`design_n.sv`) failed; early `c_valid` assertions were checked before the flush was complete.
+   - **Combinational activation broadcast with uniform output delay** (`design_g.sv`) failed functionally; the systolic timing/skew must remain per-row/per-column.
+   - **Per-row adaptive accumulator widths** (`design_h/h2/j`) failed, and one version also had a synthesis syntax error.
+   - **Moving the final propagate add after de-skew** (`design_k.sv`) passed but increased area substantially, producing a worse area-delay product (~3.072e6).
+   - Removing even more reset logic in `design_p.sv` was slightly worse than `design_n2.sv` (2.802e6 vs 2.782e6), so the chosen reset structure matters.
+
+4. **Lessons learned / next steps**
+   - The biggest area savings come from proving exact accumulator bounds and using redundant carry-save form, not just tweaking synthesis constraints.
+   - Reset removal is very effective but must be applied carefully: keep resets on the control/valid path that masks the output.
+   - `target_delay` sweeps did not improve the best cost; default 500 ps was already best. The structural RTL changes mattered much more.
+   - If continuing, I would explore:
+     - Booth or other multiplier structures per PE;
+     - retiming the carry-save tree inside/around PEs;
+     - partial final addition decomposition across columns;
+     - cleanup of currently unused upper accumulator slices if safe for row-dependent widths.
