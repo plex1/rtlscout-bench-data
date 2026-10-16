@@ -1,0 +1,29 @@
+## Session Summary
+
+**Final result:** `starting_point.v` — PASS, **721,135 area_delay_product** (area 956 × delay 754ps), down 25.5% from the 968,045 baseline. All 2M vectors bit-exact vs. the combinational oracle, 5-cycle latency preserved.
+
+### 1. Approaches tried / what worked
+- Kept the 5-stage pipeline intact but freely moved logic across register boundaries and rewrote arithmetic internals (legal per spec as long as results were bit-identical).
+- Incremental, evaluation-driven loop: each change was verified on correctness first, then cost; bad variants were reverted immediately.
+- Systematic critical-path hunting: the reported worst path migrated G3→G6→G4→G2→G3 as I fixed stages, guiding each next move.
+
+### 2. Highest-impact optimizations
+1. **XOR-bias + sign-popcount accumulation** — replaced 17 serial 20-bit `~x+1` ripple negations with `x ^ sign_ext` terms and the sign popcount as an extra CSA addend (~removes the original 910ps critical path).
+2. **`pp_dualadd`** — sum `D=A+B` and negation `E=~A+~B+2` computed in parallel; the `+2` must be 3:2-compressed first (a 2-operand carry chain breaks on 4-input columns — this caused a real bug before it was fixed).
+3. **`csa_tree3`** (3:2-only balanced tree) + **two-level pre-compression before pipe3** (18→12→8): shallower G4, pipe3 flops 352→160.
+4. **Offset-binary exponent tree** (flip sign bit; order-preserving for unsigned compare, offset cancels in differences) + **dual-difference alignment** (both group diffs computed in parallel, muxed — hides the max-compare behind the subtracts).
+5. **`norm_fast`** (OR-prefix zero count, parallel shift/adjust), **encoder split across pipe5**, and a **fused single-increment rounding/sign tail** (with explicit wrap-corner correction).
+
+### 3. Regressions / things that didn't work
+- **Shared-propagate dual adder** (`e` with carry injected at bit 0/1): wrong — the `+2` creates a 4-input column with carry 2. Caused +1-ULP errors; fixed by 3:2-compressing `(~a,~b,2)` first.
+- **`pp_add3` 3-operand prefix** initially used `maj3`/`xor3` as generate/propagate — incorrect for carry≥2; fixed via compress-then-prefix.
+- **Moving the abs-negation to G5** and **lzc_fast with wide `|sel` reductions**: G5 ballooned to 1125ps (NOR5/NAND5 chains). Reverted.
+- **FA×1 pre-compression**, **clamps-first parallel clamp**, **target_delay ≥ 780**, **OB-flip folded into G1's adder**: all measured worse (733k–814k) — mapping noise and extra logic. Also hit a Verilog width pitfall (`$signed(a)+$signed(b)` XOR-fold needed explicit sign extension) and an `FFNR` macro comma-in-braces pitfall.
+- **target_delay tuning** consistently hurt (delay rose faster than area fell).
+
+### 4. Lessons / next time
+- Prove algebraic equivalences (mod-2^W CSA truncation, offset-binary difference invariance) before rewriting — this enabled the biggest wins safely.
+- Count logic levels per stage and rebalance across pipe boundaries rather than micro-optimizing one block; watch the *output* path (encoder) — it counts toward delay.
+- Avoid macro-argument expressions containing commas; make operand widths explicit in mixed signed/unsigned expressions.
+- Mapping noise is ±30-40ps: re-measure after every structural change instead of trusting cell-count estimates; revert fast on regressions.
+- If I had more budget: specialize the 32× posit(8,2) decoders (area) and try a fused compare-select in the exponent tree (G2/G3 are now co-critical at ~754ps).

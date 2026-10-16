@@ -1,0 +1,28 @@
+## Summary
+
+**Final result:** `design.sv` — 100% correct (20,672 checks), **ADP 3.653e6** vs. baseline 9.497e6 (−61.5%): area 4274→4030, delay 2222ps→907ps.
+
+### 1. Approaches tried
+- Baseline: verbatim `starting_point.v` (original core_jpeg composition) → 9.50M, critical path = transpose RAM 32:1 read mux (huge address fanout).
+- Progressive rewrite of `jpeg_idct_2d` (top) + parameterized `jpeg_idct_1d` (×2) + `jpeg_idct_transpose`.
+- Experiments: 4-vs-5 multiplier rescheduling, narrow constant multipliers, split/CSA multipliers, several `(x*181)/256` implementations, registered one-hot RAM decode, RAM width reduction (20b), reset removal, target_delay sweeps (500/800/1100), 181-chain re-pipelining.
+
+### 2. Highest-impact optimizations
+1. **7 fixed-constant multiplier units per pass** (schedule uses distinct constants per beat) with CSD shift-add trees + 2:1 data muxes — replaces 5 dynamic 32×32 multipliers; constant trees can't be collapsed by ABC into slow conditional-add chains (that regression killed the generic-mux approach).
+2. **Split product pipeline**: carry-save compression (CSA-to-2-rows) in stage 1, single CPA in stage 2 — respects the exact beat-k→idx-k timing contract.
+3. **Product rescheduling** onto free beats via operand-register persistence (beat 3 serves idx 3+4; `(c0±c4)*C4` on beats 2/5) → 4 multiplier slots' worth of parallelism in the same 2-stage pipeline.
+4. **`(x*181)/256`** as shift-adds (181 = 256−64−16+4+1) with trunc-toward-zero fixup `q = (p>>>8) + (p[31] & |p[7:0])` carried as a 1-bit carry-in into the block_out adder — removed the huge multiply+divide.
+5. **Reset removal on pure datapath flops** (provably written before use; outputs gated by reset valid chains) — smaller/faster flops, −4% area, −3% delay.
+6. Registered one-hot read decode + block-half 2:1 select in the transpose; 20-bit RAM words (x-pass outputs bounded at ±346k, proved analytically).
+
+### 3. Regressions / what didn't work
+- **Generic `a*b_slice` with dynamic b**: ABC restructured my explicit CSA back into a serial conditional-add chain (800ps) — dynamic-constant multipliers are a dead end here.
+- **181 re-pipelining into nested `csa6to2` trees**: delay −0.4% but area +5% (extra CSA levels outweighed removed CPAs) → reverted.
+- **target_delay tuning**: identical results at 500/800, worse at 1100 — not a useful lever in this flow.
+- **3-stage multiplier split** (would cut CPA depth) is blocked by the fixed beat schedule (products must land by idx=k; odd data only at beats 1/3/4/6) — needs odd-data holding regs + full butterfly re-timing; deemed too risky for remaining budget.
+
+### 4. Lessons learned
+- Delay in this library is **CPA-bound** (~800ps per 32-bit add); anything packing a CSA+CPA in one cycle sits at ~900ps. Further gains require splitting CPAs across register stages *everywhere* (multipliers, 181 chain, butterfly, block_out) — a full re-pipelining project.
+- ABC will undo hand-written arithmetic structure when operand muxes are dynamic; register boundaries and fixed constants are what preserve it.
+- Value-bound analysis (all fixed-point wrap semantics proven before narrowing) enabled 32→17/20/21-bit datapaths with zero correctness risk.
+- Next time: I'd first map *all* cycle-level arithmetic depths, then design the pipeline balance (including output-stream slack, which is free to consume since the TB ignores absolute timing) before micro-optimizing cells.

@@ -1,0 +1,26 @@
+## Summary
+
+**Result:** 100% correctness (18,874,371 checks). Best ADP **102,643** (`design19.sv`: area 88.95, delay 1154 ps) vs. baseline **145,429** (`starting_point.v` copy: area 108.7, delay 1338 ps) — a **29% improvement**.
+
+### 1. Approaches tried
+Iterated ~20 RTL variants (`design.sv`, `design2..design21.sv`). Core strategy: keep one significand product, but shorten the post-multiplier chain (leading-zero count → normalization shift → round → pack).
+
+### 2. Optimizations with the most impact
+- **Two parallel narrow funnel shifters** (`design2/3`) instead of one shared barrel shifter whose select depends on `lz`. The normal path only shifts 0..11 (4-bit select); the subnormal path's select comes from exponents (early).
+- **Unified rounding** (`design4`): `frac = mant_pre[9:0] + round_up` and `carry = round_up & (&mant_pre[9:0])` are valid for *both* the normal and subnormal cases (the subnormal carry to the smallest normal is exactly the wrap of this 10-bit increment). Killed the 12-bit adder and the `sel`-dependent carry. Biggest single win (134k → 123k).
+- **Split overflow off the rounding carry** (`design7/8`): `ovf_hi = (e_lim > 30)` is carry-independent; and since `frac == 0` whenever `carry` fires, `frac_y` only needs masking by `ovf_hi`. This takes the late carry off the whole fraction output path (117k → 113k).
+- **`big = ea_f | eb_f | (ovf_hi & ~zero_in)`** (`design19`): NaN/inf inputs collapse to "exponent all ones" — a 3-term OR replacing a 6-term OR. (107k → 103k)
+- **Precomputed round-bit vector** (`design12`): `rv[j] = prod[j] | |prod[j-2:0]|`, so `round_up = w[0] & rv[sh]`.
+- `ea_eff = e_a | {4'd0, ea_z}` (no mux).
+
+### 3. What regressed
+- Merging normal/subnormal rounding into one shifter+adder (`design.sv`): −10% area but +13% delay.
+- Explicit `case`-based 12:1 mux (`design16`): Yosys mapped it much worse (+15% area, +10% delay) — `>>` maps better than hand-written mux trees.
+- Balanced prefix-OR (`design10`), balanced zero-detectors (`design14`), precomputed `dr` round-up (`design6/11`), `e_lim` clamp for zero inputs (`design17/20`), precomputed `e_lim+1` (`design21`), wrap-trick `sel` (`design9/18`), dropping `is_zero` (`design5`) — all neutral-to-worse.
+- `target_delay` sweeps: 1100/1400/2500 all gave identical or worse ADP; below the achievable delay the mapping is identical.
+
+### 4. Lessons learned
+- **Synthesis noise is ±7%** for logically equivalent RTL. Several "obviously simpler" versions scored worse. Always build several equivalent variants and keep the best rather than reasoning from gate counts.
+- **Keep late signals (rounding carry) off as many outputs as possible**, and exploit invariants (`frac==0` when carry fires) to delete muxes instead of adding logic.
+- Don't hand-roll mux trees; use `>>` and let the tool map.
+- Note: `design.sv` contains the same RTL as `design19.sv`, but its last evaluation landed on a worse mapping (114,197) — **`design19.sv` is the file with the recorded best cost** and should be treated as the golden design.

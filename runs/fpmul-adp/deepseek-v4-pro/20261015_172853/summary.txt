@@ -1,0 +1,32 @@
+### 1. Approaches tried and what worked best
+- **Baseline:** `starting_point.v` was correct and gave **145,429** area-delay-product at default target.
+- Tried operand-level LZ/pre-normalization (`fp_mul_v2/v3/v4`), tree LZ (`fp_mul_v5`), and shared/normal-subnormal barrel-shifter variants (`fp_mul_v7/v8/v9`).
+- **Best working design:** an earlier version of `fp_mul_v6.sv`. It kept the basic unpack/multiply/classify structure but replaced the prefix-OR/mux `bit_at()` guard/sticky extraction with **logarithmic 22-bit right-shifters plus sticky accumulation**.
+- Best measured result:
+  - **area_delay_product: 143,841.665**
+  - delay: 1359.8461
+  - area: 105.7779
+  - default `target_delay = 500`
+
+### 2. Optimizations with the most impact
+- Replacing the wide `below[k] = |prod[k:0]` prefix ORs and parameterized `bit_at()` mux chains with **staged logarithmic barrel shifters**:
+  - stages of 1, 2, 4, 8, 16-bit shifts
+  - guard bit comes from shifted product bit 0
+  - sticky bit comes from ORing the bits shifted out in each stage
+- Fixing the subnormal path to shift by **`q-1`**, where `q = 26 - exp_sum`, made the subnormal barrel path exact while reusing the same style of hardware.
+- Leaving `target_delay` at 500 gave the best product. Higher targets reduced area slightly but increased delay enough to make the product worse.
+
+### 3. What didn’t work or caused regressions
+- Using `casez`/don’t-care patterns caused lint failure (`fp_mul_v2` initial version).
+- Sharing one shifter between normal and subnormal paths failed correctness (`fp_mul_v8`).
+- The first barrel-shifter subnormal version shifted by `q` instead of `q-1`, causing many subnormal errors until corrected.
+- Input pre-normalization (`fp_mul_v4`) was correct but worsened cost substantially.
+- Removing the variable left-shift path in `fp_mul_v7` actually regressed cost slightly.
+- Secondary `target_delay` sweeps mostly worsened the area-delay product.
+
+### 4. Lessons learned / next time
+- Preserve the exact best file before making further edits. The best `fp_mul_v6.sv` state was overwritten by a later, slightly worse edit.
+- In this datapath, the rounding guard/sticky extraction dominated area and delay; barrel-shifter-based sticky computation was the key improvement.
+- Subnormal rounding arithmetic is very easy to break; any change to shift amount or carry handling must be evaluated immediately.
+- Target-delay tuning was less valuable than datapath restructuring.
+- Next steps should likely reconstruct the best `fp_mul_v6.sv` state by restoring the original `mant_pre` false branch to use the left-shifted path (`lshifted[10:0]`), then explore further reducing the multiplier/barrel path or improving the LZ generation.

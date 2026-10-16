@@ -1,0 +1,24 @@
+## Session Summary
+
+**Best result: `design_v2.v` — area_delay_product 731,465** (baseline `starting_point.v`: 968,045 → **24.4% reduction**). All 1,999,992 checks pass, bit-exact vs the combinational oracle.
+
+### What worked (in order of impact)
+1. **Pairwise-max exponent pre-reduction in stage 1** (17→9 items into the comparator tree): 876k→744k. Associativity of max made this free and bit-exact; it cut a full comparator level off the critical stage-2 path.
+2. **Replacing the original `compressor_4to2`-based CSA tree with a pure recursive 3:2-compressor tree** (`compress_tree`/`compress_partial` modules): 944k→888k. The original 4:2 compressor had a horizontal `cout→cin` ripple across all bits — a huge hidden chain.
+3. **Two's-complement +1 folding**: `-P = ~P + 1` rewritten so all +1 terms accumulate as one extra `popcount(signs)` CSA row. This removed 17 incrementers from the critical path and let me register 14-bit aligned products instead of 20-bit two's-complemented values.
+4. **Pipeline re-cutting**: moved alignment + sign-XOR + two compression levels (18→6 rows) into stage 3, registering only 120 flops instead of 340; stage 4 does 3 compression levels + final add.
+5. **Pre-inversion before alignment shift**: `~P` applied before the barrel shifter, then an arithmetic right shift restores exact two's complement values (identity `~(p>>d)+1 ≡ (signext(~p)>>>d)+1` mod 2^W). Removed the XOR chain from the path tail: 744k→735k.
+6. **Plain `*` for the 4×4 mantissa multipliers** with only 8-bit products registered (vs 2×8-bit booth sum+carry pairs).
+
+### What failed / regressed
+- **MID_ROWS ≠ 6** (tried 4, 5, 9, 12) — all worse than 6; the tool found the sweet spot at 6 registered rows.
+- **Moving diff/clamp into stage 2** — stacking max-tree + 17 subtractors made stage 2 the bottleneck (854k); reverted.
+- **`target_delay=1000`** — slightly worse than default 500; no need to tune it.
+- One edit (`ALIGN_WIDTH[...]` select truncation + inconsistent file state during a bisect) caused a functional failure that took a couple of steps to untangle — the fix was to restore the exact last-passing structure wholesale.
+
+### Lessons learned
+- Register the *narrowest* intermediate representation at each pipeline cut; shift the flop boundary so each stage carries roughly equal logic depth.
+- Hunt for hidden carry chains (the 4:2 compressor's `cout` ripple was the single biggest original-design flaw).
+- Algebraic rewrites that are identities (popcount +1 folding, pre-inversion + arithmetic shift) are safe, big-win optimizations for dot-product paths.
+- Evaluate after every change and revert immediately on regression — the passing-cost history made recovery painless.
+- `design_v2.v` is the final deliverable; `starting_point.v` remains untouched for reference.

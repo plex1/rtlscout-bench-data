@@ -1,0 +1,29 @@
+## Summary
+
+**Best result: design6.sv at 3.733M area_delay_product (PASS, 20672/20672 checks)** vs baseline starting_point.v at 9.50M — a 2.5x improvement.
+
+### What worked best
+1. **CSD constant multipliers**: Replaced all `*` with shift-add trees (all constants: C1-C7, 181), eliminating multipliers entirely.
+2. **Compressed pipeline**: Form products combinationally at beat time instead of register→register multiply chains.
+3. **Direct-write transpose** (design4/6): The x-pass writes its 8 row outputs directly into the transpose register banks (4 values at idx-3+2, 4 at idx-7+2), eliminating the x-pass block_out storage (180 FFs), streamer counters, and 8:1 read mux. This alone gave ~6% area reduction.
+4. **Beat-data reuse for path splitting**: Even data repeats on beats {0,2,5,7}, odd on {1,3,4,6}. Precompute products for later beats (e.g. s2 parts at beat 0) and store them in registers that get reused once consumed — zero extra FFs, depth-3→depth-1 on the critical beat-5 path.
+5. **20-bit transpose storage** (x-pass outputs bounded by ±346,400 < 2^19) and 17-bit y block_out (±~60k < 2^17).
+
+### Most impactful optimizations
+- Multiplier removal: ~9.5M → ~4.9M
+- Balanced CSD trees + path splitting at odd beats: → 4.06M
+- Direct-write transpose: → 3.79M
+- Register-recycled 181* split (partial181 at beat 5, combine at beat 6, fix181 at beat 7): → 3.73M
+
+### What didn't work
+- **Over-splitting into dedicated partial registers** (design.sv full-split, design5.sv): delay improved but area ballooned (+200-400 units), net ADP worse. Area dominates ADP here.
+- **Fully narrow-sliced multipliers** (design7.sv): 11-bit hi/lo operand split for ALL products added area (4.52M) and the 205ps clk-to-Q-like launch on the critical path wasn't helped.
+- **target_delay tuning**: made no difference (delay is constraint-independent at these values).
+- Multiple schedule bugs from aggressive rewrites (t0f clobbering, 181* results needed by next row, narrow-split sign errors, missing ping-pong bit in write enables).
+
+### Lessons learned
+1. **Keep a passing checkpoint file** before risky rewrites — I lost the 4.11M design once and had to reconstruct it.
+2. Incremental edits to a passing design beat full rewrites; most failures came from rewrites.
+3. For ADP, register count is the primary cost driver — recycle registers across beats rather than adding pipeline registers.
+4. Trace the original design's arithmetic beat-by-beat before rewriting; the valid pipeline timing (vdly depth, b3_q/b3_qq/b7_q strobes) is tightly coupled to the schedule.
+5. Files available: `design6.sv` (best), `design7.sv` (narrow-slice, worse), `design5.sv`, `design4.sv`, `design3.sv`, `design2.sv`.

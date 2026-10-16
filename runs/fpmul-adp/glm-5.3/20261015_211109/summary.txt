@@ -1,0 +1,26 @@
+# Summary
+
+## Final result
+**Best design: `design7.v` — PASS, cost 110939** (area 101.9, delay 1088 ps), vs. the starting point's 141943 (**22% better**) and my first re-implementation `design2.v` (130495).
+
+## What worked
+
+**1. `design2.v` — unified shifter (cost 130495).** Replaced the starting point's two separate normalize/subnormal paths with ONE right-only sticky-or shifter, using the identity `SH = max(p−10, 26−es)`. Also replaced the loop-based LZ counter with a balanced priority-encoder tree and the `below[]` vector with sticky-or logic inside the shifter. This removed the need_right/left-shift mux and both `bit_at` index-muxes.
+
+**2. `design7.v` — operand-derived normalization (cost 110939, the big win).** The key insight: **`lz(prod) = la + lb + 1 − d`**, where `la`/`lb` are the *operand* leading-zero counts and `d = prod[21−L]` is a single late bit. Since `la`/`lb` are computed from the operands *in parallel with the multiplier*, both shifter controls (`shA = 11−L`, `shB = 26−es`) become **early** signals. After the multiplier the only late work is: one product-bit mux (`d`), a small read-offset mux, the sticky-or, and the rounding adder. This cut the critical path from ~1470 ps to ~1088 ps and beat the unified-shifter approach by 15%.
+
+## What didn't work (regressions)
+- **Hand-built Wallace/CSA trees** (`design3.v`, `design5.v`, 139k–145k): Verilog's `*` operator maps better in Yosys than my explicit CSA + Sklansky prefix adder — both area and delay got worse.
+- **Prefix-AND incrementers for rounding** (`design5.v`, `design12.v`): more area, no delay win — Yosys's carry-chain mapping of small adds is already good.
+- **12-bit CLZ on the product** (`design3/4/6`): correct and cheaper than 22-bit CLZ, but keeps the LZ→shift chain *after* the multiplier, so delay stayed ~1500 ps.
+- **Single unified shifter with fully-early control** (`design8`–`design16`): repeatedly failed (8.3–8.6M errors). The failure mode: for subnormal×subnormal, `L ≥ 21` makes `11−L` wrap and the shifter's own muxes corrupt the window/sticky. `design16.v` added an `nshOK` flush but still failed — I ran out of steps before pinning down the last indexing discrepancy vs. `design7.v` (which is proven correct with two shifters).
+
+## Lessons learned
+1. **Move work off the critical path**: deriving the shift amount from *operand* CLZs instead of the *product* was worth far more than optimizing the arithmetic itself.
+2. **Keep the sticky-or inside the barrel shifter** — it shares the mux structure and costs almost nothing.
+3. **Don't hand-roll multipliers/adders for Yosys** — its `*`/`+` mapping beat my explicit trees every time.
+4. **The tail exponent adders are minor**: merging them (`design11`) or using incrementers (`design12`) didn't help; the reported critical path was mostly multiplier + shifter + output muxes.
+5. **`target_delay` had no effect** (identical netlists at 300/500/900/1000; 2500 traded area for delay and lost).
+
+## If I continued
+Debug `design16.v` by bisecting against `design7.v` on the specific failing class (subnormal `a` with `b` around `0x6800`, i.e. `L` large) — a single-early-control shifter should beat `design7`'s two shifters on area; alternatively shrink `design7`'s shifter A (which only needs 4 stages, since `11−L ≤ 11` and its input can be pre-narrowed) as a low-risk area win.

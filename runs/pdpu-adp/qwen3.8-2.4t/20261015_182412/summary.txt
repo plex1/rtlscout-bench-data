@@ -1,0 +1,34 @@
+# Session Summary: Pipelined Posit Dot-Product Unit (pdpu_top_pipelined)
+
+**Best result: `design_v7.v`, ADP = 736,841** (baseline: 968,045 → **24% improvement**, 100% correct on 1,999,992 vectors)
+
+## 1. Approaches tried & what worked best
+
+- **Repartitioned the 5-stage pipeline** while preserving the baseline's functional structure. Final partition (v7): S1 decode 33 posits + exponent adds + 8 pairwise exp-max + sign popcount → S2 max-tree tail (9 exponents) → S3 4×4 multiplies + diff subtract/clip + alignment shifts → S4 balanced 3:2 compressor tree + 19-bit CPA → S5 normalize; encoder kept combinational after pipe5 (off reg-to-reg critical path, matching baseline).
+- Early aggressive repartitions (v1–v4: decode+max+subtract all in early stages) were slower; converging on a baseline-like partition with optimizations was the winning strategy.
+
+## 2. Highest-impact optimizations
+
+1. **True products via `*`**: 4×4 mantissas produce exact 8-bit products with no carries — replaced radix-4 Booth partial products + CSA entirely. Registered product width dropped 320→128 bits.
+2. **Sign-XOR trick**: register `shifted ^ {14{sign}}` (14 bits) instead of per-lane 20-bit two's-complement negation; correct the offset by adding `popcount(signs)` as an 18th summand.
+3. **Balanced explicit 3:2 compressor tree** over 18 operands (18→12→8→6→4→3→2, then one CPA). The original 4:2 compressors had a horizontal `cin[i+1]=cout[i]` ripple that hurt timing badly (v7 tree beat it decisively: 820k → 737k).
+4. Pairwise exponent maxima in S1 shortened the max-tree (depth 4→3).
+5. **19-bit lanes** instead of 20 (magnitude < 2^18 provably).
+
+## 3. What didn't work / regressions
+
+- **LZC-on-XOR trick (v9)**: `LZC(|x|)` from `x XOR signext` with a correction bit — 312/2M failures (tiny negative sums) that I could not root-cause in remaining steps. Reverted; abandoned. Lesson: the +1 increment in two's complement negation makes any "count on ~x" trick fragile.
+- **Dual ±CPA in stage 5 (v8)**: passed but slower (registering fs/fc instead made the stage-5 path worse); net regression.
+- **Window-shift encoder (v9b)**: correct (passes!) but slightly slower than the original 46-bit right shifter (751k vs 737k) — synthesis didn't reward it.
+- Naive linear-recursion CSA tree first attempt (v7 draft) was 15 levels deep and **functionally broken** (carry not shifted by 1) — caught immediately by sim.
+- `target_delay` experiments (400/600/750 ps) changed nothing material — the constraint isn't the lever here.
+
+## 4. Lessons learned
+
+- **Match the proven pipeline partition, optimize inside stages.** The baseline's cut points were near-optimal; rebalancing work *within* stages (tree structure, operand widths, XOR tricks) gave all the gains.
+- Keep the **encoder combinational after the last flop bank** — it's free latency-wise (5 cycles are the 5 banks).
+- Register-width reductions (320→128 bit products, 20→14 bit sign-XOR lanes) are the biggest area levers; tree topology (3:2 balanced vs 4:2 rippled) is the biggest delay lever.
+- Verify bit-exact tricks on paper for edge cases (x=0, x=±2^k, empty LZC) *before* synthesizing — my v9 bug was exactly such an edge case.
+- Evaluate after every structural change; keep each variant in its own file (v1–v9b) for easy rollback.
+
+**Files carried over:** `design_v7.v` (best), `design_v9b.v` (correct alt-encoder variant, slightly worse), others are exploratory dead ends.

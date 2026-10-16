@@ -1,0 +1,29 @@
+## Summary
+
+**Final result**: `starting_point.v` — PASS on all 1,999,992 vectors, ADP **754,752** (from baseline 968,045, −22%; delay 910→790 ps, area 1063→955).
+
+### 1. Approaches tried and what worked
+- **Baseline first**: evaluated `starting_point.v` untouched (968k), then made incremental, re-evaluated changes.
+- **Equivalence-preserving datapath rewrites**: `*` for the 4×4 booth/CSA multiplier (sum+carry was the exact product); sign-folding (invert terms + one popcount CSA operand replaces 17×20-bit incrementers); kill-flag replacing the shift-clamp mux (shifting 14 bits ≥14 already yields 0); fused encoder round+negate (`sign ? -(v+r) : (v+r) == (sign?~v:v)+(r^sign)`); fused final-add + abs (`-(a+b) = ~a+~b+2` in parallel with `a+b`).
+- **Pipeline re-balancing** (biggest win): a probe showed flops are essentially free (300 flops = +0.5 area units), so wide pipeline state was used purely for depth balance — carry-save exponent adds before pipe1, max-tournament split 4/1 across pipe2/pipe3, Dadda 3:2 reduction split across pipe3/pipe4, normalize/encode split across pipe4/pipe5. Every cloud ended at ~20 gate levels.
+- **Offset-binary max tree** (final big win): XOR exponents with 0x40 so the comparator is pure unsigned max (differences are offset-invariant) — removed sign logic from the critical path (839→790 ps).
+- **Structural adders**: Sklansky `prefix_add` where yosys inferred ripple chains; Dadda 3:2 `csa_red` (splittable) for the 18-term accumulation.
+
+### 2. Highest-impact optimizations
+1. Pipeline re-balancing enabled by the free-flop discovery (−15% delay).
+2. Offset-binary unsigned max tree (−6% delay).
+3. Multiplier replacement + sign folding (−19% area at the start).
+4. Fused add/abs and round/negate (delay-neutral area wins).
+
+### 3. Regressions / dead ends
+- **prefix_add bug**: `sum = pt ^ {go, cin}` is wrong for `cin=1` — needed `carry_in[j] = go[j-1] | (ppo[j-1] & cin)`; caused mass failures until fixed.
+- **Unsigned comparison bug** in the compact decoder: `if (W-es+i-r-1 >= 0)` with `int unsigned` params is always true → out-of-range selects corrupted exponent bits (mantissas unaffected). Fixed with wrap-safe `(r+1) <= (W-es+i)`.
+- **Off-by-one sticky** in the encoder funnel reformulation (`<= 2` vs `< 2`) → 339 rounding errors.
+- **Regressions vs. best**: compact OR-mux decoder (area-neutral, no gain), diff via plain `-` vs prefix (757k vs 754k), max-tree regrouping (813k), CSA_MID=8 (803k), encoder funnel shift (769k), target_delay 850/900 (833k/858k). Reverted all; the flow is deterministic so the best config (`CSA_MID=6`, barrel-shifter encoder, `(5,5,5,2)`+pair max grouping) is restored and re-verified.
+
+### 4. Lessons learned
+- **Measure area composition before optimizing**: the flop probe revealed flops ≈ 0 area — this completely changed the optimal strategy (wide pipeline state is free). A second probe showed the 32 posit decoders cost only 9 area units, killing a planned decoder rewrite.
+- **Balance all clouds, not just the worst one**: shaving one cloud just moved the critical path elsewhere; the win came from re-cutting the whole pipeline.
+- Exploit arithmetic identities (offset binary, invert+popcount, `-(a+b)=~a+~b+2`) — they are provably bit-exact and remove real logic.
+- Watch Verilog signedness/width pitfalls (`int unsigned` in genvar expressions, macro args with commas) — they fail silently at RTL.
+- Small RTL variants move the mapper ±4%; only structural changes exceed noise, so re-verify and keep the best measurement.

@@ -1,0 +1,32 @@
+## Summary
+
+**Final: v14.v — PASS, cost 99,259 area_delay_product** (baseline starting_point.v: 145,429 → **32% reduction**; area 92.5, delay 1073 ps).
+
+### 1. Approaches tried; what worked best
+The winning design (`v14.v`) combines several restructuring ideas:
+- **Input-side subnormal normalization** (v2): normalize subnormal operands (10-bit LZC + left shift) before the 11×11 multiply, so the product has at most one leading zero — eliminating the 22-bit LZC and wide barrel shifter of the starting point.
+- **Early exponent arithmetic** (v7): compute `t_base = ea_eff + eb_eff` pre-multiplier; pre-compute all threshold comparisons (`<=14/15`, `>=45/46`, `==44/45`) and exponent tables (`em0/em1/em2`, shift `R`) early, letting the late multiplier MSB (`p_hi`) only do tiny 2:1 selects.
+- **Early one-hot decoded AND-OR alignment plane** (v14's key win): since `R = 15 − t_base` is known before the multiplier, the subnormal result fraction/guard/sticky bits are each a single AND-OR level straight off the product bits (12-input OR), replacing the 4-stage funnel shifter + sticky OR chain (~200 ps saved on the critical path).
+- **Carry-free rounding increment**: `frac_o[i] = frac[i] ^ (round_up & pa[i-1])` with prefix-ANDs computed from pre-round bits, so the late `round_up` reaches each fraction bit through one XOR.
+- **Flattened output packing**: fraction bits gated by `not_special & ~ovf` AND-planes instead of a 3-level nan/inf/zero/core mux chain.
+
+### 2. Most impactful optimizations
+1. AND-OR plane subnormal alignment (102,784 → 100,947).
+2. One-hot `Req` decode directly from `t_base[3:0]`, skipping the `15−t_base` subtractor (→ 100,496).
+3. Dropping redundant `st[12..15]` sticky terms (guard=0 there, so they can never round) — removed the slowest `pfx[21]` ripple bit from the `round_s` path (→ 99,259).
+4. The original input-side normalization + early exponent restructuring (145,429 → ~110,000).
+
+### 3. What didn't work / regressed
+- **Kogge-Stone parallel-prefix** replacements of the 10-bit prefix-ANDs (v10, v16) and of the 22-bit sticky prefix-OR (v18): slightly worse — Yosys maps the hand-rippled forms better at this width; carry is rarely the bottleneck.
+- **Flattening the exponent output** (v12, v17, v19): consistently worse — the `is_sub/ovf/zero` mux tree synthesizes efficiently; the flat AND-OR version grew the exponent adder path.
+- `carry = guard & (&frac)` simplification (valid mathematically) made things worse due to the wide AND tree.
+- Full AND-OR plane also covering the *normal* path (v13): worse (area 93.3, cost 109,691).
+- `target_delay` sweeps had zero effect (synthesis result identical at 300/500/700 ps).
+- One bug found via sim: `{3'd0, p_hi, carry_n}` concatenation instead of arithmetic sum in v17 (fixed), and an early sticky bug where `p[0]` was dropped when `p_hi=1` (v2).
+
+### 4. Lessons learned / next time
+- **Move late decisions early**: anything computable pre-multiplier (shift amounts, compares, exponent tables) should be; the multiplier output should ideally feed only 1-bit selects and data.
+- Replace mux-based shifters with **decoder + AND-OR planes** when the shift control is early-available.
+- Verify "equivalent" restructurings with sim, not just hand-tracing — v17's concat bug looked correct on paper.
+- Small, targeted micro-edits to the best file (evaluating after each) outperformed wholesale rewrites; every exotic adder/prefix variant was A/B-tested against v14 and reverted if worse.
+- Remaining headroom is in the exponent LSB path (`carry_n` ripple → `ksel` mux) and multiplier structure — a next agent could try decomposing the 11×11 multiply (hidden-bit extraction: `2^20 + 2^10·(fa+fb) + fa·fb`) or one-hot input normalization.

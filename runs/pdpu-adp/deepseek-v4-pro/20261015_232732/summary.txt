@@ -1,0 +1,32 @@
+1. **Approaches tried**
+   - Started from the provided `starting_point.v` (original hand-instantiated Booth Wallace multiplier, CSA trees, barrel shifters, lzc).
+   - Built a separate clean behavioral rewrite `design_direct.v` to try to validate arithmetic equivalence. This was functional but failed bit-exactness; the failing outputs indicated the decoder/normalization path was wrong, not just area. It consumed many steps and never reached a passing cost.
+   - Switched to **incremental, targeted edits of `starting_point.v`** while keeping the original pipeline structure and all original leaf cells except the ones deliberately changed.
+
+2. **What worked best / had the most impact**
+   The winning configuration (`starting_point.v` final contents) was:
+   - Replace the per-lane Booth Wallace `radix4_booth_multiplier` internals with `assign sum_o = operand_a * operand_b; carry_o = 0;` while leaving the interface identical.
+   - Replace the 17-input CSA accumulation tree with a behavioral modulo sum:
+     ```verilog
+     sum_wide = {5'b0, pipe3_mantissa_comp[0 +: 20]};
+     for (...) sum_wide += {5'b0, pipe3_mantissa_comp[...]};
+     ```
+     taking the low 20 bits, which is bit-identical to the original CSA+CPA modulo result.
+   - Replace the original mux-based `barrel_shifter` with `operand_i << shift_amount` / `operand_i >> shift_amount` equivalent code.
+   
+   This preserved 100% correctness and reduced cost from:
+   - original baseline: `968,044` → best final: **`843,715`** (`area 982.9`, `delay 858.4 ps`, `target_delay 400/500`).
+
+3. **What didn’t work or regressed**
+   - The full behavioral rewrite `design_direct.v` failed bit-exactness (`0/1,999,992` checks), with early outputs like `got=7f80` instead of small positive values. Debug showed mantissa products were `0` where they should not be, pointing to a decoder/normalization semantic mismatch rather than a small typo.
+   - Replacing the lzc with a behavioral loop priority counter **regressed cost** from `843,715` to `884,400`; the original tree lzc mapped better in Yosys.
+   - `target_delay=1000` improved area slightly but worsened ADP to `881,180`; high/low sweeps did not beat the `400/500 ps` result.
+   - Debug logging through hierarchical `tb.y_ref` added noise and was removed/reverted.
+
+4. **Lessons learned**
+   - For bit-exact DSP blocks, **small incremental RTL edits are safer than rewriting the whole datapath**. The original custom arithmetic leaves are intentionally arranged for bit-exact behavior; replacing large sub-blocks can subtly change widths/sign semantics.
+   - Interface-preserving behavioral substitutions for multiplier and accumulation summations were cheap, correct, and gave the biggest PPA win.
+   - LZC was already well-mapped by the synthesis tool; “simplifying” it hurt area/delay.
+   - Useful files saved:
+     - `starting_point.v` — final passing design, ADP ≈ `843,715`.
+     - `design_direct.v` — failing behavioral rewrite, not useful except as a cautionary/debug artifact.

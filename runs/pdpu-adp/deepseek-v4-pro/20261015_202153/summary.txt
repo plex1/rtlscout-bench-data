@@ -1,0 +1,28 @@
+1. **Approaches tried**
+   - Started with the provided `starting_point.v` (fully correct baseline, ADP ≈ 968k).
+   - Replaced the 16 radix-4 Booth Wallace multiplier submodules with direct 4×4 mantissa multiplications and zeroed the unused carry side. This preserved exact behavior because the decoded input mantissas are only 4 bits.
+   - Replaced the final 17-input carry-save compressor (`csa_tree` + final carry-propagate add) with a balanced behavioral adder tree (`add_tree_behav`).
+   - Replaced the per-lane alignment barrel-shifter instances with a direct `>>` shift once the shift amount was already bounded/limited to `ALIGN_WIDTH`.
+   - Briefly tried a hand-written fixed-width simplified design (`design_simple1.sv`), but it never reached correctness.
+   - Experimented with pipeline re-timing: moving exponent-difference/shift calculation earlier, and moving two’s-complement formation after pipe3. Both worsened critical path or area.
+   - Swept `target_delay` a few times; best area-delay product remained at `target_delay=500`.
+
+2. **What worked best / most impactful**
+   - **Direct 4×4 multipliers**: major area/delay reduction.
+     - ADP: 968k → 919.6k.
+   - **Direct shift instead of 17 barrel shifter modules** in alignment: further improved area and slightly delay.
+   - **Balanced behavioral adder tree instead of the CSA tree**: improved delay notably.
+     - Combined effect taken current best to **ADP ≈ 875,074** with `delay ≈ 888.9 ps`, `area ≈ 984.5`.
+   - Current best file: `starting_point.v` (modified from baseline; still passes 1,999,992 checks).
+
+3. **What didn’t work or caused regressions**
+   - The hand-optimized fixed-configuration rewrite (`design_simple1.sv`) failed simulation massively. Likely subtle posit decoder bit-width/signedness differences; `break` usage also initially broke Yosys.
+   - Moving alignment shift-amount generation before pipe2 made the design slower (ADP ≈ 1,118,146) because that combinational path became critical into `pipe2_shift_amount`.
+   - Moving aligned-product/two’s-complement formation after pipe3 increased the pipe3→pipe4 path and worsened cost to ≈ 929,641.
+   - `target_delay=900/890` produced worse area-delay product despite slightly lower area.
+
+4. **Lessons learned / next time**
+   - Preserving exact numerical behavior across relatively narrow posit mantissas is delicate; small changes (multiplier structure, shifter structure) are safer than rewriting decoder/encoder from scratch.
+   - The baseline’s structural arithmetic submodules, especially the Booth multipliers and barrel shifters, were a major optimization opportunity once converted to behavioral equivalents.
+   - Pipeline re-timing is riskier: moving logic across the already fixed 5-stage boundaries can both worsen cost and introduce latch issues.
+   - Next steps should focus on the remaining critical path from `pipe2_rg_exp_max` through `pipe3_mantissa_comp`, perhaps simplifying the sentinel-comparator logic in `comp_tree`, reducing `mantissa_comp` width handling, or replacing `comp_tree` with a behavioral signed-max tree.

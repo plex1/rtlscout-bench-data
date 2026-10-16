@@ -1,0 +1,24 @@
+## Final Summary
+
+**Best design: `v8_unified_round.v` — cost 110,816 area_delay_product (baseline 145,429, −23.8%). All designs pass 18.9M/18.9M vectors.**
+
+### 1. What worked best
+- **Pre-normalization of subnormal inputs** (10-bit LZC + left shift before the 11×11 multiply) so the product is always normalized — this eliminated the original 22-bit LZC and 22-bit normalizing barrel shifter entirely (v2: 145,429 → 144,351).
+- **Pre-multiplier exponent hoisting** (v4): computing `pre = Ea+Eb−15`, the subnormal shift `t7 = 11−pre` (p21 cancels!), and all overflow decodes *before* the multiplier. Post-multiply only p21 selects among precomputed values. This was the single biggest win: 144,351 → 111,388.
+- **Unified rounding + fast carry** (v8): one mantissa mux + one incrementer shared by both paths, with `carry = (&mant) & g` computed without waiting for the incrementer. Best: 110,816.
+
+### 2. Most impactful optimizations
+1. Exponent hoisting pre-multiply (−33,000 cost)
+2. Subnormal pre-normalization removing post-multiply LZC/shifter
+3. Fast carry removing the incrementer from the exponent path
+
+### 3. What didn't work
+- **v3 unified wide shifter** (passed but +12% cost — wide sticky OR-chain hurt delay)
+- **v5 per-case zero-detect** (+1.5%), **v6 fast-carry-only variant** (+13%, wrong base), **v7 decomposed multiplier** (+6% — extra adder worse than 11×11), **v9 barrel shifter with prefix-OR sticky** (+13%), **v13 OR-form packing** (+13%), **v14 single 15-entry mux** (+8.5% — bigger mux), **v15 slim packing** (+1.2%), **v16 10-bit incrementer** (+0.9%)
+- **target_delay sweeps (300/700/1000/2000ps)**: netlist unchanged; 2000ps regressed to 129,554. Default 500ps is optimal here.
+
+### 4. Lessons learned
+- For FP datapaths, **moving computation ahead of the multiplier** (where latency is free) is the dominant lever.
+- Small structural RTL changes cause large, unpredictable swings in the area-delay product — keep many variants in separate files (v2–v16) and always re-evaluate.
+- Correctness gotchas I hit: LZC loop direction (ascending for leading zeros), signed shift-amount wraparound aliases, sticky bits below the shifted window, and overflow checks needing full-width (7-bit) exponent comparison.
+- Next time: try carry-save or fused multiply-add structures for the `S + P` product composition, and investigate splitting the sign/exponent classify path (first 144ps NOR5) off the critical path.

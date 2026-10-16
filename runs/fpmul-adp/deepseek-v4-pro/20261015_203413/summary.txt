@@ -1,0 +1,39 @@
+Summary:
+1. **Approaches tried:** I started from the supplied correct reference (`starting_point.v`) and tested multiple variants:
+   - binary / hierarchical leading-zero count (`design_v2`, `design_v7`, `design_v15`)
+   - adjusted-constant LZC (`design_v3`)
+   - normal-path left-shift rounding (`design_v4` onward)
+   - subnormal-path simplification (`design_v5`, `design_v6`, `design_v9`)
+   - pre-normalizing subnormal operands (`design_v8`, `design_v11`)
+   - operand-LZC-derived product LZC (`design_v10`, `design_v17`)
+   - simplified special-case packing (`design_v12`, `design_v13`, `design_v18`, `design_v19`)
+
+2. **What worked best:** The final design, **`design_v19.v`**, passed 100% and achieved the lowest cost:
+   - area_delay_product: **134222.39**
+   - delay: **1280.91 ps**
+   - area: **104.79**
+   
+   The key winning structure:
+   - Keep the raw 11×11 significand multiplier and original subnormal path.
+   - Compute product LZC with a small procedural loop.
+   - For the normal path, use `prod << lz` and take guard/sticky directly from `aligned[10]` and `|aligned[9:0]`, avoiding the original `need_right` branch and `bit_at`/prefix-below logic.
+   - Simplify special-case packing by removing redundant `~is_nan` / `~zero_in` gating where priority muxing already resolves conflicts.
+
+3. **Optimizations with most impact:**
+   - Replacing the original dual-shift normalizer (`need_right ? prod>>sr : prod<<sl`) and bitlevel guard/sticky extraction with `prod << lz` significantly reduced area and delay.
+   - Pruning redundant special-case gating in the final pack mux helped reduce area without breaking correctness.
+
+4. **What didn’t work or caused regressions:**
+   - Pre-normalizing subnormal operands first (`design_v8`, `design_v11`) either failed correctness or increased cost.
+   - Deriving product LZC from operand LZC plus a product bit (`design_v17`) passed but was worse than the best.
+   - Binary/hierarchical LZC and adjusted-constant LZC variants mostly had worse area-delay product.
+   - `casez` priority LZC (`design_v15`) failed lint because X/Z don’t-cares are disallowed.
+   - Unfolded subnormal barrel shifter logic (`design_v9`) was larger and slower.
+   - Aggressive special-case simplification in some packing variants regressed synthesis results unpredictably; the best was the final pack topology in `design_v19.v`.
+
+5. **Lessons learned:**
+   - Small structural changes around the main multiplier/shifter path dominate cost.
+   - Simplifying the normalizer to a single left shift was very effective.
+   - Redundant logical guards often synthesize into real area; priority muxes alone are enough.
+   - Synthesis results from seemingly similar RTL vary noticeably, so keeping a known-good best file (`design_v19.v`) is essential.
+   - `target_delay` sweeping was less useful than RTL structure; lower/default constraint generally preserved the best ADP in this case.

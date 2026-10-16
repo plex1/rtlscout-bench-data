@@ -1,0 +1,33 @@
+## Summary
+
+### 1. Approaches tried and what worked best
+- **Baseline `starting_point.v`** passed 100% correctness from the start. Initial cost at `target_delay=500` was **9,496,575** (area 4273.69, delay 2222 ps).
+- **Relaxing synthesis timing target** to `target_delay=3000` improved area slightly because the critical path was ~2050–2222 ps and Yosys mapped to smaller/area-optimized cells once timing was met. Baseline at 3000 ps dropped to **9,488,638**.
+- **Narrowing the row-pass output block registers and corner-turn storage width**: The `jpeg_idct_x` output values after `>>> 11` fit in **20 bits** rather than 32. Reducing `block_out[0:7]`, `block_out_tmp`, and the associated register mux/selection width in the x-pass produced the best result:
+  - `area_delay_product = 8,525,569`
+  - `area = 4158.48`
+  - `delay = 2050.17 ps`
+  - 100% correctness maintained.
+- This narrowed x-pass output still drove the original 32-bit transpose/y-pass correctly through sign-extension / context.
+
+### 2. Optimizations with the most impact
+- **20-bit x-pass output registers**: Saved meaningful flip-flop area and mux decode area without changing behavior, while also slightly shortening the critical path from ~2222 ps to ~2050 ps.
+- **Choosing `target_delay = 3000 ps`**: Let Yosys optimize for area once the actual path delay was below the constraint. This is not an RTL change but a synthesis constraint tuning.
+- Combined, these reduced cost from **9,496,575 → 8,525,569**, about **10%** improvement.
+
+### 3. What didn’t work or caused regressions
+- **Splitting the transpose RAM into two banks**: Correctness passed, but delay worsened to 2802–3126 ps and cost increased (`~11.98M`), despite slightly reduced area. The extra address decoding/muxing negated area savings.
+- **Splitting the transpose RAM into four 8-deep banks**: Correct but much worse delay (~4463 ps), cost increased to `19.3M`.
+- **Narrowing the 32-bit multiplier second operands (`mul*_b`) to 16 bits**: Correctness passed but the critical path became worse and area saving was negligible; cost increased to ~`11.95M`.
+- **Narrowing the transpose RAM itself to 20 bits**: Correctness passed but critical-path delay increased to 3126 ps, causing negative slack at `target_delay=3000` and increasing cost to ~`12.9M`.
+- **Extending narrowed x output with explicit sign-extension before assignment**: Increased delay to 2200 ps and cost to ~`9.15M` compared with leaving the implicit width context assignment.
+- **Manual `ptr_q` saturation / out-valid gating experiments**: Did not improve cost.
+
+### 4. Lessons learned and next time
+- The dominant cost in this design is the **register-array transpose memory decode/mux plus the high-fanout read path**. Optimizing that path is high-impact, but naive banking hurts because the memory is synthesized as flops + muxes, not RAM macros.
+- Width reduction is a strong, safe optimization when values provably fit due to fixed shifts and input ranges. In this design the x-pass post-shift output values fit in 20 bits, making it a clean area/delay win.
+- Timing-target tuning has a smaller but reliable effect. Setting it near the real critical path (`~2200–3000 ps`) helps Yosys map area optimally.
+- Risky softening of arithmetic widths or unusual banking should be evaluated immediately; they frequently preserved correctness but cost more due to added mux depth.
+- Next time I would start by verifying value ranges after each pass and narrowing every register/memory at the boundary, then tune `target_delay` just above the achieved path delay, rather than experimenting with RAM banking first.
+
+The best passing design remains in **`starting_point.v`** with the x-pass output register width reduced to 20 bits.

@@ -1,0 +1,23 @@
+## Summary
+
+**Final result: PASS, best area_delay_product = 800,157** (vs 968,045 for `starting_point.v`, a 17.3% improvement). All bit-exactness preserved (0/1,999,992 errors), 5-cycle latency intact.
+
+### What worked best (in `design_v2.v`)
+
+1. **Negcount trick (stage 3)** — the biggest win (~9%). Replaced the 17 per-lane two's-complement `~x+1` incrementers (which sat on the critical pipe2→pipe3 path) with pure inversion `~x`, compensating by adding a registered popcount of the negative lanes to the final sum: `Σ(~x_i) + negcount ≡ Σ(-x_i)` exactly.
+2. **Flat sequential accumulation** — replaced the 17-input CSA tree + CPA with a simple 17-way chained `+` in an `always_comb` loop over the 19-bit sign-extended inverted values. Mathematically identical (two's-complement mod 2^19, range-proven: |sum| ≤ 16·14400+8190 = 238590 < 2^18), but Yosys synthesized a faster reduction (~770ps path → the final version). Also dropped 1 bit (19 vs 20) via the proven range bound.
+3. **Split exponent comparator tree** — reduced the 17-wide `comp_tree` to two 9/8-wide partial-max trees registered at pipe2, with a single 2-input comparator merge in stage 3. Removed the worst stage-2 path.
+
+### What didn't work / caused regressions
+- **Retiming stage 2 forward** (moving mul final-add + alignment into stage 2, registering products/shift amounts): worse (1.16M–1.43M) — overloaded the stage.
+- **Ripple-free `compressor_4to2`** rewrite: cost went up (1.01M); the original 5:3-counter ripple maps better after synthesis. Reverted.
+- **Higher `target_delay` (900ps)**: worse ADP (935K) than default 500ps.
+- **Encoder left-shift reformulation** (last edit, `(x<<MAX)>>s ≡ x<<(MAX-s)` on 31 bits): passed but slightly *increased* cost to 813,381 — the best 800,157 snapshot is the version **before** that edit (eval 14). If `design_v2.v` currently contains it, revert that encoder change to the original 46-bit right-barrel shifter.
+
+### Lessons learned
+- Bit-exact arithmetic identities (inversion + count compensation, associative reduction, range-proven bit trimming) are the safest and most effective optimizations for this class of unit.
+- Pipeline balance matters: moving logic between fixed registers often backfires; reducing logic *within* a stage is more reliable.
+- Let the synthesizer pick adder structures (chained `+` beats hand-built CSA trees here).
+- Always register compensating values (negcount) in the same stage as the data they apply to — a pipeline-skew bug caused 131K mismatches once.
+
+**Files:** `design_v2.v` (best design, note the encoder shift edit above), `starting_point.v` (baseline), `design_v2` variants were iterated in place; no other files needed.

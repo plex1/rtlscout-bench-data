@@ -1,0 +1,32 @@
+Summary:
+
+1. **Approaches tried**
+   - Started with the provided structural pipelined posit dot-product design.
+   - Replaced the per-lane `radix4_booth_multiplier` + CSA-tree with a behavioral `4x4` mantissa multiply.
+   - Simplified the sign-magnitude comparator tree comparator to a single signed `>=` comparison.
+   - Tried moving the exponent max/tree across pipeline boundaries.
+   - Tried precomputing alignment shift amounts ahead of the alignment stage.
+   - Tried converting products to two’s complement after pipeline 3.
+   - Tried replacing the `barrel_shifter` alignment with direct `>>`.
+   - Swept `target_delay` values: 400, 500, 750, 800, 1000 ps.
+
+2. **What worked best**
+   - **Behavioral 4x4 mantissa multiply**: replaced Booth/Wallace hardware and reduced area/delay substantially while remaining bit-exact.
+   - **Signed `>=` comparator**: simplified the 17-input exponent maximum tree comparators, improving PPA.
+   - Those two changes together produced the best result:
+     - `area_delay_product: 830429.58`
+     - `area: ~986.2`
+     - `delay: ~842.0 ps`
+
+3. **What didn’t work / caused regressions**
+   - Precomputing shift amounts into pipe2 moved the exponent subtraction/saturation path and increased delay significantly.
+   - Moving two’s complement conversion after pipe3 lengthened the pipe3-to-pipe4 adder-tree path.
+   - Replacing the alignment barrel shifters with direct behavioral `>>` worsened timing.
+   - Re-partitioning the exponent max before pipe1 led to an input-to-pipe1 long path and much worse cost.
+   - Most `target_delay` experiments were not useful; 400/500 gave the same effective design point.
+
+4. **Lessons learned**
+   - For this design, the critical path is dominated by exponent max computation feeding alignment. Keep that computation tightly registered and avoid moving it earlier.
+   - Small, local arithmetic-style changes can outperform larger structural repartitioning.
+   - The best configuration was close to the original pipeline, but with simpler multiplier and comparator implementations.
+   - The final working file `starting_point.v` contains later experiments; the best result came from the earlier comparator-simplified + behavioral-multiplier version.

@@ -1,0 +1,27 @@
+## Summary
+
+**Final result: `design5.v` — PASS, 108946 area·delay (area 103.2, delay 1056 ps), 25% below the starting point's 145429.**
+
+### 1. Approaches tried
+- **`design.v`** (starting point, verbatim): cost 145429 (area 108.7, delay 1338).
+- **`design2.v`** — single right-shift-only normalizer: derived that with `m`=msb(prod) and `T = m + exp_sum`, the result is subnormal iff `T ≤ 35`, and *one* barrel shifter + *one* rounder can serve both the normal and subnormal paths (shift `s = sub ? 26−exp_sum : m−10`, always ∈ [0,24]). Area ↓16% (91.1), delay ↑12% → 136821.
+- **`design3.v`** (key architecture) — moved normalization **off the multiplier's critical path** using the identity `msb(X·Y) = msb(X)+msb(Y)+{0,1}`: the shift amount `pq = msb(ma)+msb(mb)` is computed from the *operands* in parallel with the multiply, then a single 1-bit fixup mux (`c` = bit above the aligned leading one) finishes it. Subnormal path becomes an exact left shift `prod << (exp_sum−2)` (nothing lost → exact sticky). → 121146, then 112694 after converting the subnormal barrel from right-shift/5-level to left-shift/4-level.
+- **`design5.v`** (best) — further provably-equivalent tail optimizations: `Msel[10] = ~sub` (mantissa top bit is constant per path, one mux dropped), exponent tail `E1 = pq+exp_sum−35` computed early with `E2 = E1 + M[11]` as an incrementer instead of add+compare+subtract after the deep carry, and overflow folded into the same incrementer. → **108946**.
+
+### 2. Highest-impact optimizations
+- Operand-side leading-bit computation (removes the priority-encoder-from-product critical path) — the single biggest structural win.
+- Exact left-shift subnormal alignment (`prod << (exp_sum−2)`, ≤4 mux levels, exact sticky) instead of a wide right-shift barrel.
+- Single shared increment-style rounder for both paths (no second adder).
+- Early exponent arithmetic in the `pq`/`exp_sum` domain rather than post-rounding comparisons.
+
+### 3. What didn't work / regressions
+- **`design4.v`** (136k, worse): collapsed the exponent adders differently and removed the `zero_in` output arm believing "zero products always land in the sub branch" — false: with `a=±0`, `pq` is driven by the *other* operand, so W>35 and the design emitted 0x0400 (3072 fails). The cheap `zero_in` mux in design3/5 was load-bearing.
+- **`target_delay` sweeps were useless**: 500/800/300 all gave identical results (Yosys ignores it once the mapping is fixed); 2000 only *worsened* the product (149k). RTL structure is the real lever.
+- Multiple failed micro-variants (4-bit truncated shift amounts — dead-case analysis was wrong; subnormal window bit indices).
+
+### 4. Lessons learned
+- **The 18.9M-vector evaluation is the only trustworthy oracle.** I repeatedly made hand-decoding slips on hex operands (bit fields spanning nibble boundaries) and "verified" wrong windows that the TB immediately refuted; conversely two designs I believed broken actually passed. Budget iterations for evaluation, not hand-proofs.
+- Padding bits in a barrel shifter silently scale the value (`{prod,12'b0} << X` shifts by 12+X, not X) and zero-padding on the right *loses sticky bits* (caused two separate multi-million-failure rounds); left-shift forms are both cheaper and exact.
+- Structural invariants like "msb of a product from operand msbs" are worth a lot: they move an entire priority encoder out of the critical path for the price of one fixup mux.
+- Constant bits per branch (e.g. `mant_n[10]≡1`) are free mux removals — but only with the special-case mux arms still present.
+- Debug by *failing-vector signature*: 3072 fails = a zero-operand class; ~9M fails = a rounding window off by one bit; 548 fails = boundary rounding. Each signature pointed directly at the culprit block.

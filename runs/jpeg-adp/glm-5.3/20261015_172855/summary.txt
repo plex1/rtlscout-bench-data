@@ -1,0 +1,44 @@
+# Summary: jpeg_idct_2d Optimization Session
+
+**Final result: PASS, cost 3.995e+06** (from 9.50e+06 starting point — **2.4× improvement**). Best file: `design_v4.v` (with `target_delay=1000`).
+
+## What I tried and what worked
+
+| Variant | Cost | Notes |
+|---|---|---|
+| `starting_point.v` (original) | 9.50M | baseline |
+| + dead RAM port removal | 9.04M | removed unused read port on transpose RAM |
+| `design_v2.v`: narrowing (20b transpose, narrowed multipliers) | 8.79M | value-proven safe ranges |
+| `design_v3.v`: constant CSD multipliers + narrowing | 8.11M | 7 fixed-constant shift-add units replace 5 general multipliers |
+| `design_v4.v`: **shift-register transpose** | **3.99M** | the big win |
+
+## Highest-impact optimizations
+
+1. **Shift-register corner-turn** (`design_v4.v`): Discovered the transpose read address is pure wiring — `addr = {odd(j), v}` where `odd(j)` matches the EVEN/ODD input-lane pattern (beats {1,3,4,6}). Replaced the 4×32×32 RAM (with its 1280-cell read-mux tree and address adder) with 16 eight-deep shift registers (write sequentially in row-major order, read head + shift once per y-vector). Saved ~1800 mux cells + ~130 FF + adder. Halved the critical path too (2222→1139 ps) since the old worst path was the RAM read mux chain.
+
+2. **Dedicated constant multipliers**: Verified the 8-beat schedule needs at most one product per constant per beat, so 7 fixed-constant CSD shift-add units per pass replaced 5 general multipliers (2×). All written as balanced trees.
+
+3. **Datapath narrowing with proofs**: transpose path 20b (|x-pass out| ≤ 374,555 proven by bound propagation through the AAN dataflow), y output 17b, operand registers 16–21b instead of 32b.
+
+4. **×181 as shift-add + explicit signed /256** (`>>>8` plus +1 correction when sign bit set and low bits nonzero).
+
+## What didn't work / regressions
+
+- **1-stage product pipeline** (re-keying butterfly case one beat earlier): functionally correct but delay *regressed* 1139→1172 ps; reverted.
+- **Stub-based area probing** (`diag_noxpose.v`): the flow refuses to report cost when sim fails, so bisecting area by stubbing modules doesn't work — must bisect on real designs.
+- Two **correctness bugs** during the restructure: (a) dropped the `<<1` term from the C3=3406 decomposition (gave 3407 → small ±1..26 errors on 7469/20672 checks); (b) a wrong lane-parity formula. Both found by error-pattern analysis rather than blind retries.
+- **Port-width zero-extension trap**: making the y-pass output port 17b caused Verilog implicit zero-extension into the 32-bit top port — negative outputs gained +0x20000. Fixed by keeping the port 32b and sign-extending internally.
+
+## Lessons learned
+
+1. **Characterize the cost flow first**: I found that at loose timing constraints the synthesis is purely area-driven (area identical at target 5000 vs 1500), so *area was the only real lever* — that reframed everything.
+2. **Mine the fixed schedule for structure**: the input protocol's EVEN/ODD lane pattern and the fixed stream order are what made the shift-register transpose (and per-constant multipliers) possible. Fixed schedules are an optimization license.
+3. **Bisect with error signatures**: the two bugs were localized in minutes by inspecting expected-vs-actual magnitude patterns rather than re-reading all code.
+4. **Write multi-operand CSD constants carefully** — a dropped shift term is invisible in casual review; I should have unit-checked each constant decomposition numerically before integrating.
+
+## If I had more steps
+
+- Eliminate `block_out_tmp` in the passes (the x-pass `>>>11` output provably fits 20b including the tmp register).
+- Try the transpose at 19b (the proven bound 374,555 < 2^19 fits; I used 20b conservatively).
+- Explore merging the two `i0`-path constants or sharing partial sums across C1/C7 (both large).
+- Sweep `target_delay` around 1000 more finely; going from 5000→1000 gave a free 4% (3.99M vs 4.17M) with no area penalty.

@@ -1,0 +1,16 @@
+--- fp_mul_v6.sv
++++ fp_mul_v6.sv
+@@ -99,9 +99,9 @@ module fp_mul_e5f10 (a, b, y);
+   wire [PROD_W-1:0] q4 = q_m1[4] ? (q3 >> 5'd16)   : q3;
+   wire              u4 = u3 | (q_m1[4] ? |q3[15:0] : 1'b0);
+ 
+-  wire [9:0] frac_trunc = q_gt0 ? q4[10:1] : prod[9:0];
+-  wire       guard_s    = q_gt0 ? q4[0] : 1'b0;
+-  wire       sticky_s   = q_gt0 ? u4 : 1'b0;
++  wire [9:0] frac_trunc_s = q4[10:1];
++  wire       guard_s    = q4[0];
++  wire       sticky_s   = u4;
+   wire       round_s    = guard_s & (sticky_s | frac_trunc[0]);
+-  wire [11:0] frac_sum   = {1'b0, frac_trunc} + {11'd0, round_s};
++  wire [11:0] frac_sum   = {1'b0, frac_trunc_s} + {11'd0, round_s};
+   wire        carry_s    = frac_sum[11];

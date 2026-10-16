@@ -1,0 +1,29 @@
+## Summary
+
+**Final result:** `design_v41.sv` — PASS (18.87M/18.87M vectors), ADP **87 494** (973 ps × 89.89), vs. `starting_point.v` at 145 429 (1338 ps × 108.7) → **−40%**.
+
+### 1. Approaches tried
+- **v2** (`design_v2.sv`): precomputed all control (CLZs, exponent sums, shift candidates) on the input side, shared one funnel shifter + one rounding incrementer for normal/subnormal paths. Already −8% vs start.
+- **v5** (`design_v5.sv`): mask-OR product bit `d = ~|{prod[21:11] & thermo(t)}` (from the identity `prod < 2^(22−t)`), sk-free rounding carries, unified shift `sh = S_pre + L` with early-controlled shifter stages + one late 1-bit stage. −36%.
+- **v16/v17**: narrow truncating funnel shifter (103 vs 138 muxes) + flat weighted AND-OR exponent output.
+- **v41** (winner): merged `u0 = s_sum + (32−t)` arithmetic (3 adds → 2), dropped the provably-redundant `both_sub` case, EM/EP subtractor candidates.
+- Also tried normalized-operand multiplier (v4, to make `d` the product top bit), flat output packing, balanced AND prefixes, target_delay sweeps (~40 variants total).
+
+### 2. Highest-impact optimizations
+1. **Control moved off the multiply path**: only one product bit needed post-multiplier (v2) — biggest single win.
+2. **Unified shift + single shifter/rounder** (v2→v5): `sh = max(11−lz, 26−s)` with early stage control and 1 late stage; `frac[i] = mp[i] ^ (guard & &mp[i-1:0])` (sticky drops out of all carries but bit 0).
+3. **Mask-OR `d`** replacing a variable-index extraction (−1 level + area).
+4. **Flat exponent SOP + narrow funnel shifter + merged `u0`** (v17/v41): −3.4% area each with no delay cost.
+
+### 3. Regressions / what didn't work
+- **Normalized-operand multiply (v4)**: CLZ+shifters moved ~240 ps *in front* of the multiplier — worse despite eliminating the `d` tree.
+- **AND-form fraction gating** (v22–v27): consistently +85 ps across 6/6 runs.
+- **`E0v±1` candidate form** (v20–v26): ~+100 ps systematic penalty.
+- **Nested exponent muxes** (v40, v24): ~+130 ps vs flat SOP.
+- `casex` CLZ (v39) failed lint (X-literals banned).
+- target_delay: 300/500 gave identical netlists; 1200/985 slightly worse ADP — no benefit.
+
+### 4. Lessons learned
+- ABC/Yosys mapping noise is ±5%; some source forms (AND-tree grouping, sticky/rnd form, SOP vs AND-OR) normalize to identical netlists — I burned steps re-rolling neutral knobs before discovering this via bit-identical results (v29==v30, v19==v35).
+- Better process: first identify which source changes actually alter the post-opt netlist (compare results for bit-identical ADP), then sweep only real knobs, and isolate systematic effects across paired runs instead of chasing single draws.
+- Delay/area "families" are real: once a config's characteristic delay is known (~970 ps here), only systematic area cuts (like merged `u0`) improve ADP.

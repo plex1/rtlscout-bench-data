@@ -1,0 +1,30 @@
+## Summary
+
+**Final result: PASS, cost 936,415 area_delay_product** (from baseline 968,045 = ~3.3% improvement). Design in `design_b.v` (best variant); `design_a.v` is an earlier rebalance (954,828).
+
+### 1. Approaches tried
+
+| Design | Structure | Cost | Delay |
+|---|---|---|---|
+| `starting_point.v` | upstream pipeline, 6 unbalanced chunks | 968,045 | 910 ps |
+| `design_a.v` | rebalanced to 6 comb chunks (CSA split, comp tree in ch2) | 954,828 | 910 ps |
+| `design_b.v` (best) | + FA-tree CSA, plain `>`-free balance, per-lane complement kept upstream | **936,415** | **889 ps** |
+
+The upstream pipeline has 5 register banks but 6 logic chunks, with two ~900ps chunks (align→complement and add→normalize→encode). Since the TB samples 5 edges after input, registers can be moved anywhere as long as exactly 5 exist between input and output — I used that freedom to rebalance.
+
+### 2. What worked best
+- **Re-cutting the pipeline**: registering the *shifted* products (14b×17) instead of the pre-shift complements (20b×17), and registering `mul_sum/mul_carry` separately so the booth CSA and the 16-lane CPA are re-distributed across chunk boundaries.
+- **Hand-written Wallace FA tree** (16 `fa_row` stages: 18→12→8→6→4→3→2) replacing upstream's `csa_tree`, whose `counter_5to3` 4:2 compressor has a **bit-serial ripple-carry chain** across the whole word — a hidden depth-N chain. The FA tree removed that; it's the main delay win.
+
+### 3. What didn't work / regressions
+- **XOR+popcount one's-complement trick** (`sum(-x_i) = XOR(s) - popcount(s)`): functionally correct once fixed (needed **zero**-extension, not sign-extension, before the XOR), but synthesize *worse* — 1,101,080 vs 936,415. The popcount adder tree offsets the saved XORs. Reverted to per-lane two's complement.
+- **Moving the acc decoder into chunk 2** (to relieve chunk 1): catastrophic — 1,361,471 (1308 ps) because the 16-bit acc decode then feeds the exponent max-tree directly.
+- **Splitting the final CSA into carry-save registers** and pushing the CPA to chunk 5: 1,006,319 — worse than keeping CPA+register in chunk 4.
+- **target_delay sweep**: totally flat (250/330/500/1000/2000 all ≈ same ADP) — the tool isn't delay-reoptimizing; skip it.
+- **Custom one-hot muxed right-shifter in the posit encoder** (tried in the final steps, currently in `design_b.v` but **broken** — produces all-zero results): `b >= sa` with a 5-bit `sa` compared against a 7-bit loop index likely zero-extends/truncates. Needs `b >= {2'b0,sa}` or revert to `barrel_shifter`. This edit is the reason the last evaluations failed; the file must be reverted to the passing version before use.
+
+### 4. Lessons learned
+- **Bit-exactness constraints are subtle here**: the reference multiplier is a *quirky* radix-4 booth that truncates partial products (≠ true product), and `comparator` is *not* signed max (returns larger magnitude for two negatives). Both must be copied verbatim — a plain `a*b` and a plain `>` max both failed.
+- Upstream's `csa_tree`/`counter_5to3` hides a ripple-carry; structural audit of borrowed IP pays off more than algorithmic tricks.
+- Regression-test every micro-change: I burned several steps on self-referential `FFNR` (lint error), duplicate declarations, missing `<<1` on carry words in the Wallace tree (found by reasoning about one shifted/unshifted carry), and the zero-vs-sign-extension bug.
+- **If given more steps**: fix/revert the encoder shifter edit (that alone should recover the 936k result or slightly better), then try a carry-select/prefix final CPA, a proper one-hot encode of the regime (both LZCs are log-depth already), and reducing the 17 parallel alignment shifters from 15 to 8 stages by pre-shifting by 128·exp_diff.

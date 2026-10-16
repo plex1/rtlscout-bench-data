@@ -1,0 +1,32 @@
+## Final Result
+
+**PASS** — best ADP **1.087e+05** (area 94.7 × delay 1147 ps), achieved by `design.sv` (identical to `design_v14.sv`). Baseline `starting_point.v` was 1.454e+05 → **25% improvement**, bit-exact on all 18.87M vectors.
+
+## 1. Approaches tried
+
+| File | Idea | ADP |
+|---|---|---|
+| `starting_point.v` | baseline: raw significands, product-side LZC, 3 wide shifters | 145429 |
+| `design_v2/v3.sv` | pre-normalize subnormal **inputs** (LZC + 11-bit shift); flat pack; zero-operand exponent trick | 123349 |
+| `design_v6.sv` | de-serialized subnormal shifter: select from low sum bits only, sign bit forces zero in parallel | 113515 |
+| `design_v7/v8/v10/v11.sv` | raw-significand multiply + window extracts (single / dual, 5/6-bit selects) | 116–124k |
+| `design_v12.sv` | direct-form threshold LZC + bit-form overflow | 111506 |
+| **`design_v14.sv`** | **+ joint window/sticky extraction** (`{w_ext, prefixOR, 0}` shifted so frac/G/S land at fixed positions) | **108672** |
+
+## 2. Most impactful optimizations
+1. **Pre-normalizing subnormal inputs** (v2): product always in [2²⁰,2²²) → no product-side LZC, no left shifter, normal mantissa is a 2:1 mux. Biggest area win.
+2. **De-serializing selects from data** (v6): shifter select = `~E_sum[3:0]` (low bits, no carry chain); the slow sign bit (`E_sum ≤ 0`) forces a zero result *in parallel* with the shift instead of gating the select.
+3. **Joint window/sticky extraction** (v14): shifting `{w_ext, prefixOR(w_ext), 1'b0}` places fraction, guard, and sticky at fixed bit positions — removed the 25:1 sticky mux (~50 ps + area).
+4. Smaller wins: direct-form LZC, bit-form overflow predicate, "zero operands get a hugely negative exponent" (signed zero emerges from the datapath, one less pack mux), flat pack priority (nan > inf > zero > ovf > sub > normal).
+
+## 3. What didn't work (regressions)
+- **Raw-product designs (v7/v8/v10/v11)**: moving the shift after the multiplier removes the front-of-path delay but the extractor muxes cost +7–12 area; putting `sub_res` in the extractor *select* path re-serialized adders and was worse still.
+- **Custom arithmetic structures**: Kogge-Stone prefix adders (v4/v5), balanced prefix/carry-select incrementers (v9/v17), "flat" per-bit pack formulas (v9) — all regressed; ABC's mapping of plain `+` and nested ternaries was consistently better.
+- **Exponent folding** (v15/v16/v19): mathematically cleaner single-adder exponents repeatedly regressed 50–140 ps due to mapping shifts; cy-dependent predicates delayed pack mux selects.
+- **target_delay tuning**: 500/1000/1200 give identical netlists (structurally converged); 1800 shrinks area but hurts ADP.
+
+## 4. Lessons / next time
+- **ABC is mapping-sensitive**: many "obvious" logic reductions changed the whole netlist and cost 50–150 ps. Always isolate one change per build and keep the previous file (`design_v*.sv`) for revert.
+- **Watch what's actually on the critical path** before optimizing: it migrated from shifter-select → multiplier → exponent/predicates as each fix landed.
+- Early bugs to check: unsigned-vs-signed compares (`W0 > 7'sd45` with unsigned `W0` broke zero handling), concatenation indexing (`{11'b0, R}` puts R at the bottom), off-by-one in prefix-OR sticky bases.
+- Next lever would be the 11×11 multiplier itself (~310 ps, on every path) via an explicit Booth/Dadda tree — untested due to step budget.

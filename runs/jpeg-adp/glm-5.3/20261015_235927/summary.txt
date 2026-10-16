@@ -1,0 +1,28 @@
+## Summary
+
+**Final result: PASS, cost 6.10M area_delay_product** (starting point: 9.49M → **36% reduction**).
+
+### Files
+- `design5.v` — best design (PASS, 6,103,917)
+- `design2.v` — earlier passing variant (9.19M), RAM-based transpose
+- `design.v` — first correct variant (9.25M), near-verbatim structure
+- `design3.v` — 8-bank mux transpose, correct but slow (15.15M)
+
+### What I did
+1. **Baseline restructure** (`design.v`): kept the original structure but merged each 1-D pass's `jpeg_idct_x`/`jpeg_idct_y` into one parameterized `idct1d` module, replaced the 64-entry `ptr_conv` ROM in the y-pass with `{cnt[2:0], cnt[5:3]}` bit-swap, and replaced `/256` signed division with shift+round-toward-zero correction. Only marginal gain (9.25M) — the critical path was the transpose RAM's 32:1 read mux.
+
+2. **Narrowed datapaths** (`design2.v`): reduced multiplier operand registers (constants 13-bit), shrank transpose RAMs to 32×21, shrank y-pass output regs. Small gain (9.19M) — area dropped but delay rose.
+
+3. **Shift-register transpose** (`design5.v`, the big win): replaced the 4 RAMs + 16-word read-address adder/decoder with 128 individual 20-bit registers addressed `set*64 + row*8 + col`. Write decode is one 6-bit term per cell; read is **always the head (col 0) of each row bank**, with a 2:1 lane mux (`idx[0]^idx[2]`) picking even/odd row pairs. The storage shifts once per 8-beat group. This removed the entire read-mux critical path (2160 ps → 1497 ps) with *equal* total register count.
+
+4. **Narrowed the ×181 multiplier** (last edit, being evaluated when time ran out): sliced the wrap-only-needed `t65*181` product to `e[31:8]` plus round correction. Final state not yet evaluated.
+
+### What failed / regressions
+- **8-bank mux transpose** (`design3.v`): read path was 16:1 mux + lane mux; Yosys mapped it to 3660 ps (worst of all). Address-mux-based reads are poison in this flow.
+- **Datapath width guessing**: truncating `t65` to 21 bits and y-outputs to 16 bits broke correctness (13496 errors) — the `×181` intermediate needs ~30-31 bits. Fixed by slicing from the exact 32-bit-wrap semantics instead of guessing ranges.
+- Several pipeline-delay bugs (valid/index misalignment, missing `block_out_tmp` two-cycle transfer for `bo[7]`) — each cost an evaluation round.
+
+### Lessons
+- The behavioral-memory read mux, not the arithmetic, was the dominant delay; converting a RAM into a "shift-out column" register file eliminated it entirely at zero area cost.
+- Preserve exact bit-level semantics (32-bit wrap, truncating division) by *deriving* widths from the 32-bit wrap mask rather than from range analysis.
+- Budget carefully: I spent ~20 of 60 steps on pipeline-debugging cycles that a careful delay-table on paper would have avoided, leaving no time to evaluate the final narrowed-multiplier variant (which should shave more delay from the now-critical ×181 path).

@@ -1,0 +1,42 @@
+Summary:
+
+1. **Approaches tried**  
+   - Started from the provided correct `starting_point.v` and confirmed it passed (`area_delay_product ≈ 145429`).  
+   - Iterated through several variants:
+     - `fp_mul_v1.v`: priority-encoder-style LZC, simplified normal right shift.
+     - `fp_mul_v4.v`–`v6`: combined guard/extract shifts, combinational subnormal shifter.
+     - `fp_mul_v8.v`: manual rounding incrementers and compact 6-bit exponent comparisons.
+     - `fp_mul_v9.v`: decomposed 10×10 significand multiply.
+     - `fp_mul_v13.v`: shared normal/subnormal shifter.
+     - `fp_mul_v14.v`/`v15`: ripple sticky-prefix.
+
+2. **What worked best**  
+   Final best is `fp_mul_v14.v`:
+   - Correct on all 18,874,371 checks.
+   - `area_delay_product = 123594.06`
+   - `delay = 1209.78`, `area = 102.16`
+
+   The main wins were:
+   - Manual rounding incrementer and compact exponent comparison from `fp_mul_v8.v`.
+   - Converted the final 11-bit rounding adder into a 10-bit fraction increment plus explicit carry.
+   - Replaced the post-round exponent add/compare with the simpler `exp_c - (14+lz)` comparison.
+   - Ripple sticky-prefix in `fp_mul_v14.v` reduced area/delay product further versus wide `|prod[k:0]` reductions.
+
+3. **What didn’t work or caused regressions**  
+   - `fp_mul_v1.v`: failed lint due to `casez`/`?` don’t-cares, but became correct after changing to priority mux LZC.
+   - `fp_mul_v4.v`: initial shared shifter bug when `sr==0`; fixed by introducing the correct padded special value.
+   - `fp_mul_v5.v`: too-complex shared shifter experiment was not evaluated/fully debugged.
+   - `fp_mul_v7.v`: packed output muxes regressed area-delay product.
+   - `fp_mul_v9.v` and `fp_mul_v10.v`: decomposed/truncated multiplier datapath was correct but not better than `v8`/`v14`.
+   - `fp_mul_v13.v`: shared shifter produced a correct final result after a sticky-index fix, but delayed the path and did not beat `v14`.
+   - `target_delay` changes did not alter extracted cost for the designs tried; synthesis timing remained violated unless RTL structure changed.
+
+4. **Lessons learned / next steps**  
+   - Small structural RTL changes, not `target_delay` sweeping, gave the real cost improvements.
+   - Keeping the multiplier as one 11×11 product was usually better than decomposing it manually.
+   - Avoid broad/wide dynamic muxes and redundant shifters; two separate shifters (`normal` and `subnormal`) were often cheaper in area-delay terms than a combined selectable one.
+   - Manual carry/increment logic around rounding helped more than using explicit 11-bit adders.
+   - Next steps would explore:
+     - Tree-balanced shortening/truncation of the product before round/sticky extraction.
+     - Lower-area rounding decision with direct sticky bits rather than full `below[k]` prefixes.
+     - More aggressive packing/encoding of special case muxing.

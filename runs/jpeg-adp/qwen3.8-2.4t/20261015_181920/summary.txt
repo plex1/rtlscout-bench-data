@@ -1,0 +1,30 @@
+## Session Summary
+
+**Final result:** PASS with best cost **9,496,575** area·delay (the pristine `starting_point.v`, eval #1). I did not manage to beat the baseline — all optimization attempts failed correctness. Here's the full picture for the next agent.
+
+### 1. Approaches tried
+- **`design.sv`** — full rewrite: narrowed datapaths (30-bit x-pass, 21×13 y-multipliers, 20-bit transpose words, 17-bit y outputs), merged multiplier pipeline stages, transpose rewrite with combinational read mux. Failed lint + wrong outputs.
+- **`opt1.sv`** — similar narrowed rewrite; failed because my transpose rewrite broke the original's 1-cycle RAM read-latency contract (`rd_addr_q` walks one beat ahead of data).
+- **`opt2.sv`** — near-verbatim original + division replacement. Failed with a suspicious recurring 11428-error signature.
+- **Division experiments** directly in `starting_point.v` (see below).
+
+### 2. Key verified finding (the one solid result)
+The `(x*181)/256` semantics: **signed multiply wrapped to 32 bits, then signed divide truncating toward zero**. Evaluated standalone, `o_s5 <= (o_t6_5 * 32'sd181) >>> 8` produced only **4 errors out of 20672** — exactly the floor-vs-trunc cases. So the bit-exact divider elimination is:
+```verilog
+wire signed [31:0] p = o_t6_5 * 32'sd181;
+o_s5 <= (p >>> 8) + {31'd0, p[31] & (|p[7:0])};
+```
+This was NOT cleanly confirmed end-to-end (see #3) but the semantics are proven to 4/20672.
+
+### 3. What went wrong
+- **Misapplied diffs**: x- and y-passes are nearly identical code; my `apply_diff` hunks landed ambiguously, corrupting one pass (final `starting_point.v` on disk is **broken**: y-pass still references undeclared `div5_p_w/div6_p_w` wires). Restore from `opt2.sv` (verbatim structure) or the early read_file transcripts.
+- **Suspicious caching**: identical 11428-error signatures (first error `block=3 pos=8`) appeared across structurally unrelated designs, even one that failed to build. Distrust repeated identical failure outputs; re-test with a fresh filename.
+- **Width subtleties I caught**: x-pass output sums (`o_t0+o_t7`) reach ~±709M → need 32-bit adder context before `>>>11`; results fit 20 bits. Y-pass outputs fit 17 bits.
+
+### 4. What to do next time (highest-value levers)
+1. **Restore pristine original**, then apply the divider replacement above as two tiny `edit_file` changes with unique context strings — this alone should cut significant area and likely the critical path.
+2. **Critical path is the transpose RAM read mux** (`rd_addr_q` → 32:1 × 32-bit mux → FF, 2222 ps, slack −1728 at 500 ps target). Narrow RAM words **32→20 bits** (proven bound ±346256 on x-pass outputs) — ~37% less storage/mux logic. Optionally split each RAM into two 16-word banks (2:1 buffer select) to halve mux fan-in — safe if the registered-output timing is preserved.
+3. Narrow y-pass multiplier operands to 20/21 bits (inputs bounded by `>>>11` results; products < 2³¹ so 32-bit truncation is exact); keep 32-bit wrap on accumulators.
+4. Only after correctness: experiment with `target_delay` (e.g., 1000–2500 ps) — the flow currently reports achieved delay 2222 ps regardless, so RTL path-breaking is the real lever.
+
+**Files:** `starting_point.v` (currently broken — fix y-pass lines ~1217), `opt2.sv` (verbatim original base + wrong division, easy to fix), `opt1.sv`/`design.sv` (failed rewrites, useful width-analysis reference), `opt4.sv` (obsolete).

@@ -1,0 +1,37 @@
+## Summary
+
+**Final best design: `designO.v`** — PASS, 109,374 area_delay_product (area 105.5, delay 1036.9 ps), vs. the starting point's 145,429 (area 108.7, delay 1338 ps) → **~25% cost reduction**.
+
+### 1. Approaches tried (chronological, with results)
+
+| File | Approach | Result |
+|---|---|---|
+| `design.v` | Starting point (behavioral, barrel on product) | 145,429 baseline |
+| `designA/C` | Pre-normalize subnormal significand before multiply | 151,754 / 148,338 — *slower* (serial shifter before multiplier) |
+| `designD` | Wallace tree + Kogge-Stone, pre-norm | 140,301 — prefix adder too wide/slow |
+| `designF` | **Raw-significand multiply, all shifts after the product, mux-based rounding** | 129,673 — big win |
+| `designI` | + input-only sticky masks, fix off-by-one in mask | 117,801 |
+| `designN` | + trail-XOR (prefix-AND) increments instead of ripple adders | 111,601 |
+| `designO` | Replaced my hand Wallace tree with plain `ma*mb` | **109,374** ← best |
+| `designG/H/K/L/M/P` | Various unifications/single-barrel schemes | All failed or regressed |
+
+### 2. What had the most impact
+- **Moving all shifters after the multiplier** (`designF`): the multiplier starts directly on the raw significands, so the leading-zero count is computed in parallel instead of serially before it. Saved ~10% delay.
+- **Making every shifter select input-only** (lz from the fractions, `25-exps` from the exponents) so no product bit ever drives a shift select — Yosys could then balance the tree freely.
+- **Sticky bits via input-only masks** (designI): `sticky = |(T & mask)` where mask derives only from inputs; avoids a second shifter and a deep shifted OR tree. This was worth ~9%.
+- **Trail-XOR incrementers** (designN): increment-by-carry computed as `x ^ (trailing_ones(x) & c)` with a prefix-AND tree, applied to rounding and to `exp = P + n1 + carry`. Removed the last ripple adders from the late path (~6%).
+- **Plain `ma*mb` beat my hand-written Wallace+Sklansky**: ABC's technology mapping was better than my explicit CSA/prefix structure (109.4k vs 111.6k, and smaller). Don't hand-build what the synthesizer maps well.
+
+### 3. What didn't work
+- **Pre-normalizing the subnormal input** (designA): puts a shifter and its LZ logic *before* the multiply, serializing the critical path. Worse despite the smaller post-multiply normalize.
+- **Unifying normal+subnormal into one barrel shifter** (designK/L/M): theoretically elegant (the fraction is always a window `T[s+9:s]`, and the two shift formulas coincide on the boundary), but the boundary/window-mux bookkeeping produced repeated bugs (off-by-one in `s`, wrong guard, lz≥10 wraparound). I burned ~8 steps on this without converging.
+- **Kogge-Stone prefix adder**: more cells and no faster than what Yosys inferred for `+`.
+- **Narrowing the sticky mask to 12 bits** (designP): subtle wraparound/aliasing when the shift was negative or crossed the low half — never got it right; the full-width `~(22'h3FFFFF << h)` mask was correct and cheap enough.
+- `target_delay` sweeps: 500 (default) was best; 2000 gave *higher* cost (1516 ps, area barely dropped), 250 identical to 500.
+
+### 4. Lessons learned
+- **Verify each arithmetic identity numerically before writing RTL.** Most failures were off-by-ones in shift-window definitions (`guard = T[s-1]`, not `T[s]`; `carry = &x`, not `tr[9]`). A 30-second mental check on two cases (lz=0 and lz=10) would have caught most of them.
+- **One bug per change.** When I batched "fix + simplify" edits, I couldn't tell which broke. Steps 51–53 (a single wrong sticky simplification) cost a full evaluation round-trip each.
+- **Keep the last known-good file untouched** and copy for experiments — I reverted `designO.v` successfully only because `designN.v` was still intact.
+- **Don't hand-infer arithmetic the synthesizer handles**: writing `T = ma*mb` was both smaller and faster than my explicit Wallace/Sklansky version; my effort was better spent on the *surrounding* datapath (shift placement, sticky generation, rounding carry chain), which is where the real structural wins were.
+- Correctness-first ordering worked well: the baseline passed immediately, so every subsequent failure was attributable to my own edits rather than a spec misunderstanding.

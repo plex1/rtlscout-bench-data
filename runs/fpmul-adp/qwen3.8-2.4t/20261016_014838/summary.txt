@@ -1,0 +1,32 @@
+## Summary
+
+**Best result: design_v2.sv — cost 133635** (area 91.8, delay 1455ps), beating the baseline starting_point (145429, area 108.7 / delay 1338ps).
+
+### 1. Approaches tried (ranked by cost)
+| File | Architecture | Cost |
+|---|---|---|
+| **design_v2.sv** | Unified round-then-pack: single alignment position L (normal: 10−lz, subnormal: 25−T), one barrel shift, one rounding increment, conditional-chain pack | **133635** |
+| design_v7.sv | v2 math + explicit one-hot flat packing | 134213 |
+| design_v8.sv | Dual-path (normal ∥ subnormal) | 137647 (best delay 1283, but area 107.3) |
+| design_v9.sv | Dual-path + flat packing | 136611 |
+| design_v4.sv | Pre-normalized significands before multiplier | 136589 |
+| design_v3.sv | Pre-normalized + X=S+sel formulation | 141672 |
+| design_v5/v10 | v2/v5 with parallel-prefix LZ encoder | 146540 / 151072 (worse) |
+| design.sv (baseline) | starting_point copy | 145429 |
+
+### 2. What worked
+- **Eliminating the separate subnormal re-shift path**: merging normal+subnormal into a single shift/round/pack removed ~17 area units.
+- Keeping the loop-based LZ count (Yosys maps it well; prefix LZ was slower).
+- v2's plain conditional-operator packing beat explicit one-hot OR-of-ANDs.
+
+### 3. What didn't work
+- **Verilog width trap (cost a debug cycle)**: `round_up & A[8:0]` zero-extends the 1-bit scalar → broken increment; must write `{10{round_up}} & {A[8:0],1'b1}`.
+- Prefix LZ encoders and dual-path area/delay tradeoffs regressed cost; dual-path cuts delay ~180ps but adds ~15 area.
+- `target_delay` sweeps (100/300/500/1500/2000ps) changed nothing — structure is the real lever.
+- Sticky prefix direction is easy to get wrong: sticky needs |P[j:0]| → OR with **left** shifts.
+
+### 4. Lessons / next steps
+- **design_v11.sv was created but never evaluated** — it is v2 with only the rounding adder swapped for a prefix incrementer; evaluate it first (if worse, discard).
+- To beat v2 further: try cutting its pack-stage mux depth (exponent bits y[10:14] carry most of the 1455ps path) — e.g., compute `E` without waiting on `C` via speculative E/E+1 muxing at the output, or merge the `is_sub` exponent `{4'd0,C}` selection earlier.
+- Also worth trying: dual-path (v8) with the normal-path shift hardcoded as a 0/1-bit mux (`P` vs `P>>1` by sel) instead of a full barrel shifter — could keep delay ~1280 while dropping area below 100.
+- Hand-verify index math on the 3 golden vectors (0x0003×0x6801 etc.) before simulating; the 18.9M-vector TB catches everything but reports are terse.

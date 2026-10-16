@@ -1,0 +1,24 @@
+## Summary
+
+**Files:** `starting_point.v` = the working design (all optimization happened here); `design.v` = unused stub. Baseline ADP **968,045** (910ps) → best **699,206** (710.7ps × 983.8 area), kept from eval 15. The final `starting_point.v` text is a variant of that best design with a (5,4,4,4) re-chunked comparator tree (last eval 748,988, PASS) — the kept best is the (4,4,4,4,1)+flat-5-top version.
+
+### What worked best
+1. **Stage rebalancing + flop cuts**: multiplier sum+carry combined in S2 (256→128 flops), shift clamping folded into the shifter as a single kill-AND (removed the 4-bit clamp mux chain).
+2. **Negate-folding into the CSA tree** (biggest structural win): per-term two's-complement negation replaced by conditional inversion (15-bit) + a population count added as one extra tree operand — killed 17 incrementers from S3 and cut pipe3 to 255 flops.
+3. **Flat wide max-nodes** in `comp_tree` (parallel "is-max" flags + select, chunked split) — max tree depth 5 pairwise levels → 2 shallow levels; S2 went 880→~610ps.
+4. **S5 collapse**: the exp-adjust case analysis reduces to `DECIMAL_POINT-1-lz` (zero-input case is a don't-care since the encoder zeroes on mantissa=0); the constant folded into the pipe4 exponent register → one subtract.
+5. **Register duplication** (`pipe2_rg_exp_max` ×2) to halve the 17-subtractor fanout — removed ~100ps of buffer tree.
+6. **Kogge-Stone `fast_add`** for diffs/exponent adds/final adds, and pre-compressing the accumulator (18→8 terms with 3:2 levels) in S3.
+
+### What didn't work
+- **Moving diff+clamp into S2** (serial after the max tree) — disaster: 1211K.
+- **target_delay sweeps** (250/1500): netlist identical at 250 vs 500; 1500 only worse. No free lunch.
+- **One-hot AND-OR shift network** — slower than the staged barrel shifter (780K).
+- **Encoder shifter rewrite** — first attempt was functionally wrong (`(X<<16)>>s` = `X<<(16-s)`, I shifted the wrong way; caught by 1.87M mismatches). After fixing, it still mapped worse than the original 46-bit barrel instance.
+- **Re-chunking (5,4,4,4)** — first cut had an off-by-one that silently skipped element 4 (68K errors); fixed version measured worse anyway.
+
+### Lessons learned
+- **Yosys/ABC mapping is chaotic**: small RTL edits — even in unrelated modules, and even textual reordering — ripple into ±50–80ps of mapping noise. Every change needs an eval, and a known-good state is exactly reproducible (I restored the 699K netlist verbatim at step 57).
+- The eval report's **worst-path listing is the key diagnostic** — it names the critical pipeline stage and its cell breakdown; use it to decide the next target rather than guessing.
+- With 5 fixed register stages (~240ps of clk-Q+buffer overhead each), progress came from shaving serial logic *within* stages and keeping the two heaviest stages (S3 align, S4 compress) balanced; pure load-shifting between them never helped.
+- For bit-exactness: prove identities before rewriting arithmetic (don't-care analysis on the encoder exponent was safe; the shift identity initially wasn't applied correctly), and don't refactor timing-neutral code late in the session — the churn risk exceeds the gain.

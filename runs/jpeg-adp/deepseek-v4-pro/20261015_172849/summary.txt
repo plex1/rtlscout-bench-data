@@ -1,0 +1,31 @@
+Summary:
+
+**Best result**
+- **Passing cost: 8,649,602.718 area_delay_product** (area ~4262, delay ~2029 ps).
+- This came from the original `starting_point.v` after one important change at `target_delay=2500`.
+- Later edits accidentally corrupted `starting_point.v`, and my clean `design.sv` is currently an in-progress/broken optimization variant.
+
+**What worked best**
+1. Started with the provided verbatim `jpeg_idct_transpose` + `jpeg_idct_x/y` composition.
+2. Evaluated both `target_delay=500` and `target_delay=2500`. The higher target reduced area while retaining the same critical path, so it lowered cost.
+3. Replaced the `ptr_conv` 64-entry `case` in `jpeg_idct_y` with the direct bit remapping:
+   - `assign outport_idx_o = {ptr_q[2:0], ptr_q[5:3]};`
+   - This removed a large decoder from the critical path and was the single most impactful optimization, reducing cost from ~9.49e6 to ~8.65e6.
+
+**Most impactful optimization**
+- Direct row-major/column-major index bit-swizzle in `jpeg_idct_y` instead of the original lookup function.
+- Registering the transpose read address as in the original remained better than my attempted combinational rewrite; its decode still dominated the critical path, but the index simplification gave the best measured result.
+
+**What didn’t work / caused regressions**
+- Splitting the transpose dual-port RAM into two smaller register arrays: worsened delay and area in synthesis.
+- Removing the unused port-0 read from `jpeg_idct_transpose_ram`: slightly improved cost in one variant, but I later reverted it and did not preserve a clean passing file; it was still not better than the index-remap result.
+- Changing the write-pointer arithmetic for the transpose write port: broke functional correctness.
+- Deriving the transpose read address purely combinationally from `rd_idx_q` and deleting `rd_addr_q`: broke correctness. My derived mapping did not match the original 64-beat read-address sequence.
+- Repeated in-place edits to `starting_point.v` corrupted the known-good baseline; I then created `design.sv`, but that file also ended up broken after later experiments.
+
+**Lessons / next time**
+- Keep a separate immutable known-good file and only edit a copy.
+- Make one optimization at a time and evaluate immediately.
+- The critical path is consistently in the transpose RAM read-address decode, so that is the right region to optimize, but the address schedule must be preserved exactly.
+- A better next step would likely keep the original registered `rd_addr_q` FSM and optimize only its mux/adder structure, or replace the four RAMs with one combined waveform/register file while preserving exact read-first behavior.
+- Use `target_delay=2500` rather than 500 for this design, since it yields similar delay but lower area and better `area_delay_product`.

@@ -46,6 +46,26 @@
    "20261014_091912",
    "20261014_104806",
    "20261014_125058"
+  ],
+  "deepseek-v4-pro": [
+   "20261015_172851",
+   "20261015_202153",
+   "20261015_232732"
+  ],
+  "glm-5.3": [
+   "20261015_172857",
+   "20261015_205130",
+   "20261016_000749"
+  ],
+  "mimo-v2.6-pro": [
+   "20261015_172903",
+   "20261015_212115",
+   "20261016_003912"
+  ],
+  "qwen3.8-2.4t": [
+   "20261015_182412",
+   "20261015_215344",
+   "20261016_011757"
   ]
  },
  "exclude": [
@@ -87,7 +107,11 @@
   "glm-5.3-flash": "Default effort, which Z.AI documents as max for this model; 13k to 18k output tokens per step, reasoning included. Pinned to Z.AI.",
   "glm-5.3-flash-high": "RTLSCOUT_REASONING_EFFORT=high, one level below Z.AI's default max for this model: 2k to 6k output tokens per step against 13k to 18k for the default row. Pinned to Z.AI.",
   "deepseek-v4.1-flash": "Default effort, which DeepSeek documents as high. Pinned to the CoreWeave endpoint (fp8).",
-  "mimo-v2.6-flash": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8)."
+  "mimo-v2.6-flash": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8).",
+  "glm-5.3": "Default effort, which Z.AI documents as max for this model. Pinned to Z.AI.",
+  "deepseek-v4-pro": "Default effort, which DeepSeek documents as high. Pinned to Alibaba's endpoint; DeepSeek's own endpoint is excluded by the OpenRouter account's data policy.",
+  "qwen3.8-2.4t": "The open-weight 2.4T-A95B variant of Qwen3.8 Max, always in thinking mode. Pinned to Alibaba's endpoint.",
+  "mimo-v2.6-pro": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8)."
  },
  "footnotes": [
   "Rows labelled as measured before the current suite are earlier data (pre-v1 seed runs from July 2026 with an unpackaged rtlscout, or suite-v1 runs from October 2026 without the provider pin and completion cap). Each is replaced when reruns of that entry under the current suite are published.",

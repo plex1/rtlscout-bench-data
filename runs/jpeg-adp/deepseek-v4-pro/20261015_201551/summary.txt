@@ -1,0 +1,26 @@
+1. **Approaches tried**
+   - Started with the unmodified `starting_point.v` (the original core_jpeg composition) as the correctness oracle.
+   - Replaced the 64-entry `ptr_conv` case/LUT in `jpeg_idct_y` with the equivalent bit-remap `{ptr_q[2:0], ptr_q[5:3]}`.
+   - Tried several transpose-buffer restructuring ideas: removing the unused write-port/read-port logic, splitting 32-deep RAMs into bank-selected 16-deep RAMs, merging the four 32-bit transpose RAMs into one 128-bit wide RAM, and pre-computing read addresses combinationally.
+   - Tried a mostly flattened single-module `design_v3.sv`, but it had functional/lint problems and was abandoned.
+   - Swept `target_delay` slightly (`500`, `1500`, `2500`, `3000`, `4000` ps) around the best RTL.
+
+2. **What worked best**
+   - The only clear win was replacing the `ptr_conv` LUT with `{ptr_q[2:0], ptr_q[5:3]}`. That one change reduced the cost from **9,488,638** to **8,648,602** (`area_delay_product`), about a 9% improvement.
+   - This worked because the output index is just a bit-remap between column-major counter order and row-major pixel position; the original 64-entry case gave Yosys a large mux/decode structure.
+   - Using `target_delay=2500` after that edit gave the recorded best area/delay balance.
+
+3. **What didn’t work / caused regressions**
+   - `design_v2.sv` initially failed correctness because the transpose RAMs were instantiated without `clk1_i`/`rst1_i`; after fixing that it passed but was worse than the best (`8,831,649`).
+   - Removing only the unused RAM write port/read port gave a slight area improvement once (`9,369,600`), but later edits to the same file made it worse.
+   - Splitting the 32x32 RAMs into 16-deep bank-selected RAMs produced passable behavior but worse cost (`8,680,673`) because the extra decode/mux added more than it saved.
+   - Combining the four separate transpose RAMs into one 128-bit-wide module made the path much longer and raised cost (`13,253,996`).
+   - A combinational read-address delta/precompute change caused synthesis failures and a large timing regression.
+   - The flattened `design_v3.sv` failed lint due an undeclared/incorrect output and had functional mismatches.
+
+4. **Lessons / next-time notes**
+   - Preserve the exact original datapath arithmetic and scheduling; the cost gains are mostly in decode and output-index logic, not in re-deriving the IDCT datapath.
+   - Always make one small edit and immediately run evaluation; multiple edits in the same area caused avoidable regressions.
+   - Keep a saved copy of the best version before experimenting. The best recorded version was `starting_point.v` immediately after the `ptr_conv` replacement, but that exact file state was later overwritten by subsequent experiments.
+   - `target_delay` is only a secondary knob; RTL structural changes mattered much more.
+   - If recovering the best exactly: take the original `starting_point.v` and change only the `jpeg_idct_y` output-index assignment to `assign outport_idx_o = {ptr_q[2:0], ptr_q[5:3]};` and remove the `ptr_conv` function.

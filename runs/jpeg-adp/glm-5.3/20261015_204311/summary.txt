@@ -1,0 +1,28 @@
+## Summary
+
+**Final best design:** `design_final.v` at the state evaluated as PASS in step 54 — **cost 4,665,049** (area 4154, delay 1123 ps), vs. the original `starting_point.v` at 9,496,575 (area 4274, delay 2222 ps). That is a **2.04× improvement** (area −2.8%, delay −49.5%).
+
+### What worked (in order of impact)
+
+1. **Replacing the signed `/256` divider with arithmetic** (biggest single delay win: 1458→1148 ps). The RTL `(x*181)/256` (signed, truncating) is exactly `(wrap32(x*181) + (p<0 ? 255 : 0)) >>> 8` — add a bias based on the *wrapped* product's sign, then arithmetic shift. **Critical subtlety:** the bias must test the sign of the 32-bit *wrapped* product, not the sign of `x`, because the X-pass product genuinely wraps at 32 bits (initially caused exactly 3/20672 mismatches).
+
+2. **Narrowing datapath widths to the provable bounds** (biggest area/delay enabler):
+   - X-pass outputs truncated to **20 bits** (`|x_out| < 2^19.85` — rigorously: C1..C7 rounding makes X's operator norm 3.843 * 8 * 2^15 * (1/2 + 3.843/2^12) < 2^19.85), so the 4 transpose RAMs are 4×32×**20** instead of 4×32×32 (saves ~2×180 FFs + mux logic).
+   - Y-pass outputs truncated to **18 bits** (`|y| < 2^17`), sign-extended at the top-level output.
+   - Multiplier `a` operands reduced to `IN_WIDTH+1` bits and `b` to **13 bits** (all C constants < 8192); exact product then truncated to 32 bits — identical results, much smaller multipliers.
+
+3. **Removing the 64-entry `ptr_conv` LUT** in the column pass — it is exactly `{ptr[2:0], ptr[5:3]}` (row/col swap), done with wiring.
+
+4. **Transpose read-address generation by closed form.** The FSM's `rd_addr_q` update pattern equals `{k[0]^k[2], k[5:3]}` for the beat *issued one cycle earlier* — i.e. `(rd_idx_q+1)` during ACTIVE, `0` at SETUP (the earlier bug: I also zeroed it at IDLE, which broke the last pixel of every block).
+
+### What didn't work / caused regressions
+
+- **Splitting each C-multiplier into 2 pipeline stages** (4 partial products registered, then a CPA + the accumulator stages) — never converged to correctness within my remaining steps; block 0 passed but blocks 1+ failed, indicating a pipeline-timing/allocation issue I did not get to root-cause. This was the main unfinished opportunity since the y-pass multiplier CPA is still the critical path.
+- **Modular (mod-2^k) arithmetic with k<32 for the Y pass** fails: although each product fits in 25 bits, sums like `s0+s3` can exceed 32 bits and wrap, so true 32-bit modular arithmetic must be kept for the s-values.
+- **`AW = IN_WIDTH+1` overflow:** `i0 = a0+a4` reaches ±131072 and needs `IN_WIDTH+2` bits if you widen `i0`; in the final design `i0` stays 17-bit as in the original (which relies on the original's own wrap).
+
+### Lessons learned
+- Get the *exact* fixed-point semantics right first (wrap points matter at several places: product mod 2^32, division truncation, pass output truncation).
+- Width reduction driven by rigorous range proofs (operator-norm bound for the DCT matrix) was the highest-leverage, lowest-risk optimization.
+- Write each optimization as a separate file (`design_final.v` vs `design.v`) so a failed experiment can be reverted instantly — the step limit ran out mid-experiment on the multiplier pipelining.
+- Next steps I'd take: finish the 2-stage split multiplier (should cut the critical path toward ~700 ps), and explore folding `mul4` (only used at beats 1 and 5) to share hardware.

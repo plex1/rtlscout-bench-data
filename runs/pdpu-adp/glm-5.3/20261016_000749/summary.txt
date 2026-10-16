@@ -1,0 +1,30 @@
+# Design Session Summary
+
+## Final Result
+**PASS, 917,328 area_delay_product** (down from 968,045 baseline = 5.2% improvement) in `design.v`, eval 10.
+
+## 1. Approaches Tried
+
+**Full architectural rewrite** (`design.v`, ~340 lines): replaced the upstream PDPU's deep module hierarchy (`posit_decoder`, `lzc`, `barrel_shifter`, `radix4_booth_multiplier`, `csa_tree`, `comp_tree`, `posit_encoder`) with:
+- Flat per-lane decoder functions (`dec8`, `dec16`) using one-hot `msb7`/`msb15`/`msb19` priority encoders instead of the recursive `lzc` module
+- Plain 4×4 multiplies instead of radix-4 Booth Wallace trees
+- A 4-level 7-bit signed max tree for `rg_exp_max`
+- Explicit `rs14`/`ls19`/`ls31` mux-based shifters
+- Balanced CSA reduction (17→12→8→6→4→3→2) with `always_ff` retiming cuts between levels
+
+## 2. Highest-Impact Optimizations
+- **Two's-complement via XOR + popcount**: replaced 17 incrementers (`~x+1`) with `x ^ {14{sign}}` plus one shared `popc17` addend. This was the single biggest area win (885 vs 1063 units at similar delay).
+- **CSA tree re-leveling**: moving the pipe3 cut from after level 3 to after level 2 of the CSA lowered delay 1060→1023 ps.
+- **Merging the final add** into the popcount addend (`csa_s + csa_c + {15'd0, pc}`) removed a separate 20-bit adder.
+
+## 3. What Failed / Regressed
+- **The last optimization (steps 51–60)**: moving the exponent-max tree and shift-amount computation *before* pipe1 to shorten the critical path. This introduced a pipeline-alignment bug — `emax0` needed to be registered twice (through `p1_emax`) to stay aligned with the mantissa data. Fixing that still left failures (mismatches near ±NaR boundaries, `exp=8038 got=8039`), indicating a subtler alignment/ordering issue I did not have steps left to debug. The best *passing* version is the one from eval 10.
+- Several syntax/logic dead-ends cost many steps: `var` is a reserved keyword; the encoder window must be `[30:16]` of a 31-bit value (not 31/32-bit); `exp_adjust = 6 - lzc` (DECIMAL_POINT−1 = 6, not 7).
+
+## 4. Lessons Learned
+- **Token budget was the real constraint.** I burned 20+ steps on empty responses from over-long reasoning before writing a single clean file. Write the file in one pass, evaluate, then iterate with small diffs.
+- **Write a tiny self-check harness first.** Most of my ~10 evaluation cycles were spent discovering bugs (sign-extension of the negation constant, popcount polarity, encoder window width, missing double-registration of `emax`) that a 20-line directed test against `vectors.dat` would have caught instantly before synthesis.
+- **Pipeline moves that shift a whole computation across a register boundary require re-registering every companion signal the same number of times** — the `emax0` bug was exactly this class of error.
+- Cost is delay-dominated here (1023 ps vs 500 ps target); the remaining critical path is decode → max-tree → diff → shift-mux, so further gains would come from cutting *inside* the max tree rather than moving it wholesale.
+
+**Recommended next step for a follow-up agent:** revert to the eval-10 file and fix the pre-pipe1 max-tree version properly (register `emax0` twice and re-verify the diff/shift alignment), which should cut ~100 ps more.
