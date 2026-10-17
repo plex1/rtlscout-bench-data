@@ -1,0 +1,26 @@
+## Session Summary
+
+**Final state:** `design.sv` passes 100% correctness (1,028,192 checks), best cost **620,482** area_delay_product (area 434.8 × delay 1426.9 ps) vs. baseline transcription at 627,685.
+
+### 1. Approaches tried
+- **Faithful baseline transcription** of `starting_point.sv` → PASS at 627,685 (eval 1). Established the reference point and confirmed the harness behavior.
+- **target_delay sweeps** (500 / 1500 / 300): almost no effect. Synthesis maps to ~1430 ps regardless — the tool is delay-bound by the critical path, not the constraint. RTL structure, not constraints, is the lever.
+- **Structural optimizations** (all in `design.sv`, the current best file).
+
+### 2. Optimizations with impact
+- **Divider comparator/adder sharing**: replaced the separate 32-bit `>` comparator + add/sub block with one shared subtractor (`skl_add` computing A−B, borrow = A>B, sum = new A). Biggest structural saving.
+- **Parallel-prefix (Sklansky) adder** module `skl_add` used for the main 36-bit ALU adder, the rounding adder, and the divider subtractor.
+- **Popcount removal for OpBIsZero**: the divider's `OpBIsZero_SI` only needs `~|operand_a_i`, not a full popcount compare. (Popcount itself had to be restored for CNT.)
+- **Logarithmic FF1 priority encoder** replacing the index-LUT tree (plus removal of `operand_a_neg_rev` — `~rev(a)` is used directly).
+- **Standalone ROR rotate** removing the 64-bit `{a,a}` concat from the shifter input.
+- Net effect: −4.6 area, −1.5 ps → −1.15% cost. Modest but real.
+
+### 3. What didn't work / regressions
+- **target_delay**: 300 and 1500 both gave identical netlists — dead end, don't sweep it here.
+- **Multiple correctness bugs during restructuring** (each costing a full eval cycle): inverted FF1 within-pair index (found highest, not lowest, set bit → wrong div_shift), divider subtractor direction (must be A−B, with comparator `A>B ↔ ~borrow & ~eq`), ROR direction (result[g] = a[(g+s) mod 32]), accidentally deleting the popcount module (CNT broke), and a duplicate-module redefinition.
+- An edit that replaced "popcount header" text also deleted the `module` line, breaking syntax — string-match edits on headers are fragile.
+
+### 4. Lessons learned
+- The critical path (~1430 ps) runs `operator_i` decode → datapath → `result_o`; the adder MAJI chain is only part of it. The opcode-mux fan-in into the 36-bit adder (partitioning muxes, operand prep) is co-critical — adder architecture alone won't drop delay much.
+- Verify each structural rewrite against the *original* signal semantics (operand order, carry-vs-borrow, rotate direction) before spending an eval; three of my five failing evals were single-line semantic slips.
+- Biggest remaining opportunities for the next agent: collapse the per-opcode operand-prep muxes (adder/clip/ABS share the adder inputs), shrink the 36-bit adder to 33 bits (bits 0,9,18,27 are only carries), and attack the shifter + result-mux tree on the critical path.

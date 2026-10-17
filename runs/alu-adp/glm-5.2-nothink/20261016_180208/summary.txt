@@ -1,0 +1,27 @@
+## Summary
+
+### 1. Approaches Tried
+
+- **Flat popcount tree** (best result): Replaced the original 5-level generate-based adder tree (`cnt_l1`→`cnt_l4`) with a flatter structure using 4-bit groups summed directly into 6-bit values (`s0[0..7]`), then combined in two stages. This was the single most impactful change.
+- **Direct per-lane comparisons**: Rewrote the comparison logic to use explicit 32-bit/16-bit/8-bit signed/unsigned comparators instead of the 4-byte decompose-and-combine approach. This reduced area slightly but increased delay significantly.
+- **Simplified `is_equal_clip`**: Replaced the `always_comb` with `operand_b_eq` mux + comparator with a direct ternary. This created a new critical path and increased cost.
+- **Various minor cleanups**: Ternary vs if/else for `ff_input`, `bitop_result`, `clip_result`, `extract_sign` — each caused unpredictable synthesis result changes.
+
+### 2. Most Impactful Optimization
+
+**Popcount restructuring** — the flat 4-bit-group approach reduced cost from **645,629 → 606,952** (6% improvement). The key was using wider intermediate sums (6-bit) with fewer tree levels, which Yosys mapped more efficiently despite slightly higher area (447.7 vs 441.5) — the delay reduction (1356 vs 1462 ps) more than compensated.
+
+### 3. What Didn't Work
+
+- **Direct comparison logic**: Cost increased to 642,870 despite simpler RTL — the `gt_lane` computation added delay.
+- **`is_equal_clip` simplification**: Consistently worsened results (657,303) by creating a new critical path through the clip result mux.
+- **Any change beyond popcount**: Small RTL refactoring (ternary vs if/else, removing intermediate signals) caused non-deterministic synthesis swings of ±5%, usually worse. The synthesis tool is extremely sensitive to RTL structure for this design.
+
+### 4. Lessons Learned
+
+- **One change at a time**: The synthesis results were so sensitive that batching changes made it impossible to isolate which change helped or hurt.
+- **Area-delay tradeoff is non-intuitive**: The flat popcount had *higher* area but *lower* delay, yielding better ADP. Don't optimize area alone.
+- **Don't touch working logic**: The original CV32E40P comparison/shuffle/clip logic was already well-optimized by the original designers. Attempts to "simplify" it consistently backfired.
+- **The popcount was the low-hanging fruit**: The original tree structure with 5 generate levels and narrow intermediates was suboptimal for this synthesis flow.
+
+The final best design is `starting_point.sv` with only the popcount module modified to the flat 4-bit-group structure.

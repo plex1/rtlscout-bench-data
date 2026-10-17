@@ -1,0 +1,32 @@
+## Summary
+
+### 1. Approaches Tried
+
+- **Baseline copy**: Copied `starting_point.sv` to `design.sv` and evaluated — established baseline cost of 645,629.
+- **Target delay sweep**: Tested target delays of 500 (default), 600, 800, 1000, 1200, 1400, 1500, 2000, 3000 ps. The default 500 ps consistently gave the best area-delay product.
+- **`unique case` → `case`**: Replaced all `unique case` with plain `case` throughout — no measurable impact (Yosys treats them identically).
+- **Redundant logic cleanup**: Simplified `operand_b_eq` / `is_equal_clip` from a redundant always_comb to a single assign — no measurable impact.
+- **Explicit concatenation for bit-reverse**: Replaced generate-loop bit-reverse assignments with explicit 32-bit concatenation — identical synthesis results.
+- **Popcount rewrite**: Replaced the structured 4-level tree popcount with a flat sum-of-8 approach (`{4'b0, bit} + ...` per byte, then sum 4 bytes). This was the key win.
+- **Alternative popcount (function-based)**: Tried a `cnt8` function approach — made things worse (653,647), reverted.
+- **Alternative ff_one (loop-based priority encoder)**: Tried replacing the tree-based find-first-one with a simple `for` loop — broke correctness (divider timing depends on the exact tree structure), reverted.
+- **Full rewrite (design_v2.sv)**: Attempted a clean rewrite with simplified datapaths — failed due to Yosys syntax errors with `$unsigned()` and assignment patterns, plus sim mismatches.
+
+### 2. Most Impactful Optimization
+
+**Simplified popcount** (from 645,629 → 615,545, a ~4.7% reduction). The flat sum-of-8 structure with wider intermediate signals (`logic [5:0]` instead of incremental `[1:0]→[2:0]→[3:0]→[4:0]`) allowed Yosys to find a better adder tree, reducing critical-path delay from 1462 ps to 1388 ps.
+
+### 3. What Didn't Work / Regressions
+
+- **Loop-based ff_one**: Created a priority encoder that changed divider cycle count (div_shift depends on ff_one timing), causing ready_o mismatches.
+- **Function-based popcount**: Increased delay by ~87 ps.
+- **Higher target delays**: Area reduction was negligible (<0.5%) while delay stayed the same or increased, worsening the product.
+- **Full rewrite (design_v2.sv)**: Yosys rejected `$unsigned()` in some contexts; Verilator found sim mismatches from subtle semantic differences.
+
+### 4. Lessons Learned
+
+- **Popcount structure matters**: The way intermediate widths are declared significantly affects how Yosys builds the adder tree. Wider intermediates with flat sums can outperform explicit narrow trees.
+- **Don't touch the divider/ff_one**: The serial divider's cycle count depends on the exact combinational structure of `ff_one` and `clb_result`. Any change to the find-first-one tree breaks the ready_o handshake equivalence.
+- **Target delay is a minor knob**: For this design, the RTL structure dominates; sweeping target_delay barely changed area while delay stayed constant.
+- **Incremental edits > full rewrites**: Small targeted changes are safer and more productive than wholesale rewrites, which risk syntax errors and subtle semantic mismatches.
+- **Next time**: Would explore restructuring the comparison logic (the critical path goes through `operator_i[1]` → comparison → result mux), possibly precomputing comparison results or splitting the result mux to reduce depth.

@@ -1,0 +1,24 @@
+## Summary
+
+### 1. Approaches tried
+- **Full rewrite from scratch** (`design.sv` original, `design2.sv`): re-typed the entire ALU with a unified barrel shifter, prefix adders, and a shared divider adder. **Failed** — hand-retyping 1400 lines introduced multiple subtle bugs that were nearly impossible to localize without a local simulator (the harness only runs its own tb.sv; custom testbenches get stripped).
+- **Evolutionary in-place editing of `starting_point.sv`** (what worked): the harness's tb instantiates `cv32e40p_alu` from my submitted file, while `design.sv` acts as a thin `include "starting_point.sv"` wrapper. Editing starting_point.sv directly, one optimization per evaluation, isolated each change.
+
+### 2. Optimizations with most impact (baseline 645,629 → final 489,747, −24%)
+1. **Inline Kogge-Stone prefix adder for the 36-bit lane adder + 32-bit round adder** (replacing ripple chains): cost 645,629 → 579,789. Critical path was adder→round-add→shifter→result-mux.
+2. **Unified 5-stage per-lane partitioned barrel shifter** replacing three separate networks (per-lane `>>>` ops, a 64-bit rotate funnel, plus bit-reversal plumbing): 579,789 → **489,747** (area 449→406, delay 1290→1205). Biggest single win.
+3. Divider comparator sharing the divider prefix adder's carry-out was applied last (untested — session ended at step 60; **the current starting_point.sv is mid-edit and unverified** — next agent should evaluate/revert that edit).
+
+### 3. What didn't work / caused regressions
+- Two critical upstream subtleties:
+  - `adder_result_expanded = $signed(in_a)+$signed(in_b)` assigned to 37 bits is NOT the carry: bit 36 = `carry36 ^ a[31] ^ b[31]` (sign-extension XOR). Using `sum[35]` or `carry36` alone broke CLIP/divider paths.
+  - Left-shift path works on bit-reversed operands with the same right-shift network — the unified shifter must keep that convention.
+- Barrel-shifter bugs: wrong shift direction (`out[i]=in[i-S]` instead of `in[i+S]`), and lane-boundary checks using absolute index instead of `i % lane_width`.
+- The `fast_add` module originally used group-propagate `p[LVL]` in the sum XOR instead of bit-propagate — wrong results everywhere.
+- One evaluation was wasted re-evaluating `design.sv` (old full rewrite) after editing starting_point.sv — the wrapper hadn't been swapped yet.
+
+### 4. Lessons learned
+- **Never hand-retyped a known-correct reference wholesale** — evolve it with surgical diffs, one verifiable step at a time.
+- Read synthesis port connections carefully; unset outputs on instantiated modules (`.cout_o()` on the round adder was fine, but a missing `adder_c36` declaration silently created a 1-bit implicit net).
+- The reference's width/signedness quirks (`$signed` 36→37-bit extension) are semantic contracts; derive bit-exact equations before replacing arithmetic.
+- Next steps for the next agent: (a) verify/revert the divider-adder sharing edit in starting_point.sv, (b) try Brent-Kung or Sklansky instead of Kogge-Stone (fewer cells vs. same depth), (c) try `target_delay` sweeps (~700–900ps given slack was −705), (d) consider simplifying the shuffle/pack mux tree and the CLIP equality comparator.

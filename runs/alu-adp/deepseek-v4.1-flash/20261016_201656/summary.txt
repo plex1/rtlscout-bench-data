@@ -1,0 +1,23 @@
+## Summary
+
+### What I did
+
+Baseline (`starting_point.sv`, evaluated as-is): **PASS, cost 645629** (delay 1462 ps, area 441.5). All work was done by editing `starting_point.sv` in place; the best passing variant is the current contents of that file.
+
+### Approached that worked
+
+1. **Flattening the result mux (biggest single win, −5.7%).** The upstream `unique case (operator_i)` result selector synthesized into a ~40-stage ripple of AOI/OAI gates from `operator_i` to `result_o`. I replaced it with a one-hot AND-OR: 14 precomputed flag/vector terms ANDed with the operator and OR-reduced. Cost dropped to **609022** (delay 1387 ps, area 438.9) — same area, 75 ps faster. This required fixing my own classification bug: `f_cmpvec`/`f_cmpscal` must be explicit opcode lists (GES/GEU at 7'h0a/7'h0b are *not* scalar set-less; the `operator_i[1]` bit test wrongly excluded them).
+
+2. **Flat comparison network (−? small).** Replaced the hand-built 4×8-bit signed/unsigned `>` comparators plus the nested Kempe chain with a "lane-sign flipped unsigned compare" network (`a ^ flip` then unsigned `>`, with w_eq/w_gt as an OR/AND reduction tree). This built correctly but on its own measured *slightly worse* (627107), so I reverted it; at the very end I re-applied it to the file.
+
+### What didn't work
+
+- **Explicit Sklansky parallel-prefix adder** (`cv32e40p_ppadd`) replacing both the 36-bit carry-partitioned adder and the rounding adder: I had two bugs — (a) interleaving a/b lanes into a 32-bit word instead of keeping them separate, (b) an off-by-one in the final carry XOR (`s_o = p ^ {g[W-2:0],1'b0}`). I never got a clean pass with it and burned ~10 steps on it; reverted to `+` (Yosys has its own fast adder mapping anyway, and the delay report was unchanged).
+- **`target_delay` sweep** (100/300/500/2000 ps): identical area_delay_product at 100/300/500, and a *worse* result at 2000. The metric appears pinned to the achieved delay, so this knob is worthless here.
+
+### Lessons / next time
+
+- The critical path (`operator_i` → `result_o`, ~45 levels) is dominated by the huge result *mux tree*, not the arithmetic. Prioritize operator-decode/selection restructuring early; it is the highest-leverage lever.
+- Don't hand-roll adders unless willing to simulate them standalone first (a 2-minute Verilator unit test would have caught both ppadd bugs before wasting evaluation steps).
+- No cheap "area probe" exists: `Cost` is only extracted when the simulation passes (confirmed by failing `probe.sv`), so every area experiment costs a full evaluation.
+- Remaining headroom: split/shallow the `always_comb` case blocks that feed `result_o` (especially `pack_result` shuffle wiring and the `bextins/bclr/bset` mask chain), and give Yosys a more balanced result selector, since these still feed the top path.

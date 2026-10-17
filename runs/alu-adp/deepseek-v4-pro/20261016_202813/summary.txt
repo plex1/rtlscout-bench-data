@@ -1,0 +1,37 @@
+## Summary
+
+### 1. Approaches tried
+- **Kept/reused the provided `starting_point.sv`** as the first baseline. It passed with cost **645,629** (`area_delay_product`).
+- **Attempted a from-scratch behavioural rewrite (`design_simple.sv`)** using functions and `always_comb`, keeping the original serial-divider submodule.
+- **Attempted small structural edits to `starting_point.sv`**, specifically simplifying the 32-bit comparison path.
+
+### 2. Best result
+- The best result remained the **baseline unmodified `starting_point.sv`**:
+  - Correctness: **PASS**
+  - Cost: **645,629 area_delay_product**
+  - Delay: **~1,462 ps**
+  - Area: **~441.5**
+
+No later variant improved on this.
+
+### 3. What worked / didn't work
+
+#### What worked
+- The original CV32E40P ALU structure is already quite good for the evaluated metric. Its shared adder/shifter/comparator architecture was better than my simplified synthesis-generated RTL.
+- Saving the originally working file by not collapsing the comparison cascade into direct 32-bit comparisons was important for area.
+
+#### What caused regressions
+- **`design_simple.sv`** eventually became functionally correct, but its area/delay cost blew up to **~1,098,474** (area ~661, delay ~1,661 ps). The large procedural case/function synthesis created a worse critical path and significantly larger area.
+- Initial `always_comb` latches from incomplete vector assignments in loops caused both simulation and synthesis failures.
+- A subtle shift amount indexing bug in vector modes produced incorrect results: extracting the amount from the wrong bit slice. It was fixed after analyzing stimulus errors.
+- Modifying `starting_point.sv` to use direct 32-bit comparisons for scalar compare mode raised cost to **~667,421** rather than reducing it, despite the logic appearing simpler.
+
+### 4. Lessons learned
+- The provided upstream RTL is already highly optimized for this metric; small “simplifications” can hurt area-delay product even if they remain functionally correct.
+- Synthesis evaluates structural patterns, not just operator count. A structured shared datapath often beats a large flat `case`/`function` implementation.
+- Moving to a behavioural style with loops introduced latch risk and produced larger/slower logic in Yosys. The original generate-based structural style was better for PPA.
+- Shift-amount lane indexing and signed/unsigned shift conversions were the most error-prone details when rewriting the ALU.
+
+### Files
+- **`starting_point.sv`**: baseline/best; currently includes a non-beneficial experimental comparison edit that should be reverted to the original upstream version.
+- **`design_simple.sv`**: functional but much worse cost (~1.098M), not recommended.

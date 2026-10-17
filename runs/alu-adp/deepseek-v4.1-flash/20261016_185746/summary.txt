@@ -1,0 +1,29 @@
+# Summary
+
+## What I did
+
+I worked directly on `starting_point.sv` (the flattened upstream CV32E40P ALU), making incremental edits and evaluating after each change. The baseline scored **645,629** area_delay_product (delay 1462 ps, area 441 µm²). My best correct design reached **564,664** (~12.5% better; delay 1241 ps, area 455 µm²).
+
+## Optimizations that worked (net win)
+
+1. **Replacing `cv32e40p_ff_one` with a hand-written priority encoder** — the upstream find-first-one is a full 32-wide tree of `index_lut`/`sel_nodes`/`index_nodes` muxes; substituting a simple 3-level byte→nibble→bit encoder (plus `|ff_input` for `no_ones`) removed a lot of area and path depth.
+2. **Eliminating the 64-bit shifter in the 32-bit path** — the upstream always built `{shift_op_a, shift_op_a}` (for ROR) and a 64-bit sign-extended operand, then shifted that. Replacing it with a plain 32-bit shift plus a separately-built fill mask, makes ROR 32-bit conditional at the mux instead of widening the whole shifter. This was the single biggest delay win (1471 → 1241 ps on its own).
+3. **Explicit 36-bit and 32-bit Kogge-Stone / prefix adders** — behavioral `+` on the 36-bit partitioned adder plus the second rounding adder produced a deeply chained carry path (39 cascade levels in the worst path). Writing explicit prefix networks helped only in combination (both adders together), which is why they looked useless when tested one at a time.
+
+## What didn't work / regressions
+
+- KG adder alone: delay unchanged (1471 ps), area up.
+- Replacing the `bmask` double-barrel-shift with a per-bit `(i >= b) && (i <= a+b)` comparator formulation: **regressed** (delay 1240 → 1280, area up) — reverted.
+- Replacing the per-lane `$signed > $signed` byte comparators with a flat sum-of-products `gt8` function: **regressed** badly (I also got the signed-compare sign-masking wrong first). Reverted to upstream.
+- Explicit prefix adder on the *rounding* adder alone (first test): regression too; only the two together helped.
+
+## Things to be careful about
+
+- **Latch inference in `always_comb`**: putting a signal assigned in only one `case` branch into that case caused Yosys `Latch inferred` failures. Hoist such signals out of the case into standalone `assign`s.
+- **The reference's 36-bit adder is a *signed* add**: bit 36 is `a[35] ^ b[35] ^ carryout`, not `carryout`. Getting this wrong makes the clip tests fail.
+- **The result mux is easy to mis-decode** when flattening to a balanced tree. `res_op_cmp` must be a concatenation of four `{8{cmp_result[k]}}` (I hit a syntax error with that form and used a generate loop instead). INS must map to `pack_result`, shifts 0x24–0x27 each map to `shift_result`, and the scalar set-less ops are `op[1] & ~op[3]` inside group 0x00–0x0D (using just `op[1]` incorrectly swallowed EQ/NE).
+- `spread` of 32 splice/`bmask`/shuffle logic is flat and synthesizer-friendly upstream; over-restructuring it (my own mux trees, custom comparators) consistently lost.
+
+## Where things stand
+
+The last edit in `starting_point.sv` (fixing the scalar set-less decode in the new balanced result mux) was **not yet verified** — the run ended at the step limit before evaluation. The carried-over file must be re-evaluated first; if that group decode is still wrong, the last known-good configuration is the one at **eval 8 (564,664)**, which is the version without the balanced result mux and with the KG adders + cheap ff_one + 32-bit shifter. The most likely next lever is finishing/validating that flattened result mux, then attacking the `shift_op_a` operand-selection cone (in front of the shifter) and the 37-bit adder's per-byte carry input generation logic, which the timing reports kept implicating near the startpoint of the critical path.

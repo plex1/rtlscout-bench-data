@@ -1,0 +1,47 @@
+{
+ "schema": 1,
+ "campaign": {
+  "name": "alu_baseline_20261016",
+  "suite": "suite-v2",
+  "started": "2026-10-16T17:35:47",
+  "argv": [
+   "--baselines-only",
+   "--task",
+   "alu-adp",
+   "--name",
+   "alu_baseline_20261016"
+  ],
+  "matrix": "campaign_matrix.yaml",
+  "open_weights_only": true,
+  "parallel": 2,
+  "rtlscout": "0.2.0+git.1749dde",
+  "spire_hdl": "0.4.0",
+  "bench_commit": "275287cb799c46d79812880173936963189c4607-dirty",
+  "finished": "2026-10-16T17:36:57"
+ },
+ "baselines": {
+  "alu-adp/verilog": {
+   "task": "alu-adp",
+   "language": "verilog",
+   "benchmark": "cv32e40p_alu_verilog",
+   "cost": 645629.3193200846,
+   "area": 441.5407206526112,
+   "delay": 1462.2192,
+   "status": "ok",
+   "cmd": [
+    "python",
+    "-m",
+    "rtlscout.run_eval",
+    "benchmarks/cv32e40p_alu_verilog/context/starting_point.sv",
+    "--benchmark",
+    "benchmarks/cv32e40p_alu_verilog",
+    "--cost-metric",
+    "area_delay_product",
+    "--skip-cec",
+    "--json"
+   ],
+   "env": {}
+  }
+ },
+ "runs": []
+}

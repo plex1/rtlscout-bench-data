@@ -1,0 +1,32 @@
+# Session Summary — CV32E40P ALU optimization (`starting_point.sv`)
+
+**Final result: PASS, ADP = 585,824** (baseline 645,629 → **−9.3%**; area 441.5→430.2, delay 1462→1362 ps), 0/1,028,192 testbench failures.
+
+## 1. Approaches tried
+
+- **Sklansky parallel-prefix adders** for both `+` operators (adder1 36-bit slot adder, adder2 round adder) — correct after fixing the partner-index formula, but **worse** (ADP 667k).
+- **Direct per-op shuffle/pack rewrite** replacing the shared two-network shuffle logic — correct (after an EXTS sign-extension fix), but **+29 area** (ADP 698k); the old network turned out to be synthesis-pruned already, so the "shared upstream structure" is actually cheap.
+- **Unified shifter** replacing all three per-mode barrel networks + output mode-mux — **the big win**.
+- **Comparator-form `bmask`** (per-bit threshold instead of two serial shifts) — area −11.5 but pushed a `bmask_b_i` path critical (+43 ps); ADP-neutral, reverted.
+- **Priority-encoder `ff_one`** replacing the balanced index tree — ADP regressed to 650k (mapping variance, +123 ps), reverted.
+- **Front-selected result mux** (`sel_shiftres`) — second win.
+- **target_delay sweeps** (300/500/1300/6000) — proved to be a **no-op** below ~1300 (bit-identical netlists); only 6000 changed mapping and it lost.
+
+## 2. Optimizations with the most impact
+
+1. **Unified shifter** (−17 area, −67 ps): one 8-bit-chunk-granularity barrel over `{fill, a}`, per-mode chunk amount extraction, and a cheap lane keep-mask `(raw & keep) | (arith & ~keep & lane_sign_repl)`. It reproduces all original fill semantics (arith/zero fill, ROR wrap, vector-mode cross-lane masking) exactly, deletes two shifter copies plus the mode-mux off the critical add→shift→result path. The div path (`shift_left_result`, `div_shift`) is untouched, preserving cycle-exact handshakes.
+2. **`sel_shiftres` front-select** (−33 ps): the 12 shift/add opcodes bypass the ~20-way `result_o` case tree behind a 2-input mux.
+
+## 3. What didn't work / caused regressions
+
+- **Prefix adders**: abc's buffer trees on Sklansky's high-fonout nodes erased the theoretical depth win — abc's own `+` mapping is already near log-depth.
+- **Shuffle rewrite**: losing opcode-shared mux structure costs more than it saves; dead-code pruning already handles the upstream network.
+- **Debugging rabbit hole**: a mysterious "dead fill arm" in the shifter turned out to be an evaluation quirk of that particular `always_comb`; rewriting `shift_keep`/`shift_signfill` as continuous assigns fixed it. Cost ~6 steps — a `$display` probe early would have been faster than pure reasoning.
+- **ff_one / bmask**: single-block "optimizations" perturbed holistic abc mapping and lost more elsewhere than they gained.
+
+## 4. Lessons learned
+
+- **Measure everything**; ADP deltas under ~1–2% are often mapping noise (ff_one's −10 area was swamped by +123 ps elsewhere).
+- abc does **not** reward hand-written fast structures (prefix adders, priority encoders) as expected — it re-optimizes globally; structural *deduplication* (shifter, mux-depth reduction) is the reliable lever.
+- The critical path was consistently `operator decode → two chained adders → barrel → result mux`; attacks that shortened any of those three segments won, ones that added depth anywhere on it lost.
+- Next time: probe with `$display` sooner, run the target_delay no-op test once early, and batch-revert experiments more aggressively to preserve steps for measured wins.

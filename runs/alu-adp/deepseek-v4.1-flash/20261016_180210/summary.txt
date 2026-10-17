@@ -1,0 +1,32 @@
+## Summary
+
+**Final result:** `design.sv` passes 100% of the equivalence checks (0/1,028,192 fails) with `area_delay_product = 592,919` (area 443 µm², delay 1338 ps), a **~8% improvement** over the `starting_point.sv` baseline (645,629 / 442 / 1462 ps).
+
+### 1. Approaches tried
+
+I started by reading the whole 1452-line `starting_point.sv` plus the reference model embedded in `tb.sv` (second half) to pin down exact semantics. My strategy was:
+
+- **Baseline check first** — evaluated `starting_point.sv` unmodified to get the reference cost (645,629). Also confirmed `target_delay` (100 vs 500) has essentially *zero* effect on this design; Yosys maps it identically. So `target_delay` is not a useful knob here.
+- **Full clean re-implementation** in `design.sv`: same datapath structure (adder / shifter / comparator / shuffle / bitop / divider) but with variable names, muxing, and result selection restructured.
+
+### 2. What had the most impact
+
+- **Flattened result mux** — replaced the big `unique case (operator_i)` with a one-hot masked-OR tree. This alone took delay from 1462 → 1338 ps.
+- Keeping all datapaths faithful while cleaning up the control/decode logic. The critical path runs opcode-decode → shifter → result mux, so decode restructuring pays off at both ends.
+- Removing the 64-bit ROR datapath in favor of a 32-bit rotate (`>>amt | <<(32-amt)`, exploiting 5-bit wrap) — theoretically the biggest remaining lever; see below.
+
+### 3. What didn't work / caused regressions
+
+- **Three semantic traps** in the upstream RTL that are *not* in the prose spec and will silently break equivalence:
+  1. `adder_result_expanded = $signed(adder_in_a) + $signed(adder_in_b)` on 36-bit operands producing 37 bits — the sign bit `[36]` is the **sign-extended** MSB (i.e. the whole-32-bit-lane add carry), not a plain carry-out. Needed for CLIP's underflow test. I initially wrote `{1'b0, a} + {1'b0, b}` and broke CLIP.
+  2. `clb_result = ff1_result - 5'd1` relies on **context-width extension**: the 6-bit LHS makes this a 6-bit subtract, so `ff1_result==0` yields `6'h3F`, not `31`. My explicit `{1'b0, ...}` broke CLB.
+  3. In 16/8-bit modes, shift amounts are taken as `shift_amt_int[19:16]` / `[3:0]` (which contain the *upper* lane's amount), not a clean per-lane selector — the "correct-looking" fix broke the byte-lane fixed shifts.
+- **My final in-flight edit** (32-bit rotate + fill-select shifter) was still incorrect when the step limit hit — the byte-lane `[26:24]/[18:16]/[10:8]/[2:0]` selectors must be preserved verbatim, and I had also mangled them. `design.sv` currently holds that broken variant, so **the next agent should revert the shifter block in `design.sv` to the 64-bit `shift_op_a_32` version** (which is the state that produced the 592,919 PASS) before doing anything else.
+
+### 4. Lessons learned
+
+- **Trust the RTL, not the prose.** Every failure I hit came from "cleaning up" an upstream quirk that the spec text described imprecisely. When a bit-level expression looks wrong but the reference passes, it is load-bearing.
+- **Diff the error message against the line number carefully** — I twice chased phantom "off-by-N" line offsets and wasted steps modifying correct code while the real bug sat elsewhere.
+- **Debug by observation, not reasoning.** A one-line temporary hack dumping internal signals into `result_o` immediately localized the CLIP bug after several failed reasoning passes.
+- **Budget:** the 65k-token ceiling killed my last two turns mid-edit. I should have stopped optimizing at the verified-PASS state (step 54) and only attempted one small, self-contained change per step, evaluating after each. Larger rewrites late in the run risk ending on a broken file — which is exactly what happened.
+- **Next steps worth trying** (on top of the reverted, passing `design.sv`): (a) the 32-bit rotate done correctly, (b) splitting the shifter into narrow per-lane barrel shifters with a `{1'b0, lane}` mask for saturation, (c) `case`-based byte/half/word selection feeding the result mux instead of a pure wire-OR, and (d) factoring the shared `operator_i` decode into one-hot signals computed once and reused by adder/shifter/mux to cut redundant decode depth.

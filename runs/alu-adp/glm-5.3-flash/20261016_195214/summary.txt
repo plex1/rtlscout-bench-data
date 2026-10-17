@@ -1,0 +1,23 @@
+## Summary
+
+**Final result:** PASS, 615,184 area_delay_product (baseline upstream copy: 645,629; ~4.7% better). Final design in `design_v2.sv`.
+
+### 1. Approaches tried
+- **Baseline evaluation** of `starting_point.sv` verbatim → 645,629 (area 441.5, delay 1462, critical path = decode → ripple adder → round-add → shifter → result mux).
+- **Full datapath restructure** (`design.sv`): per-lane 8-bit adder with explicit carry chaining, single shared per-lane barrel shifter, compact bit-slice decode, flattened clip. Got bogged down in subtle behavioral mismatches (see §3) and never converged to PASS.
+- **Bisected hybrid** (`design_v2.sv`): kept only the *control-path* rewrites (bit-slice opcode decode, decoded comparison/min-max/clip gating, decoded bit-count selects) and restored the upstream datapath (36-bit interleaved adder, shifter, ff_one, serial divider) verbatim. This passed and became the final design.
+
+### 2. Most impactful optimizations
+- **Bit-slice opcode decode** — replacing 7-bit equality comparators with decode from `operator_i[6:3]`, `[6:2]`, `[2:0]` slices (plus decoded `cmp_signed_en`, `do_min`, ff_input and bitop-result selects) gave the final gain: 641,962 → 615,184 (area 442→434, delay 1451→1415). Decode sits at the root of every long path, so this mattered most.
+- **CLIP algebra**: proved `adder_result_expanded[36] = a[31]^b[31]^c32` (c32 = carry-out of `a+b+1`), so the clip gate is `(a31&b31) | ((a31^b31)&~c32) | (a==~b)` — reusable from the existing adder, no extra comparator needed.
+- `target_delay` sweeps: 250 ps and 2000 ps both *worse* (641,962 / 705,617) than the default 500 ps — the default was already near-optimal for this design.
+
+### 3. What didn't work / caused regressions
+- The full per-lane restructure repeatedly failed equivalence on invisible details: the upstream adder's carry constants mean partitioned boundary lanes get `cin=1` in the negate branch (swallowing crossing carries), the CLIP gate is *not* a lane carry-out, EQ/NE and EXT/EXTS collide on my chosen bit-slices, and an unassigned `op_brev` silently rerouted BREV through the wrong shifter path. Each fix exposed the next bug; cost of debugging exceeded the expected win.
+- Aggressive target_delay changes only traded power/area against delay adversely.
+
+### 4. Lessons learned
+- **Equivalence-check benchmarks punish cleverness in cycle-exact corner logic.** The handshake-critical divider and its feeding logic (bit reversal, ff_one, div_shift) must be touched last, if at all — and the FSM must be copied verbatim.
+- Bisecting into "control rewrite + verbatim datapath" isolated variables and converged quickly; I should have started there instead of a monolithic rewrite.
+- Silence is dangerous: an undriven `logic` decays to X/z and Verilator won't error — run lint/sim early and often (each eval here cost several steps).
+- Next time: budget more steps for a *simulation-based* diff harness (dump per-opcode results from my design vs reference locally) before touching the datapath, and only then port proven pieces one at a time.

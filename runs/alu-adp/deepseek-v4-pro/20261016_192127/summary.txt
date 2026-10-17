@@ -1,0 +1,28 @@
+Summary:
+
+1. **Approaches tried**
+   - Evaluated the provided `starting_point.sv` directly first. It passed all checks with area_delay_product = 645629.32 (area ~441.5, delay ~1462 ps at default target 500 ps, slack violation).
+   - Explored `target_delay` variants for the baseline (`1500`, `1000`) to see cost trade-offs. `1500` met timing but cost was slightly worse (656040); `1000` did not improve over the default reported cost.
+   - Attempted two restructured implementations:
+     - `design_direct.sv`: direct per-family ALU logic, no shared adder/shifter.
+     - `design_direct2.sv`: same approach cleaned up and with helper functions removed/inlined.
+
+2. **What worked best**
+   - The original `starting_point.sv` was the only design that achieved full correctness. Its evaluation remained the best passing result: **PASS, area_delay_product 645629.319**.
+
+3. **What didn’t work / caused regressions**
+   - `design_direct.sv`:
+     - Verilog syntax/tooling issues with function return placement and replication/indexing expressions.
+     - Correctness failures in ABS/CLIP/vector comparison and divider handshake timing.
+     - Never reached a successful PPA evaluation.
+   - `design_direct2.sv`:
+     - Removed the problematic helper-function constructs, but still had vector compare lane sign-extension bugs.
+     - Divider input reconstruction (`OpB_DI`) was not equivalent to the shared-shifter path; handshake timing diverged immediately for DIVU, and simulation failed.
+     - Final evaluation still failed with `ready_o` mismatch on DIVU and wrong division results.
+
+4. **Lessons learned**
+   - The original shared adder/shifter/divider datapath is cycle-critical and difficult to replace without exact equivalence of the divider’s `OpB_DI` / `div_shift` logic.
+   - Function syntax with returned replication or indexed part-selects is fragile across the tools. Prefer explicit continuous assignments and simple helper functions.
+   - Start from the known-good file and make smaller, deliberately targeted edits, not wholesale rewrites.
+   - Spending many steps on a direct rewrite that did not pass left no chance to exploit small area-delay optimizations on the passing baseline.
+   - Next time would keep `starting_point.sv` identical for divider/bit-count logic and only optimize isolated combinational paths, validating each incremental edit immediately.

@@ -1,0 +1,28 @@
+## Session Summary
+
+**Final: PASS, best cost 529,007 area_delay_product** (`design_v2.sv`) — 18.1% below baseline (645,629).
+
+### 1. Approaches tried & what worked best
+- **v1** (one-hot AND-OR result mux replacing the deep nested `unique case` tree, direct `cmp_result` decode): 645,629 → 606,489
+- **v2** (+ split shifter: operand-fed `shA` for shifts/bit-manip/div-prep, adder-fed `shB` for adder family): → **529,007 (best)**
+- v3 (dedicated ABS/CLIP/subrot adders, merged 3-op add): 603,071 — worse
+- v4 (hand-written Kogge-Stone unified adder + thermometer round decode): failed correctness
+- Divider loop rewrites (3 variants with shared subtractor replacing ==/>/−): 549,878–560,999 — all worse
+- Thermometer round-constant decode on v2: 563,884 — worse, reverted
+
+### 2. Highest-impact optimizations
+1. **Split shifter datapath** (~72k cost reduction): removed the opcode→shifter-input mux from the critical path by giving the adder family its own right-shifter fed directly by the round-add result.
+2. **Flattened result mux** (~39k): `(sel & data) | ...` one-hot AND-OR beats a priority case tree in both delay and mapping quality.
+3. Simple combinational decode of `d_gt/d_ge/d_lt/d_le`, `addfam_neg = op[6:3]==0011 & op[0]`, etc.
+
+### 3. What failed / regressed
+- **Duplicating arithmetic (v3)**: dedicated ABS/CLIP adders added ~48 area units and created a new bmask-decode critical path — net loss despite shorter per-op paths.
+- **Hand-written prefix adder (v4)**: three subtle bugs (wrong carry-prefix pair formulation, `{3'b000,clpx_shift}` vs upstream's implicit `bmask_b=clpx_shift` truncation to `{1'b0,clpx_shift}` in 32-bit mode, round-bit indexing) — cost many steps to debug, never beat v2.
+- **Divider restructuring**: the serial loop (`AReg→cmp→AddOut→AReg`) at ~1086ps is the delay floor; every rewrite synthesized *worse* netlists. `target_delay` 300–1200ps had zero effect on it.
+- Correctness traps found in v3: CLIP's adder computes `a+b+1` (not `a+~b+1`); `subrot` must flow through round+shift (bmask_b≠0 possible).
+
+### 4. Lessons learned / next time
+- **The critical path migrates**: after flattening the result mux, the divider's sequential loop became the floor (~1086ps × area). Further delay work on the combinational datapath was pointless; I should have pivoted earlier to **area reduction** (cost = area × delay, and delay is floored): e.g., cheaper shuffle/pack logic, sharing popcount's tree with ff_one, smaller divider registers/counters.
+- **Keep one immutable best file** (`design_v2.sv`) and experiment via edit→evaluate→revert on the working copy; this avoided losing the best result several times.
+- **Equivalence-checked refactors need exact semantics re-derivation**: upstream's segmented 36-bit adder with `1'b1` separators has subtle signed-extension semantics; copying structure verbatim first, then optimizing, is safer than re-deriving.
+- Synthesis noise is small (~±20ps); single-run A/B comparisons were reliable here.

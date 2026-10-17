@@ -1,0 +1,23 @@
+## Summary
+
+**Final state:** `starting_point.sv` passes 100% of checks with **area_delay_product = 601,985** (baseline: 645,629, a 6.7% improvement; area 448.5 vs 441.5, delay 1342ps vs 1462ps).
+
+### 1. Approaches tried
+- **target_delay sweeps** (250/500/1500ps): delay was structural (~1460ps), so sweeping only changed area/delay marginally. Default 500 was best.
+- **One-hot opcode decode + AND-OR result mux** (in `starting_point.sv`): replaced the deep priority `case` result mux with pre-decoded one-hot enables (derived from opcode bit patterns, not full 7-bit compares) gating datapath results in an AND-OR tree. PASS, small gain.
+- **Kogge-Stone parallel-prefix adders** (`la_add` module at file end, replacing yosys's mapped ripple/MAJI chains for both the 37-bit main adder and the 32-bit rounding adder): **the biggest win** — delay dropped ~120ps.
+- **Carry-select rounding adder**: replaced the serial `adder_result + round_value` adder; slightly worse (650,861) — reverted.
+- **Folding the rounding constant into operand_a via an early 32-bit adder** (relying on per-lane associativity): functionally WRONG — lane-carry blocking happens before the rounding add in the reference, so carry propagation across lanes differs. Reverted.
+
+### 2. Most impact
+The Kogge-Stone prefix adders (−43k cost) plus the one-hot result mux (−1k). Both attack the same critical path: decode → lane adder → round adder → shifter → mux.
+
+### 3. Regressions / pitfalls
+- One-hot decode was error-prone: comparison opcodes (0x00–0x27) don't decode by a single bit pattern — SLTS/SLETS collide with LES via `op[2]`; needed `op[1] && !op[3]`. EXT/EXTS/INS must be included in the shuffle/pack family. Three sim iterations were spent fixing decode.
+- The 37-bit CLIP adder needs **sign** extension of bit 35 (matching `$signed` addition), not zero extension — caught via a=0x80000000 CLIP failures.
+- Kogge-Stone requires padding to a power of two and the combine condition is `i >= 2^(l-1)`, not `(i>>(l-1))&1`.
+
+### 4. Lessons / next steps
+- Debug cycle cost is high (sim reruns on decode bugs) — decode should be table-driven or exhaustively sanity-checked before simulating.
+- `design_v2.sv` is a placeholder marker; the real optimized design lives in `starting_point.sv` (self-contained: `la_add` module appended at end).
+- Promising untried ideas: hoisting the `operand_c`-negation mux out of the vectorized adder input for CLIP (last attempted edit, string mismatch, not applied); a Brent-Kung variant (fewer cells, larger area win if delay holds); shortening the shifter→result-mux path for non-adder opcodes.

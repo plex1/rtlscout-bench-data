@@ -1,0 +1,24 @@
+## Summary
+
+**Best design: `design8.sv` — 634,178 ADP** (area 519, delay 1221 ps), beating the baseline copy `design.sv` (645,629; area 441, delay 1462 ps).
+
+### What worked
+1. **De-sharing the datapath** (the main lever): the upstream's critical path was `operator_i` → opcode mux → shared 64-bit shifter → result mux. I gave the adder family its own dedicated per-lane right shifter (`rs_a`, fed by the round-sum) and kept one upstream-style shared barrel (right-shift of bit-reversed data = left shift) for SRA/SRL/ROR/BEXT/BEXTU/SLL/BINS/BREV/div. This cut delay from 1462→1221 ps.
+2. **Cheaper divider comparator**: derived `(A==B)|((A>B)^CompInv)` from the subtractor's carry-out and zero-flag instead of two 32-bit compare trees (~15 area units saved).
+3. **One-hot FF1** (`x & -x` + priority encode) replacing the upstream's 31-node mux tree; direct `~|operand_a` for divide-by-zero.
+4. **Grouped OR result mux** instead of a deep case-based mux.
+5. **36-bit segmented adder** kept, with separator bits expressed as simple functions of the negate-type op flag and vector mode.
+
+### What failed / regressed
+- **`>>>` context bug (twice!)**: `$signed(x) >>> n` inside a conditional/mixed-width expression gets evaluated in unsigned context and becomes a logical shift. Fix: compute arith shifts as standalone continuous assigns.
+- **design5 (906k)**: materializing both arith and logical barrel outputs everywhere doubled area.
+- **design9 (658k)**: Kogge-Stone subtractor in the divider added area for no net win over the plain subtractor + carry trick.
+- **design11 (713k)**: loop-optimized divider (KS sub fed straight from registers, separate load adder) fixed the FF→FF path but moved the critical path back to the combinational `operator_i`→`result_o` chain.
+- `target_delay` experiments: 2000 ps raised ADP to 715k; 100 ps changed nothing. Default 500 ps is best.
+- Numerous functional bugs (adder separator placement, ROR `{a,a}` width, dropped result-mux terms, SHUF2 polarity) — all caught by the equivalence TB.
+
+### Lessons for next time
+- In this metric, **delay dominates ADP**; area savings only matter if they don't lengthen the critical path. The winning move is getting opcode decode *off* every datapath path.
+- Verify shift expressions under `always_comb` conditionals immediately — the `>>>` unsigned-context trap is silent and cost two eval cycles each occurrence.
+- When a loop (divider) is fixed-latency by contract, its internal microarchitecture is free to change as long as register timing matches — but combinational restructuring can backfire by shifting the global critical path; re-check the worst path after each change.
+- Start from the known-correct baseline, change one family at a time, and evaluate after every single edit.

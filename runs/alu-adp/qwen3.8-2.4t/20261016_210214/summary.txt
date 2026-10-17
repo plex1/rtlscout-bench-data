@@ -1,0 +1,23 @@
+## Session Summary — cv32e40p_alu optimization
+
+**Final: PASS, area_delay_product = 531,024** (baseline 645,629 → −18%). Final design is `design.sv` (the last edit restored exactly the eval-10 content, so carried-over best is consistent).
+
+### 1. Approaches tried
+- **Exact-width Kogge-Stone adders** (`ks_add` module in `design.sv`) for the two chained critical adders — the winner.
+- Hand Sklansky prefix adders with power-of-2 padding (worse), dedicated adder-family post-shifter (worse), MSB-flip unsigned-compare trick (worse), divider subtractor/comparator sharing (worse).
+- `target_delay` sweep (250/500/1500 ps): no effect — the design is pure combinational depth-limited; yosys maps identically.
+
+### 2. Most impactful optimization
+Replacing `$signed(adder_in_a) + $signed(adder_in_b)` (36-bit) and `adder_result + adder_round_value` (32-bit) with exact-width Kogge-Stone trees: **delay 1414→1174 ps, cost 620k→531k**. The native `+` compiled to ~68 ripple-carry stages in series (MAJ/XOR chains dominated the timing report). Key details: XOR-propagate (`P = a^b`) makes the final sum XOR free, no width padding, and bit 36 reconstructed as `co ^ a[35] ^ b[35]` to match the upstream 37-bit signed sum sign.
+
+### 3. Regressions / failures
+- **Padded prefix adder** (36→64 bits, `|`-propagate): 668k vs 645k — padding doubles prefix levels and hurts area+delay.
+- **Missing driver** (`cmp_eq`) after an edit → 1000 sim errors; always verify every signal stays assigned.
+- **6-bit context semantics**: upstream `clb_result = ff1_result - 5'd1` computed in 6 bits makes `div_shift` wrap to 0 when the divisor MSB is at bit 31; a 5-bit wrap broke the divider timing/values.
+- **Verilog ternary unsigned contagion**: `(arith ? $signed(x)>>>n : x>>n)` degenerates `>>>` to `>>`; use upstream's `{arith & msb, lane} >>> amt` pattern instead.
+- **yosys already shares logic**: the divider comparator-share and MSB-flip compare both added muxing and lost (542k/559k vs 531k).
+
+### 4. Lessons / next steps
+- On this flow, delay is the dominant lever (cost = area × true path delay); spending area on log-depth arithmetic pays off.
+- Critical path is now opcode-decode → compare/minmax/shift logic (~1174 ps). Promising next moves: prefix-carry based `A>=B` for `is_greater_vec` (done with a proper shared prefix structure, not RTL-level tricks), Brent-Kung for the round adder to reclaim area at equal depth, and `ks_add` in the divider datapath. Also try re-ordering the result mux (biggest cell delays were near the output mux) — structural changes that move mux selects earlier tend to help yosys.
+- Process: change one thing, evaluate, revert fast; keep the known-good file intact (`design.sv` at eval-10 state = best).

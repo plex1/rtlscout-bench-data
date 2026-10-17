@@ -1,0 +1,26 @@
+1. **Approaches tried**
+   - Started with the provided `starting_point.sv` as a known-correct baseline.
+   - Built a clean direct behavioral rewrite (`alu_direct.sv`) using per-lane functions and a simplified result mux. It passed after fixing the ABS adder path, but synthesized much larger/slower, so it was beaten by the original.
+   - Attempted a more aggressive custom rewrite (`alu_custom.sv`), but it failed due to unsupported function constructs/SystemVerilog lint issues and a divider-timing mismatch.
+   - The winning path was incremental editing of `starting_point.sv`.
+
+2. **What worked best / most impactful optimizations**
+   - Replacing the explicit popcount adder tree with `$countones(in_i)` reduced delay and improved cost.
+   - Simplifying the divider `div_shift` path by removing the `clb_result` indirection (`ff_no_one ? 6'd31 : ff1_result - 5'd1`) reduced area/delay slightly while preserving cycle-exact behavior.
+   - Simplifying the redundant `operand_b_eq` clip comparator.
+   - Separating the `ALU_ROR` case from the combined shift case (while keeping the original shifter datapath) produced the best final result. This last structural change dropped cost to **610734.645912464**.
+   - Target delay of around 1000–1370 ps reached the lowest measured area-delay product; 1370 ps gave a near-zero positive slack at the same cost.
+
+3. **What didn’t work or caused regressions**
+   - The clean behavioral rewrite (`alu_direct.sv`) had larger area and worse area-delay product despite passing correctness.
+   - `alu_custom.sv` failed functionally and had lint/synthesis issues; it was not useful.
+   - Directly bypassing the shifter for 32-bit ROR added duplicate rotate logic, increased area/delay, and initially also broke 16-bit ROR behavior.
+   - Removing `FL1`/`CLB` from the `shift_left` set increased delay and hurt cost, so it was reverted.
+   - Editing the divider corner-case result inside a `case` branch caused syntax errors and was abandoned.
+
+4. **Lessons learned**
+   - The best solution was not a rewrite; small, targeted changes to the upstream datapath preserved correctness and let the synthesizer exploit existing structure.
+   - Shared datapaths (shifter used by add-right-shift, bit-manip, bit-count, divider) are often better than per-operation bespoke logic.
+   - `target_delay` is a secondary knob. Sweeping it only mattered around the critical path; equivalent area-delay was observed at multiple targets.
+   - Always evaluate every change, because even minor structural edits can affect delay and area non-monotonically.
+   - The final working file is `starting_point.sv` with the incremental edits described above.

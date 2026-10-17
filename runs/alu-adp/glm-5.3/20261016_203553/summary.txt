@@ -1,0 +1,30 @@
+## Summary
+
+**Final state:** the only design that passed 100% was `starting_point.sv` itself (cost 645,629; area 441.5, delay 1462 ps against a 500 ps target). My rewrite `design.sv` was left **failing** (1001/12271 checks) with all remaining errors concentrated in the divider's cycle timing starting at vector ~#11660.
+
+### 1. Approaches tried
+
+Rewrote the ALU from scratch (`design.sv`) around these ideas:
+- **Decode-then-one-hot**: `case(1'b1)` one-hot select signals instead of a 7-bit opcode case everywhere.
+- **Per-lane add/sub with separate rounding add** (replacing the 36-bit expanded adder): `lane_sum = a ± b` per lane, then `+ {1'b0,bmask[31:1]}`.
+- **Left shifts via the right-shifter**: `reverse(a_rev >> k) = a << k`, with per-lane amount mirroring (`a8_0 = sh_left ? b[26:24] : b[2:0]`, etc.) — no barrel-rotator of the 64-bit concatenation.
+- **Custom priority-encoder tree + popcount tree** replacing the `ff_one`/`popcnt` submodules.
+- **Min/max/clip/abs** on the shared lane-compare result; CLIP/CLIPU via `lo_bound`, `is_eq_lo`, `lo_neg`.
+- **Divider**: kept upstream FSM but replaced the `==`/`>` comparators with the subtractor's carry-out (`(~|diff) | (carry ^ CompInv)`).
+
+### 2. What worked (verified fixed, in order)
+
+Left-shift-via-reverse trick (with lane-mirrored amounts, **no** complement), priority-encoder group-bit fix, PCKLO/PCKHI byte_sel (`8'b01000100`/`8'b11101110`), EXT/INS `r0_in` (`operand_a_i`, except INS 8-bit → `{4{a[7:0]}}`, 16-bit → `{2{a[15:0]}}`) and `reg_sel = vm8 ? 4'b1110 : 4'b1100`, scalar-vs-vector compare split (`is_sless = is_cmpfam & op[1] & ~op[3]` — **op[1] alone is wrong**, GES=0x0a also has bit1 set), ABS operand roles (`0 - a`, with `minmax_b = addfam`), and `cmp_sgn = ((is_minmax|is_cmpfam) & ~op[0]) | is_abs | is_clip | is_clipu` (CLIPU compares **signed**).
+
+### 3. What didn't work / regressions
+
+- Complementing the left-shift amount (wrong: identity, not complement).
+- Consecutive-duplicate concatenation `{2{x}, 2{y}}` — Verilog syntax errors (needs `{{2{x}},{2{y}}}`); cost several steps.
+- **Unresolved**: divider cycle-count mismatch. Symptom: at vector #11660 (DIVU, a=ffffffff, b=0) the *reference* was ready at poll 2 while mine wasn't, then cascading ready/result errors (e.g. #11663 DIVU 1/0 gave a stale result `000000ff`). Analysis suggests my design was still busy from an earlier div (REM #11658, a=0x0000001c) — i.e. one earlier division takes a different cycle count, and the tb's "poll until *reference* ready" then corrupts all subsequent ops. My `div_shift`, `OpB` (`a << msb_index`), and `OpBIsZero` all look analytically identical to upstream, so suspect the ABComp rewrite or a subtle `ff_none`/`p4i` case (a=0, a=0xffffffff, p4i=0 wraparound).
+
+### 4. Lessons / next steps
+
+1. **Debug the divider first, in isolation**: revert `cv32e40p_alu_div` to the *verbatim* upstream module (keep my input computation) — that splits the problem space in one eval. If it still fails, the bug is in `div_shift`/`OpB`/`p4i`; add a focused sweep over divisor bit-lengths (the tb's phase 2 does exactly this).
+2. Verilog duplication syntax and `case(1'b1)` priority interactions are error-prone — write a small self-check of decode signals before wiring 10 groups to them.
+3. Verify each spec claim against `vectors.dat`/upstream code rather than the prose (CLIPU's signed compare, EXT's r0 input, PCK byte_sel values all differed from my first reading).
+4. Once correct: the 1462 ps delay is dominated by the divider's carry-save + comparison chain and the result mux; with a 500 ps target unreachable, expect area to dominate the metric — the one-hot decode + shared shifter should already cut area substantially versus the starting point. Consider a high `target_delay` run to let Yosys minimize area once functionally correct.

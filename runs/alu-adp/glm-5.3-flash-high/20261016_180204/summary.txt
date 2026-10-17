@@ -1,0 +1,30 @@
+## Session Summary
+
+**Final result: PASS, best cost = 586,508.7 area_delay_product** (vs. 645,629.3 for the untouched starting point — a ~9% improvement), achieved in `design.sv` (the eval-#4 configuration; a marker note is in `best_586k.sv`).
+
+### 1. Approaches tried and what worked best
+
+- **Baseline evaluation** of `starting_point.sv`: 645,629 (area 441.5, delay 1462 ps @ 500 ps target).
+- **Round-adder elimination** (the winner): the upstream design computes the per-lane add/sub in a 36-bit lane adder, then adds the rounding constant `bmask>>1` with a *second, series* 32-bit adder before the shifter. I replaced that second adder with a Kogge-Stone parallel-prefix adder whose B operand is a decoded run-of-ones mask (`(~(1<<k_lo)+1) & ((1<<k_hi)|((1<<k_hi)-1))`, clamped to bit 30). This cut the critical path from 1462 → 1350 ps and slightly reduced area.
+- **Divider comparator removal**: the divider's 32-bit `A>B`/`A==B` comparator was replaced by carry-out/zero flags derived from the divider's own shared add/sub adder (the comparator is only consumed in DIVIDE state, where that adder computes exactly `A−B`). Removed a full 32-bit adder+comparator from the divider.
+- **BREV datapath dedup**: removed a redundant 32-bit `operand_a_neg_rev` wire (reused `~operand_a_rev`).
+
+### 2. Highest-impact optimizations
+
+1. Removing the series 32-bit rounding adder (delay −112 ps) — the single biggest lever, matching my path analysis that the adder→adder→shifter chain dominated.
+2. The divider comparator sharing (area + critical-path inside the divider's per-cycle loop).
+3. Cost stayed flat across target_delay values 500/1350/2200 ps (586.5k/586.5k/655.7k), so RTL structure — not the synthesis constraint — was the real knob, as expected.
+
+### 3. What didn't work / regressed
+
+- **Prefix-AND/prefix-OR "cheap adder" for the round constant**: my first two formulations were mathematically wrong (carry must stop at the *first* 0 inside the run, not at the run's end; and the constant is `bmask>>1`, which *shortens* the run). Several eval cycles were burned on wrong carry semantics and on a clamp bug (`top6 = min(sum6-1, 30)` — bit-5 check misses sum6m1==31). The correct formulation passed but cost 604–639k: serial 31-level prefix trees were slower, and Kogge-Stone versions were bigger/slower than the simple decode+KS-adder.
+- **Mask-sharing "wiring" idea**: computing the round mask as `{1'b0, bmask[31:1]}` from the shared bitmanip bmask chain looked free but put the two mask shifters in series with the prefix network → 648.9k regression.
+- **Single-shifter / thermometer-decode mask variants**: 621.7k and 663.5k — the 6-bit-adder+clamp decode was genuinely the cheapest mask source.
+- A stray duplicated declaration (leftover old block) caused one lint-fail eval; harmless but wasteful.
+
+### 4. Lessons learned
+
+- **Ground-truth the semantics first**: deriving the exact carry behavior of the upstream lane adder (and testing edge cases like `bmask_b=0`, `bmask_a+bmask_b=32`) on paper *before* writing RTL would have saved ~5 failed evals. One cycle of the 36-bit adder's structure was misread (carry chain vs. lane isolation) and that propagated through three wrong designs.
+- **Yosys results defy simple gate-count intuition**: a "just AND/OR trees" network lost to a generic prefix adder with a decoded operand. Always A/B-test; don't assume the cleverer formulation wins.
+- **Edit hygiene**: use one self-contained block per optimization, replace it atomically, and verify the file after edits — leftover fragments cost two evals.
+- If continuing: the remaining critical path is still opcode-decode → operand muxes → adder → prefix adder → shifter → result mux; the next promising lever would be clock-gating the round-adder network entirely (it's only needed for 4 of 57 opcodes) or moving the mux that selects `adder_result` vs `adder_round_result` *ahead* of the prefix network so the KS tree only computes when `is_round_op`.

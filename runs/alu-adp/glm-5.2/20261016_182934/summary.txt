@@ -1,0 +1,24 @@
+## Summary
+
+### What Worked Best
+The best result (**612,919 area_delay_product**, down from baseline 645,629, ~5% reduction) came from `design.sv` with three key changes:
+1. **`$countones` for popcount** — Replacing the hand-written 5-level adder tree with `assign result_o = $countones(in_i)` cut both area and delay significantly (645k→616k alone).
+2. **Function-based bit-reverse in divider** — Replaced the `generate`-based `ResReg_DP_rev` with a `bit_rev_f` function, shaving a small amount of area (616k→613k).
+3. **Keeping all other logic structurally identical to the starting point** — The original shuffle/pack muxing, comparison tree, and shifter datapath were already well-optimized.
+
+### What Had the Most Impact
+- `$countones` was by far the single biggest win (~30k reduction, ~5%).
+- The divider bit-reverse function saved ~3k.
+- Using `target_delay=1381` (matching the achieved delay) confirmed the synthesis was already at its natural critical path.
+
+### What Didn't Work
+- **Rewriting shuffle with variable part-selects** (`operand_a_i[8*idx +: 8]`) increased area significantly (645k→684k) — synthesizes worse than fixed 4:1 muxes.
+- **Simplifying ff_one with a for-loop priority encoder** — slower than the original tree structure.
+- **Adding direct 32-bit comparisons** (`$signed(a) > $signed(b)`) for scalar mode — added duplicate comparator hardware instead of reusing byte-level logic.
+- **Higher target_delay (1500–2000)** — increased delay more than it reduced area, worsening the product.
+
+### Lessons Learned
+1. **Behavioral SystemVerilog operators** (`$countones`, `$signed` comparisons) can synthesize better than hand-built trees on modern Yosys flows.
+2. **Preserve existing well-optimized structures** — the CV32E40P datapath was already carefully crafted; targeted micro-changes beat wholesale rewrites.
+3. **Variable part-selects** synthesize poorly compared to explicit case/mux logic in this flow.
+4. The critical path (~1380–1460ps) is fundamentally limited by the shifter→comparison→result-mux chain; further gains would require architectural changes like pipelining (forbidden by the combinational contract) or deeper operator sharing.

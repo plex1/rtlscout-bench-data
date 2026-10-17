@@ -1,0 +1,1138 @@
+// CV32E40P ALU - optimized v4
+// - unified hand-written Kogge-Stone prefix adder for the whole adder family
+//   (32-bit mode: single merged a+-b+round carry chain; 16/8-bit: boundary
+//   carry kill/force + separate round add)
+// - fast thermometer-based rounding-constant decode
+// - split operand-fed / adder-fed shifters, one-hot AND-OR result mux
+`timescale 1ns/1ps
+
+module cv32e40p_alu
+(
+    input logic               clk,
+    input logic               rst_n,
+    input logic               enable_i,
+    input logic [ 6:0] operator_i,
+    input logic        [31:0] operand_a_i,
+    input logic        [31:0] operand_b_i,
+    input logic        [31:0] operand_c_i,
+
+    input logic [1:0] vector_mode_i,
+    input logic [4:0] bmask_a_i,
+    input logic [4:0] bmask_b_i,
+    input logic [1:0] imm_vec_ext_i,
+
+    input logic       is_clpx_i,
+    input logic       is_subrot_i,
+    input logic [1:0] clpx_shift_i,
+
+    output logic [31:0] result_o,
+    output logic        comparison_result_o,
+
+    output logic ready_o,
+    input  logic ex_ready_i
+);
+
+  localparam logic [6:0] ALU_ADD = 7'b0011000;
+  localparam logic [6:0] ALU_SUB = 7'b0011001;
+  localparam logic [6:0] ALU_XOR = 7'b0101111;
+  localparam logic [6:0] ALU_OR = 7'b0101110;
+  localparam logic [6:0] ALU_AND = 7'b0010101;
+  localparam logic [6:0] ALU_SRA = 7'b0100100;
+  localparam logic [6:0] ALU_SRL = 7'b0100101;
+  localparam logic [6:0] ALU_ROR = 7'b0100110;
+  localparam logic [6:0] ALU_SLL = 7'b0100111;
+  localparam logic [6:0] ALU_BEXT = 7'b0101000;
+  localparam logic [6:0] ALU_BEXTU = 7'b0101001;
+  localparam logic [6:0] ALU_BINS = 7'b0101010;
+  localparam logic [6:0] ALU_BCLR = 7'b0101011;
+  localparam logic [6:0] ALU_BSET = 7'b0101100;
+  localparam logic [6:0] ALU_BREV = 7'b1001001;
+  localparam logic [6:0] ALU_FF1 = 7'b0110110;
+  localparam logic [6:0] ALU_FL1 = 7'b0110111;
+  localparam logic [6:0] ALU_CNT = 7'b0110100;
+  localparam logic [6:0] ALU_CLB = 7'b0110101;
+  localparam logic [6:0] ALU_EXTS = 7'b0111110;
+  localparam logic [6:0] ALU_EXT = 7'b0111111;
+  localparam logic [6:0] ALU_EQ = 7'b0001100;
+  localparam logic [6:0] ALU_NE = 7'b0001101;
+  localparam logic [6:0] ALU_ABS = 7'b0010100;
+  localparam logic [6:0] ALU_CLIP = 7'b0010110;
+  localparam logic [6:0] ALU_CLIPU = 7'b0010111;
+  localparam logic [6:0] ALU_INS = 7'b0101101;
+  localparam logic [6:0] ALU_SHUF = 7'b0111010;
+  localparam logic [6:0] ALU_SHUF2 = 7'b0111011;
+  localparam logic [6:0] ALU_PCKLO = 7'b0111000;
+  localparam logic [6:0] ALU_PCKHI = 7'b0111001;
+  localparam logic [1:0] VEC_MODE32 = 2'b00;
+  localparam logic [1:0] VEC_MODE16 = 2'b10;
+  localparam logic [1:0] VEC_MODE8 = 2'b11;
+
+  logic [31:0] operand_a_rev;
+  assign operand_a_rev = {operand_a_i[0], operand_a_i[1], operand_a_i[2], operand_a_i[3],
+                          operand_a_i[4], operand_a_i[5], operand_a_i[6], operand_a_i[7],
+                          operand_a_i[8], operand_a_i[9], operand_a_i[10], operand_a_i[11],
+                          operand_a_i[12], operand_a_i[13], operand_a_i[14], operand_a_i[15],
+                          operand_a_i[16], operand_a_i[17], operand_a_i[18], operand_a_i[19],
+                          operand_a_i[20], operand_a_i[21], operand_a_i[22], operand_a_i[23],
+                          operand_a_i[24], operand_a_i[25], operand_a_i[26], operand_a_i[27],
+                          operand_a_i[28], operand_a_i[29], operand_a_i[30], operand_a_i[31]};
+
+  logic [ 5:0] div_shift;
+  logic        div_valid;
+  logic        is_divop;
+  logic [31:0] bmask;
+
+  assign is_divop = (operator_i[6:2] == 5'b01100);
+  assign div_valid = enable_i & is_divop;
+
+  logic is_addfam;
+  assign is_addfam = (operator_i[6:3] == 4'b0011);
+
+  logic [31:0] operand_b_neg;
+  assign operand_b_neg = ~operand_b_i;
+
+  logic is_abs, is_clip, is_clipu, addfam_neg, is_roundop, is_subrot;
+  assign is_abs     = (operator_i == ALU_ABS);
+  assign is_clip    = (operator_i == ALU_CLIP);
+  assign is_clipu   = (operator_i == ALU_CLIPU);
+  assign addfam_neg = is_addfam & operator_i[0];
+  assign is_roundop = is_addfam & operator_i[2];
+  assign is_subrot  = is_subrot_i;
+
+  //////////////////////////////////////////////////////////////
+  // Rounding constant decode: round[i] = 1 iff bmb <= i+1 <= bmb+bma
+  // (round = bmask >> 1, bmask = run-of-(bma+1)-ones << bmb)
+  //////////////////////////////////////////////////////////////
+  logic [32:1] le_bmb;      // le_bmb[k] = (bmb <= k)
+  logic [32:1] ge_bmabmb;   // ge_bmabmb[k] = (bmb + bma >= k)
+  logic [5:0]  bma_bmb_sum;
+  logic [31:0] round_value;
+
+  assign bma_bmb_sum = {1'b0, bmask_a_i} + {1'b0, bmask_b_i};
+
+  generate
+    genvar kk;
+    for (kk = 1; kk <= 32; kk++) begin : gen_thermo
+      if (kk == 32) assign le_bmb[kk] = 1'b0;  // bmb is 5 bits, max 31, never 32
+      else assign le_bmb[kk] = (bmask_b_i <= kk[4:0]);
+      assign ge_bmabmb[kk] = (bma_bmb_sum >= kk[5:0]);
+    end
+  endgenerate
+
+  generate
+    genvar ri;
+    for (ri = 0; ri < 32; ri++) begin : gen_round
+      assign round_value[ri] = le_bmb[ri+1] & ge_bmabmb[ri+1];
+    end
+  endgenerate
+
+  // bmask for bit-manipulation ops (exact upstream formula)
+  logic [31:0] bmask_first, bmask_inv;
+  assign bmask_first = {32'hFFFFFFFE} << bmask_a_i;
+  assign bmask       = (~bmask_first) << bmask_b_i;
+  assign bmask_inv   = ~bmask;
+
+  //////////////////////////////////////////////////////////////
+  // Unified prefix adder (Kogge-Stone) for adder family/ABS/CLIP/subrot
+  //   computes x + y + z with carry-in F0 at bit 0 and forced/killed
+  //   carries at lane boundaries (16/8-bit modes).
+  //   z = round_value only for rounding ops in 32-bit mode.
+  //////////////////////////////////////////////////////////////
+  logic [31:0] pa_z;
+  logic        pa_f0, pa_fb;
+  logic        pa_ovr7, pa_ovr15, pa_ovr23;
+
+  logic [31:0] pa_x_w, pa_y_w;
+  assign pa_x_w = is_subrot ? {operand_b_i[15:0], operand_a_i[31:16]} :
+                  (is_abs ? ~operand_a_i : operand_a_i);
+  assign pa_y_w = is_subrot ? ~{operand_a_i[15:0], operand_b_i[31:16]} :
+                  ((addfam_neg) ? operand_b_neg : operand_b_i);
+
+  assign pa_z = (is_roundop & (vector_mode_i == VEC_MODE32)) ? round_value : 32'b0;
+  assign pa_f0 = addfam_neg | is_abs | is_clip;
+  assign pa_fb = addfam_neg | is_abs;  // boundary carry: 1 for sub/ABS, 0 for add
+
+  logic lane_add;
+  assign lane_add = is_addfam | is_abs;  // CLIP is 32-bit only: no boundary overrides
+  assign pa_ovr7  = lane_add & (vector_mode_i == VEC_MODE8);
+  assign pa_ovr15 = lane_add & (vector_mode_i != VEC_MODE32);
+  assign pa_ovr23 = lane_add & (vector_mode_i == VEC_MODE8);
+
+  logic [31:0] pa_t, pa_m;
+
+  assign pa_t = pa_x_w ^ pa_y_w ^ pa_z;
+  assign pa_m = (pa_x_w & pa_y_w) | (pa_x_w & pa_z) | (pa_y_w & pa_z);
+
+  // carry into bit i+1 = m_i | (t_i & carry into bit i); prefix over (m, t)
+  // overrides at bit 0 (carry-in f0) and at lane boundaries
+  logic [31:0] g0, p0;
+  assign g0 = {pa_m[31:24],
+               pa_ovr23 ? pa_fb   : pa_m[23],
+               pa_m[22:16],
+               pa_ovr15 ? pa_fb   : pa_m[15],
+               pa_m[14:8],
+               pa_ovr7  ? pa_fb   : pa_m[7],
+               pa_m[6:1],
+               pa_m[0] | (pa_t[0] & pa_f0)};
+  assign p0 = {pa_t[31:24],
+               pa_ovr23 ? 1'b0    : pa_t[23],
+               pa_t[22:16],
+               pa_ovr15 ? 1'b0    : pa_t[15],
+               pa_t[14:8],
+               pa_ovr7  ? 1'b0    : pa_t[7],
+               pa_t[6:1],
+               pa_t[0]};
+
+  logic [31:0] gk1, pk1, gk2, pk2, gk3, pk3, gk4, pk4, gk5, pk5;
+  // Kogge-Stone levels
+  assign gk1 = {g0[31] | (p0[31] & g0[30]), g0[30] | (p0[30] & g0[29]),
+                g0[29] | (p0[29] & g0[28]), g0[28] | (p0[28] & g0[27]),
+                g0[27] | (p0[27] & g0[26]), g0[26] | (p0[26] & g0[25]),
+                g0[25] | (p0[25] & g0[24]), g0[24] | (p0[24] & g0[23]),
+                g0[23] | (p0[23] & g0[22]), g0[22] | (p0[22] & g0[21]),
+                g0[21] | (p0[21] & g0[20]), g0[20] | (p0[20] & g0[19]),
+                g0[19] | (p0[19] & g0[18]), g0[18] | (p0[18] & g0[17]),
+                g0[17] | (p0[17] & g0[16]), g0[16] | (p0[16] & g0[15]),
+                g0[15] | (p0[15] & g0[14]), g0[14] | (p0[14] & g0[13]),
+                g0[13] | (p0[13] & g0[12]), g0[12] | (p0[12] & g0[11]),
+                g0[11] | (p0[11] & g0[10]), g0[10] | (p0[10] & g0[9]),
+                g0[9]  | (p0[9]  & g0[8]),  g0[8]  | (p0[8]  & g0[7]),
+                g0[7]  | (p0[7]  & g0[6]),  g0[6]  | (p0[6]  & g0[5]),
+                g0[5]  | (p0[5]  & g0[4]),  g0[4]  | (p0[4]  & g0[3]),
+                g0[3]  | (p0[3]  & g0[2]),  g0[2]  | (p0[2]  & g0[1]),
+                g0[1]  | (p0[1]  & g0[0]),  g0[0]};
+  assign pk1 = {p0[31] & p0[30], p0[30] & p0[29], p0[29] & p0[28], p0[28] & p0[27],
+                p0[27] & p0[26], p0[26] & p0[25], p0[25] & p0[24], p0[24] & p0[23],
+                p0[23] & p0[22], p0[22] & p0[21], p0[21] & p0[20], p0[20] & p0[19],
+                p0[19] & p0[18], p0[18] & p0[17], p0[17] & p0[16], p0[16] & p0[15],
+                p0[15] & p0[14], p0[14] & p0[13], p0[13] & p0[12], p0[12] & p0[11],
+                p0[11] & p0[10], p0[10] & p0[9],  p0[9]  & p0[8],  p0[8]  & p0[7],
+                p0[7]  & p0[6],  p0[6]  & p0[5],  p0[5]  & p0[4],  p0[4]  & p0[3],
+                p0[3]  & p0[2],  p0[2]  & p0[1],  p0[1]  & p0[0],  p0[0]};
+
+  assign gk2 = {gk1[31] | (pk1[31] & gk1[29]), gk1[30] | (pk1[30] & gk1[28]),
+                gk1[29] | (pk1[29] & gk1[27]), gk1[28] | (pk1[28] & gk1[26]),
+                gk1[27] | (pk1[27] & gk1[25]), gk1[26] | (pk1[26] & gk1[24]),
+                gk1[25] | (pk1[25] & gk1[23]), gk1[24] | (pk1[24] & gk1[22]),
+                gk1[23] | (pk1[23] & gk1[21]), gk1[22] | (pk1[22] & gk1[20]),
+                gk1[21] | (pk1[21] & gk1[19]), gk1[20] | (pk1[20] & gk1[18]),
+                gk1[19] | (pk1[19] & gk1[17]), gk1[18] | (pk1[18] & gk1[16]),
+                gk1[17] | (pk1[17] & gk1[15]), gk1[16] | (pk1[16] & gk1[14]),
+                gk1[15] | (pk1[15] & gk1[13]), gk1[14] | (pk1[14] & gk1[12]),
+                gk1[13] | (pk1[13] & gk1[11]), gk1[12] | (pk1[12] & gk1[10]),
+                gk1[11] | (pk1[11] & gk1[9]),  gk1[10] | (pk1[10] & gk1[8]),
+                gk1[9]  | (pk1[9]  & gk1[7]),  gk1[8]  | (pk1[8]  & gk1[6]),
+                gk1[7]  | (pk1[7]  & gk1[5]),  gk1[6]  | (pk1[6]  & gk1[4]),
+                gk1[5]  | (pk1[5]  & gk1[3]),  gk1[4]  | (pk1[4]  & gk1[2]),
+                gk1[3]  | (pk1[3]  & gk1[1]),  gk1[2]  | (pk1[2]  & gk1[0]),
+                gk1[1], gk1[0]};
+  assign pk2 = {pk1[31] & pk1[29], pk1[30] & pk1[28], pk1[29] & pk1[27], pk1[28] & pk1[26],
+                pk1[27] & pk1[25], pk1[26] & pk1[24], pk1[25] & pk1[23], pk1[24] & pk1[22],
+                pk1[23] & pk1[21], pk1[22] & pk1[20], pk1[21] & pk1[19], pk1[20] & pk1[18],
+                pk1[19] & pk1[17], pk1[18] & pk1[16], pk1[17] & pk1[15], pk1[16] & pk1[14],
+                pk1[15] & pk1[13], pk1[14] & pk1[12], pk1[13] & pk1[11], pk1[12] & pk1[10],
+                pk1[11] & pk1[9],  pk1[10] & pk1[8],  pk1[9]  & pk1[7],  pk1[8]  & pk1[6],
+                pk1[7]  & pk1[5],  pk1[6]  & pk1[4],  pk1[5]  & pk1[3],  pk1[4]  & pk1[2],
+                pk1[3]  & pk1[1],  pk1[2]  & pk1[0],  pk1[1], pk1[0]};
+
+  assign gk3 = {gk2[31] | (pk2[31] & gk2[27]), gk2[30] | (pk2[30] & gk2[26]),
+                gk2[29] | (pk2[29] & gk2[25]), gk2[28] | (pk2[28] & gk2[24]),
+                gk2[27] | (pk2[27] & gk2[23]), gk2[26] | (pk2[26] & gk2[22]),
+                gk2[25] | (pk2[25] & gk2[21]), gk2[24] | (pk2[24] & gk2[20]),
+                gk2[23] | (pk2[23] & gk2[19]), gk2[22] | (pk2[22] & gk2[18]),
+                gk2[21] | (pk2[21] & gk2[17]), gk2[20] | (pk2[20] & gk2[16]),
+                gk2[19] | (pk2[19] & gk2[15]), gk2[18] | (pk2[18] & gk2[14]),
+                gk2[17] | (pk2[17] & gk2[13]), gk2[16] | (pk2[16] & gk2[12]),
+                gk2[15] | (pk2[15] & gk2[11]), gk2[14] | (pk2[14] & gk2[10]),
+                gk2[13] | (pk2[13] & gk2[9]),  gk2[12] | (pk2[12] & gk2[8]),
+                gk2[11] | (pk2[11] & gk2[7]),  gk2[10] | (pk2[10] & gk2[6]),
+                gk2[9]  | (pk2[9]  & gk2[5]),  gk2[8]  | (pk2[8]  & gk2[4]),
+                gk2[7], gk2[6], gk2[5], gk2[4], gk2[3], gk2[2], gk2[1], gk2[0]};
+  assign pk3 = {pk2[31] & pk2[27], pk2[30] & pk2[26], pk2[29] & pk2[25], pk2[28] & pk2[24],
+                pk2[27] & pk2[23], pk2[26] & pk2[22], pk2[25] & pk2[21], pk2[24] & pk2[20],
+                pk2[23] & pk2[19], pk2[22] & pk2[18], pk2[21] & pk2[17], pk2[20] & pk2[16],
+                pk2[19] & pk2[15], pk2[18] & pk2[14], pk2[17] & pk2[13], pk2[16] & pk2[12],
+                pk2[15] & pk2[11], pk2[14] & pk2[10], pk2[13] & pk2[9],  pk2[12] & pk2[8],
+                pk2[11] & pk2[7],  pk2[10] & pk2[6],  pk2[9]  & pk2[5],  pk2[8]  & pk2[4],
+                pk2[7], pk2[6], pk2[5], pk2[4], pk2[3], pk2[2], pk2[1], pk2[0]};
+
+  assign gk4 = {gk3[31] | (pk3[31] & gk3[23]), gk3[30] | (pk3[30] & gk3[22]),
+                gk3[29] | (pk3[29] & gk3[21]), gk3[28] | (pk3[28] & gk3[20]),
+                gk3[27] | (pk3[27] & gk3[19]), gk3[26] | (pk3[26] & gk3[18]),
+                gk3[25] | (pk3[25] & gk3[17]), gk3[24] | (pk3[24] & gk3[16]),
+                gk3[23] | (pk3[23] & gk3[15]), gk3[22] | (pk3[22] & gk3[14]),
+                gk3[21] | (pk3[21] & gk3[13]), gk3[20] | (pk3[20] & gk3[12]),
+                gk3[19] | (pk3[19] & gk3[11]), gk3[18] | (pk3[18] & gk3[10]),
+                gk3[17] | (pk3[17] & gk3[9]),  gk3[16] | (pk3[16] & gk3[8]),
+                gk3[15], gk3[14], gk3[13], gk3[12], gk3[11], gk3[10], gk3[9], gk3[8],
+                gk3[7], gk3[6], gk3[5], gk3[4], gk3[3], gk3[2], gk3[1], gk3[0]};
+  assign pk4 = {pk3[31] & pk3[23], pk3[30] & pk3[22], pk3[29] & pk3[21], pk3[28] & pk3[20],
+                pk3[27] & pk3[19], pk3[26] & pk3[18], pk3[25] & pk3[17], pk3[24] & pk3[16],
+                pk3[23] & pk3[15], pk3[22] & pk3[14], pk3[21] & pk3[13], pk3[20] & pk3[12],
+                pk3[19] & pk3[11], pk3[18] & pk3[10], pk3[17] & pk3[9],  pk3[16] & pk3[8],
+                pk3[15], pk3[14], pk3[13], pk3[12], pk3[11], pk3[10], pk3[9], pk3[8],
+                pk3[7], pk3[6], pk3[5], pk3[4], pk3[3], pk3[2], pk3[1], pk3[0]};
+
+  assign gk5 = {gk4[31] | (pk4[31] & gk4[15]), gk4[30] | (pk4[30] & gk4[14]),
+                gk4[29] | (pk4[29] & gk4[13]), gk4[28] | (pk4[28] & gk4[12]),
+                gk4[27] | (pk4[27] & gk4[11]), gk4[26] | (pk4[26] & gk4[10]),
+                gk4[25] | (pk4[25] & gk4[9]),  gk4[24] | (pk4[24] & gk4[8]),
+                gk4[23] | (pk4[23] & gk4[7]),  gk4[22] | (pk4[22] & gk4[6]),
+                gk4[21] | (pk4[21] & gk4[5]),  gk4[20] | (pk4[20] & gk4[4]),
+                gk4[19] | (pk4[19] & gk4[3]),  gk4[18] | (pk4[18] & gk4[2]),
+                gk4[17] | (pk4[17] & gk4[1]),  gk4[16] | (pk4[16] & gk4[0]),
+                gk4[15], gk4[14], gk4[13], gk4[12], gk4[11], gk4[10], gk4[9], gk4[8],
+                gk4[7], gk4[6], gk4[5], gk4[4], gk4[3], gk4[2], gk4[1], gk4[0]};
+
+  logic [31:0] adder_sum;
+  logic        adder_cout;
+  assign adder_cout = gk5[31];
+  assign adder_sum  = pa_t ^ {gk5[30:0], pa_f0};
+
+  // rounding for 16/8-bit modes (full 32-bit add, carry crosses lanes)
+  logic [31:0] adder_round_result;
+  assign adder_round_result = (vector_mode_i == VEC_MODE32) ? adder_sum :
+                                                              (adder_sum + round_value);
+
+  // CLIP overflow flag: carry out of the 32-bit a+b+1
+  logic clip_cout;
+  assign clip_cout = adder_cout;
+
+  //////////////////////////////////////////////////////////////
+  // Shifter A: operand-fed (shift ops, bit-manip, div prep)
+  //////////////////////////////////////////////////////////////
+  logic        shA_left;
+  logic        shA_arith;
+  logic [31:0] shA_amt, shA_amt_left, shA_amt_int, shA_op;
+  logic [31:0] shA_right, shA_leftres, shA_result;
+  logic [63:0] shA_op64;
+
+  assign shA_left = (operator_i == ALU_SLL) || (operator_i == ALU_BINS) ||
+                    (operator_i == ALU_BREV) || is_divop;
+  assign shA_arith = (operator_i == ALU_SRA) || (operator_i == ALU_BEXT);
+
+  assign shA_op = shA_left ? operand_a_rev : operand_a_i;
+  assign shA_amt = div_valid ? {26'b0, div_shift} : operand_b_i;
+
+  always_comb begin
+    case (vector_mode_i)
+      VEC_MODE16: begin
+        shA_amt_left[15:0]  = shA_amt[31:16];
+        shA_amt_left[31:16] = shA_amt[15:0];
+      end
+      VEC_MODE8: begin
+        shA_amt_left[7:0]   = shA_amt[31:24];
+        shA_amt_left[15:8]  = shA_amt[23:16];
+        shA_amt_left[23:16] = shA_amt[15:8];
+        shA_amt_left[31:24] = shA_amt[7:0];
+      end
+      default: begin
+        shA_amt_left[31:0] = shA_amt[31:0];
+      end
+    endcase
+  end
+
+  assign shA_amt_int = shA_left ? shA_amt_left : shA_amt;
+
+  assign shA_op64 = (operator_i == ALU_ROR) ? {shA_op, shA_op} :
+                    {{32{shA_arith & shA_op[31]}}, shA_op};
+
+  always_comb begin
+    case (vector_mode_i)
+      VEC_MODE16: begin
+        shA_right[31:16] = $signed({shA_arith & shA_op[31], shA_op[31:16]}) >>> shA_amt_int[19:16];
+        shA_right[15:0]  = $signed({shA_arith & shA_op[15], shA_op[15:0]}) >>> shA_amt_int[3:0];
+      end
+      VEC_MODE8: begin
+        shA_right[31:24] = $signed({shA_arith & shA_op[31], shA_op[31:24]}) >>> shA_amt_int[26:24];
+        shA_right[23:16] = $signed({shA_arith & shA_op[23], shA_op[23:16]}) >>> shA_amt_int[18:16];
+        shA_right[15:8]  = $signed({shA_arith & shA_op[15], shA_op[15:8]}) >>> shA_amt_int[10:8];
+        shA_right[7:0]   = $signed({shA_arith & shA_op[7], shA_op[7:0]}) >>> shA_amt_int[2:0];
+      end
+      default: begin
+        shA_right = shA_op64 >> shA_amt_int[4:0];
+      end
+    endcase
+  end
+
+  genvar j;
+  generate
+    for (j = 0; j < 32; j++) begin : gen_shA_left_result
+      assign shA_leftres[j] = shA_right[31-j];
+    end
+  endgenerate
+
+  assign shA_result = shA_left ? shA_leftres : shA_right;
+
+  //////////////////////////////////////////////////////////////
+  // Shifter B: adder-fed (adder family right shift)
+  //////////////////////////////////////////////////////////////
+  logic        shB_arith;
+  logic [4:0]  shB_amt;
+  logic [31:0] shB_right;
+  logic [63:0] shB_op64;
+
+  assign shB_arith = ~operator_i[1];  // ADD/SUB/ADDR/SUBR arith; U variants logical
+  assign shB_amt = is_clpx_i ? {1'b0, clpx_shift_i} : bmask_b_i;
+
+  assign shB_op64 = {{32{shB_arith & adder_round_result[31]}}, adder_round_result};
+
+  always_comb begin
+    case (vector_mode_i)
+      VEC_MODE16: begin
+        shB_right[31:16] = $signed({shB_arith & adder_round_result[31], adder_round_result[31:16]}) >>> shB_amt[3:0];
+        shB_right[15:0]  = $signed({shB_arith & adder_round_result[15], adder_round_result[15:0]}) >>> shB_amt[3:0];
+      end
+      VEC_MODE8: begin
+        shB_right[31:24] = $signed({shB_arith & adder_round_result[31], adder_round_result[31:24]}) >>> shB_amt[2:0];
+        shB_right[23:16] = $signed({shB_arith & adder_round_result[23], adder_round_result[23:16]}) >>> shB_amt[2:0];
+        shB_right[15:8]  = $signed({shB_arith & adder_round_result[15], adder_round_result[15:8]}) >>> shB_amt[2:0];
+        shB_right[7:0]   = $signed({shB_arith & adder_round_result[7], adder_round_result[7:0]}) >>> shB_amt[2:0];
+      end
+      default: begin
+        shB_right = shB_op64 >> shB_amt[4:0];
+      end
+    endcase
+  end
+
+  //////////////////////////////////////////////////////////////
+  // Comparisons
+  //////////////////////////////////////////////////////////////
+  logic [ 3:0] is_equal;
+  logic [ 3:0] is_greater;
+
+  logic [ 3:0] cmp_signed;
+  logic [ 3:0] is_equal_vec;
+  logic [ 3:0] is_greater_vec;
+  logic [31:0] operand_b_eq;
+  logic        is_equal_clip;
+
+  assign operand_b_eq = is_clipu ? '0 : operand_b_neg;
+  assign is_equal_clip = operand_a_i == operand_b_eq;
+
+  always_comb begin
+    cmp_signed = 4'b0;
+    unique case (operator_i)
+      7'b0001000, 7'b0001010, 7'b0000000, 7'b0000100,  // GTS GES LTS LES
+      7'b0000010, 7'b0000110,                           // SLTS SLETS
+      ALU_ABS, ALU_CLIP, ALU_CLIPU,
+      7'b0010000, 7'b0010010: begin                     // MIN MAX
+        case (vector_mode_i)
+          VEC_MODE8:  cmp_signed[3:0] = 4'b1111;
+          VEC_MODE16: cmp_signed[3:0] = 4'b1010;
+          default:    cmp_signed[3:0] = 4'b1000;
+        endcase
+      end
+      default: ;
+    endcase
+  end
+
+  genvar i;
+  generate
+    for (i = 0; i < 4; i++) begin : gen_is_vec
+      assign is_equal_vec[i] = (operand_a_i[8*i+7:8*i] == operand_b_i[8*i+7:i*8]);
+      assign is_greater_vec[i] = $signed(
+          {operand_a_i[8*i+7] & cmp_signed[i], operand_a_i[8*i+7:8*i]}
+      ) > $signed(
+          {operand_b_i[8*i+7] & cmp_signed[i], operand_b_i[8*i+7:i*8]}
+      );
+    end
+  endgenerate
+
+  always_comb begin
+    is_equal[3:0] = {4{is_equal_vec[3] & is_equal_vec[2] & is_equal_vec[1] & is_equal_vec[0]}};
+    is_greater[3:0] = {4{is_greater_vec[3] | (is_equal_vec[3] & (is_greater_vec[2]
+                                            | (is_equal_vec[2] & (is_greater_vec[1]
+                                             | (is_equal_vec[1] & (is_greater_vec[0]))))))}};
+
+    case (vector_mode_i)
+      VEC_MODE16: begin
+        is_equal[1:0]   = {2{is_equal_vec[0] & is_equal_vec[1]}};
+        is_equal[3:2]   = {2{is_equal_vec[2] & is_equal_vec[3]}};
+        is_greater[1:0] = {2{is_greater_vec[1] | (is_equal_vec[1] & is_greater_vec[0])}};
+        is_greater[3:2] = {2{is_greater_vec[3] | (is_equal_vec[3] & is_greater_vec[2])}};
+      end
+      VEC_MODE8: begin
+        is_equal[3:0]   = is_equal_vec[3:0];
+        is_greater[3:0] = is_greater_vec[3:0];
+      end
+      default: ;
+    endcase
+  end
+
+  logic [3:0] cmp_result;
+  logic d_eq, d_ne, d_gt, d_ge, d_lt, d_le;
+
+  assign d_eq = (operator_i == ALU_EQ);
+  assign d_ne = (operator_i == ALU_NE);
+  assign d_gt = (operator_i[6:2] == 5'b00010) & ~operator_i[1];  // GTS/GTU
+  assign d_ge = (operator_i[6:2] == 5'b00010) & operator_i[1];   // GES/GEU
+  assign d_lt = (operator_i[6:2] == 5'b00000);                   // LTS/LTU/SLTS/SLTU
+  assign d_le = (operator_i[6:2] == 5'b00001);                   // LES/LEU/SLETS/SLETU
+
+  assign cmp_result = ({4{d_eq}} & is_equal)
+                    | ({4{d_ne}} & ~is_equal)
+                    | ({4{d_gt}} & is_greater)
+                    | ({4{d_ge}} & (is_greater | is_equal))
+                    | ({4{d_lt}} & ~(is_greater | is_equal))
+                    | ({4{d_le}} & ~is_greater);
+
+  assign comparison_result_o = cmp_result[3];
+
+  // min/max/abs
+  logic [31:0] result_minmax;
+  logic [ 3:0] sel_minmax;
+  logic        do_min;
+  logic [31:0] minmax_b;
+
+  assign minmax_b = is_abs ? adder_round_result : operand_b_i;
+
+  assign do_min   = ((operator_i[6:2] == 5'b00100) & ~operator_i[1]) |  // MIN/MINU
+                    ((operator_i[6:2] == 5'b00101) & operator_i[1]);    // CLIP/CLIPU
+
+  assign sel_minmax[3:0] = is_greater ^ {4{do_min}};
+
+  assign result_minmax[31:24] = (sel_minmax[3] == 1'b1) ? operand_a_i[31:24] : minmax_b[31:24];
+  assign result_minmax[23:16] = (sel_minmax[2] == 1'b1) ? operand_a_i[23:16] : minmax_b[23:16];
+  assign result_minmax[15:8] = (sel_minmax[1] == 1'b1) ? operand_a_i[15:8] : minmax_b[15:8];
+  assign result_minmax[7:0] = (sel_minmax[0] == 1'b1) ? operand_a_i[7:0] : minmax_b[7:0];
+
+  // clip
+  logic [31:0] clip_result;
+  always_comb begin
+    clip_result = result_minmax;
+    if (is_clipu) begin
+      if (operand_a_i[31] || is_equal_clip) begin
+        clip_result = '0;
+      end else begin
+        clip_result = result_minmax;
+      end
+    end else begin
+      if (clip_cout || is_equal_clip) begin
+        clip_result = operand_b_neg;
+      end else begin
+        clip_result = result_minmax;
+      end
+    end
+  end
+
+  //////////////////////////////////////////////////////////////
+  // Shuffle / pack
+  //////////////////////////////////////////////////////////////
+  logic [3:0][1:0] shuffle_byte_sel;
+  logic [3:0]      shuffle_reg_sel;
+  logic [1:0]      shuffle_reg1_sel;
+  logic [1:0]      shuffle_reg0_sel;
+  logic [3:0]      shuffle_through;
+
+  logic [31:0] shuffle_r1, shuffle_r0;
+  logic [31:0] shuffle_r1_in, shuffle_r0_in;
+  logic [31:0] shuffle_result;
+  logic [31:0] pack_result;
+
+  always_comb begin
+    shuffle_reg_sel  = '0;
+    shuffle_reg1_sel = 2'b01;
+    shuffle_reg0_sel = 2'b10;
+    shuffle_through  = '1;
+
+    unique case (operator_i)
+      ALU_EXT, ALU_EXTS: begin
+        if (operator_i == ALU_EXTS) shuffle_reg1_sel = 2'b11;
+        if (vector_mode_i == VEC_MODE8) begin
+          shuffle_reg_sel[3:1] = 3'b111;
+          shuffle_reg_sel[0]   = 1'b0;
+        end else begin
+          shuffle_reg_sel[3:2] = 2'b11;
+          shuffle_reg_sel[1:0] = 2'b00;
+        end
+      end
+      ALU_PCKLO: begin
+        shuffle_reg1_sel = 2'b00;
+        if (vector_mode_i == VEC_MODE8) begin
+          shuffle_through = 4'b0011;
+          shuffle_reg_sel = 4'b0001;
+        end else begin
+          shuffle_reg_sel = 4'b0011;
+        end
+      end
+      ALU_PCKHI: begin
+        shuffle_reg1_sel = 2'b00;
+        if (vector_mode_i == VEC_MODE8) begin
+          shuffle_through = 4'b1100;
+          shuffle_reg_sel = 4'b0100;
+        end else begin
+          shuffle_reg_sel = 4'b0011;
+        end
+      end
+      ALU_SHUF2: begin
+        unique case (vector_mode_i)
+          VEC_MODE8: begin
+            shuffle_reg_sel[3] = ~operand_b_i[26];
+            shuffle_reg_sel[2] = ~operand_b_i[18];
+            shuffle_reg_sel[1] = ~operand_b_i[10];
+            shuffle_reg_sel[0] = ~operand_b_i[2];
+          end
+          VEC_MODE16: begin
+            shuffle_reg_sel[3] = ~operand_b_i[17];
+            shuffle_reg_sel[2] = ~operand_b_i[17];
+            shuffle_reg_sel[1] = ~operand_b_i[1];
+            shuffle_reg_sel[0] = ~operand_b_i[1];
+          end
+          default: ;
+        endcase
+      end
+      ALU_INS: begin
+        unique case (vector_mode_i)
+          VEC_MODE8: begin
+            shuffle_reg0_sel = 2'b00;
+            unique case (imm_vec_ext_i)
+              2'b00: shuffle_reg_sel[3:0] = 4'b1110;
+              2'b01: shuffle_reg_sel[3:0] = 4'b1101;
+              2'b10: shuffle_reg_sel[3:0] = 4'b1011;
+              2'b11: shuffle_reg_sel[3:0] = 4'b0111;
+            endcase
+          end
+          VEC_MODE16: begin
+            shuffle_reg0_sel   = 2'b01;
+            shuffle_reg_sel[3] = ~imm_vec_ext_i[0];
+            shuffle_reg_sel[2] = ~imm_vec_ext_i[0];
+            shuffle_reg_sel[1] = imm_vec_ext_i[0];
+            shuffle_reg_sel[0] = imm_vec_ext_i[0];
+          end
+          default: ;
+        endcase
+      end
+      default: ;
+    endcase
+  end
+
+  always_comb begin
+    shuffle_byte_sel = '0;
+    unique case (operator_i)
+      ALU_EXTS, ALU_EXT: begin
+        unique case (vector_mode_i)
+          VEC_MODE8: begin
+            shuffle_byte_sel[3] = imm_vec_ext_i[1:0];
+            shuffle_byte_sel[2] = imm_vec_ext_i[1:0];
+            shuffle_byte_sel[1] = imm_vec_ext_i[1:0];
+            shuffle_byte_sel[0] = imm_vec_ext_i[1:0];
+          end
+          VEC_MODE16: begin
+            shuffle_byte_sel[3] = {imm_vec_ext_i[0], 1'b1};
+            shuffle_byte_sel[2] = {imm_vec_ext_i[0], 1'b1};
+            shuffle_byte_sel[1] = {imm_vec_ext_i[0], 1'b1};
+            shuffle_byte_sel[0] = {imm_vec_ext_i[0], 1'b0};
+          end
+          default: ;
+        endcase
+      end
+      ALU_PCKLO: begin
+        unique case (vector_mode_i)
+          VEC_MODE8: ;
+          VEC_MODE16: begin
+            shuffle_byte_sel[3] = 2'b01;
+            shuffle_byte_sel[2] = 2'b00;
+            shuffle_byte_sel[1] = 2'b01;
+            shuffle_byte_sel[0] = 2'b00;
+          end
+          default: ;
+        endcase
+      end
+      ALU_PCKHI: begin
+        unique case (vector_mode_i)
+          VEC_MODE8: ;
+          VEC_MODE16: begin
+            shuffle_byte_sel[3] = 2'b11;
+            shuffle_byte_sel[2] = 2'b10;
+            shuffle_byte_sel[1] = 2'b11;
+            shuffle_byte_sel[0] = 2'b10;
+          end
+          default: ;
+        endcase
+      end
+      ALU_SHUF2, ALU_SHUF: begin
+        unique case (vector_mode_i)
+          VEC_MODE8: begin
+            shuffle_byte_sel[3] = operand_b_i[25:24];
+            shuffle_byte_sel[2] = operand_b_i[17:16];
+            shuffle_byte_sel[1] = operand_b_i[9:8];
+            shuffle_byte_sel[0] = operand_b_i[1:0];
+          end
+          VEC_MODE16: begin
+            shuffle_byte_sel[3] = {operand_b_i[16], 1'b1};
+            shuffle_byte_sel[2] = {operand_b_i[16], 1'b0};
+            shuffle_byte_sel[1] = {operand_b_i[0], 1'b1};
+            shuffle_byte_sel[0] = {operand_b_i[0], 1'b0};
+          end
+          default: ;
+        endcase
+      end
+      ALU_INS: begin
+        shuffle_byte_sel[3] = 2'b11;
+        shuffle_byte_sel[2] = 2'b10;
+        shuffle_byte_sel[1] = 2'b01;
+        shuffle_byte_sel[0] = 2'b00;
+      end
+      default: ;
+    endcase
+  end
+
+  assign shuffle_r0_in = shuffle_reg0_sel[1] ?
+                          operand_a_i :
+                          (shuffle_reg0_sel[0] ? {2{operand_a_i[15:0]}} : {4{operand_a_i[7:0]}});
+
+  assign shuffle_r1_in = shuffle_reg1_sel[1] ? {
+    {8{operand_a_i[31]}}, {8{operand_a_i[23]}}, {8{operand_a_i[15]}}, {8{operand_a_i[7]}}
+  } : (shuffle_reg1_sel[0] ? operand_c_i : operand_b_i);
+
+  assign shuffle_r0[31:24] = shuffle_byte_sel[3][1] ?
+                              (shuffle_byte_sel[3][0] ? shuffle_r0_in[31:24] : shuffle_r0_in[23:16]) :
+                              (shuffle_byte_sel[3][0] ? shuffle_r0_in[15: 8] : shuffle_r0_in[ 7: 0]);
+  assign shuffle_r0[23:16] = shuffle_byte_sel[2][1] ?
+                              (shuffle_byte_sel[2][0] ? shuffle_r0_in[31:24] : shuffle_r0_in[23:16]) :
+                              (shuffle_byte_sel[2][0] ? shuffle_r0_in[15: 8] : shuffle_r0_in[ 7: 0]);
+  assign shuffle_r0[15: 8] = shuffle_byte_sel[1][1] ?
+                              (shuffle_byte_sel[1][0] ? shuffle_r0_in[31:24] : shuffle_r0_in[23:16]) :
+                              (shuffle_byte_sel[1][0] ? shuffle_r0_in[15: 8] : shuffle_r0_in[ 7: 0]);
+  assign shuffle_r0[ 7:0] = shuffle_byte_sel[0][1] ?
+                              (shuffle_byte_sel[0][0] ? shuffle_r0_in[31:24] : shuffle_r0_in[23:16]) :
+                              (shuffle_byte_sel[0][0] ? shuffle_r0_in[15: 8] : shuffle_r0_in[ 7: 0]);
+
+  assign shuffle_r1[31:24] = shuffle_byte_sel[3][1] ?
+                              (shuffle_byte_sel[3][0] ? shuffle_r1_in[31:24] : shuffle_r1_in[23:16]) :
+                              (shuffle_byte_sel[3][0] ? shuffle_r1_in[15: 8] : shuffle_r1_in[ 7: 0]);
+  assign shuffle_r1[23:16] = shuffle_byte_sel[2][1] ?
+                              (shuffle_byte_sel[2][0] ? shuffle_r1_in[31:24] : shuffle_r1_in[23:16]) :
+                              (shuffle_byte_sel[2][0] ? shuffle_r1_in[15: 8] : shuffle_r1_in[ 7: 0]);
+  assign shuffle_r1[15: 8] = shuffle_byte_sel[1][1] ?
+                              (shuffle_byte_sel[1][0] ? shuffle_r1_in[31:24] : shuffle_r1_in[23:16]) :
+                              (shuffle_byte_sel[1][0] ? shuffle_r1_in[15: 8] : shuffle_r1_in[ 7: 0]);
+  assign shuffle_r1[ 7:0] = shuffle_byte_sel[0][1] ?
+                              (shuffle_byte_sel[0][0] ? shuffle_r1_in[31:24] : shuffle_r1_in[23:16]) :
+                              (shuffle_byte_sel[0][0] ? shuffle_r1_in[15: 8] : shuffle_r1_in[ 7: 0]);
+
+  assign shuffle_result[31:24] = shuffle_reg_sel[3] ? shuffle_r1[31:24] : shuffle_r0[31:24];
+  assign shuffle_result[23:16] = shuffle_reg_sel[2] ? shuffle_r1[23:16] : shuffle_r0[23:16];
+  assign shuffle_result[15:8] = shuffle_reg_sel[1] ? shuffle_r1[15:8] : shuffle_r0[15:8];
+  assign shuffle_result[7:0] = shuffle_reg_sel[0] ? shuffle_r1[7:0] : shuffle_r0[7:0];
+
+  assign pack_result[31:24] = shuffle_through[3] ? shuffle_result[31:24] : operand_c_i[31:24];
+  assign pack_result[23:16] = shuffle_through[2] ? shuffle_result[23:16] : operand_c_i[23:16];
+  assign pack_result[15:8] = shuffle_through[1] ? shuffle_result[15:8] : operand_c_i[15:8];
+  assign pack_result[7:0] = shuffle_through[0] ? shuffle_result[7:0] : operand_c_i[7:0];
+
+  //////////////////////////////////////////////////////////////
+  // Bit counting
+  //////////////////////////////////////////////////////////////
+  logic [31:0] ff_input;
+  logic [ 5:0] cnt_result;
+  logic [ 5:0] clb_result;
+  logic [ 4:0] ff1_result;
+  logic        ff_no_one;
+  logic [ 4:0] fl1_result;
+  logic [ 5:0] bitop_result;
+  logic        a_is_zero;
+
+  assign a_is_zero = ~|operand_a_i;
+
+  cv32e40p_popcnt popcnt_i (
+      .in_i    (operand_a_i),
+      .result_o(cnt_result)
+  );
+
+  always_comb begin
+    ff_input = '0;
+    case (operator_i)
+      ALU_FF1: ff_input = operand_a_i;
+      7'b0110000, 7'b0110010, ALU_FL1: ff_input = operand_a_rev;  // DIVU REMU FL1
+      7'b0110001, 7'b0110011, ALU_CLB: begin                      // DIV REM CLB
+        if (operand_a_i[31]) ff_input = ~operand_a_rev;
+        else ff_input = operand_a_rev;
+      end
+    endcase
+  end
+
+  cv32e40p_ff_one ff_one_i (
+      .in_i       (ff_input),
+      .first_one_o(ff1_result),
+      .no_ones_o  (ff_no_one)
+  );
+
+  assign fl1_result = 5'd31 - ff1_result;
+  assign clb_result = ff1_result - 5'd1;
+
+  always_comb begin
+    bitop_result = '0;
+    case (operator_i)
+      ALU_FF1: bitop_result = ff_no_one ? 6'd32 : {1'b0, ff1_result};
+      ALU_FL1: bitop_result = ff_no_one ? 6'd32 : {1'b0, fl1_result};
+      ALU_CNT: bitop_result = cnt_result;
+      ALU_CLB: begin
+        if (ff_no_one) begin
+          if (operand_a_i[31]) bitop_result = 6'd31;
+          else bitop_result = '0;
+        end else begin
+          bitop_result = clb_result;
+        end
+      end
+      default: ;
+    endcase
+  end
+
+  //////////////////////////////////////////////////////////////
+  // Bit manipulation
+  //////////////////////////////////////////////////////////////
+  logic extract_is_signed;
+  logic extract_sign;
+  logic [31:0] bextins_and;
+  logic [31:0] bextins_result, bclr_result, bset_result;
+
+  assign bextins_and       = (operator_i == ALU_BINS) ? operand_c_i : {32{extract_sign}};
+
+  assign extract_is_signed = (operator_i == ALU_BEXT);
+  assign extract_sign      = extract_is_signed & shA_result[bmask_a_i];
+
+  assign bextins_result    = (bmask & shA_result) | (bextins_and & bmask_inv);
+
+  assign bclr_result       = operand_a_i & bmask_inv;
+  assign bset_result       = operand_a_i | bmask;
+
+  // bit reverse
+  logic [31:0] radix_2_rev;
+  logic [31:0] radix_4_rev;
+  logic [31:0] radix_8_rev;
+  logic [31:0] reverse_result;
+
+  generate
+    for (j = 0; j < 32; j++) begin : gen_radix_2_rev
+      assign radix_2_rev[j] = shA_result[31-j];
+    end
+    for (j = 0; j < 16; j++) begin : gen_radix_4_rev
+      assign radix_4_rev[2*j+1:2*j] = shA_result[31-j*2:31-j*2-1];
+    end
+    for (j = 0; j < 10; j++) begin : gen_radix_8_rev
+      assign radix_8_rev[3*j+2:3*j] = shA_result[31-j*3:31-j*3-2];
+    end
+    assign radix_8_rev[31:30] = 2'b0;
+  endgenerate
+
+  always_comb begin
+    reverse_result = radix_2_rev;
+    unique case (bmask_a_i[1:0])
+      2'b01: reverse_result = radix_4_rev;
+      2'b10: reverse_result = radix_8_rev;
+      default: reverse_result = radix_2_rev;
+    endcase
+  end
+
+  //////////////////////////////////////////////////////////////
+  // Divider
+  //////////////////////////////////////////////////////////////
+  logic [31:0] result_div;
+  logic        div_ready;
+  logic        div_signed;
+  logic        div_op_a_signed;
+  logic [ 5:0] div_shift_int;
+
+  assign div_signed = operator_i[0];
+
+  assign div_op_a_signed = operand_a_i[31] & div_signed;
+
+  assign div_shift_int = ff_no_one ? 6'd31 : clb_result;
+  assign div_shift = div_shift_int + (div_op_a_signed ? 6'd0 : 6'd1);
+
+  cv32e40p_alu_div alu_div_i (
+      .Clk_CI (clk),
+      .Rst_RBI(rst_n),
+      .OpA_DI      (operand_b_i),
+      .OpB_DI      (shA_leftres),
+      .OpBShift_DI (div_shift),
+      .OpBIsZero_SI(a_is_zero),
+      .OpBSign_SI(div_op_a_signed),
+      .OpCode_SI (operator_i[1:0]),
+      .Res_DO(result_div),
+      .InVld_SI (div_valid),
+      .OutRdy_SI(ex_ready_i),
+      .OutVld_SO(div_ready)
+  );
+
+  //////////////////////////////////////////////////////////////
+  // Result mux: one-hot AND-OR
+  //////////////////////////////////////////////////////////////
+  logic g_and, g_or, g_xor, g_addfam, g_shift, g_bextins, g_bclr, g_bset, g_brev;
+  logic g_pack, g_minmax, g_abs, g_clip, g_vcmp, g_slt, g_bitcnt;
+
+  assign g_and    = (operator_i == ALU_AND);
+  assign g_or     = (operator_i == ALU_OR);
+  assign g_xor    = (operator_i == ALU_XOR);
+  assign g_addfam = is_addfam;
+  assign g_shift  = (operator_i[6:2] == 5'b01001);
+  assign g_bextins = (operator_i == ALU_BEXT) || (operator_i == ALU_BEXTU) || (operator_i == ALU_BINS);
+  assign g_bclr   = (operator_i == ALU_BCLR);
+  assign g_bset   = (operator_i == ALU_BSET);
+  assign g_brev   = (operator_i == ALU_BREV);
+  assign g_pack   = (operator_i == ALU_SHUF) || (operator_i == ALU_SHUF2) ||
+                    (operator_i == ALU_PCKLO) || (operator_i == ALU_PCKHI) ||
+                    (operator_i == ALU_EXT) || (operator_i == ALU_EXTS) || (operator_i == ALU_INS);
+  assign g_minmax = (operator_i[6:2] == 5'b00100); // MIN MINU MAX MAXU
+  assign g_abs    = is_abs;
+  assign g_clip   = is_clip | is_clipu;
+  assign g_vcmp   = (operator_i[6:3] == 4'b0000 && operator_i[1] == 1'b0) ||
+                    (operator_i[6:3] == 4'b0001);
+  assign g_slt    = (operator_i[6:3] == 4'b0000) && operator_i[1];
+  assign g_bitcnt = (operator_i[6:2] == 5'b01101);
+
+  logic [31:0] abs_result;
+  assign abs_result = is_clpx_i ? {adder_round_result[31:16], operand_a_i[15:0]} : result_minmax;
+
+  logic [31:0] cmp_fill;
+  assign cmp_fill = {{8{cmp_result[3]}}, {8{cmp_result[2]}}, {8{cmp_result[1]}}, {8{cmp_result[0]}}};
+
+  assign result_o = ({32{g_and}} & (operand_a_i & operand_b_i))
+                  | ({32{g_or}}  & (operand_a_i | operand_b_i))
+                  | ({32{g_xor}} & (operand_a_i ^ operand_b_i))
+                  | ({32{g_addfam}} & shB_right)
+                  | ({32{g_shift}} & shA_result)
+                  | ({32{g_bextins}} & bextins_result)
+                  | ({32{g_bclr}} & bclr_result)
+                  | ({32{g_bset}} & bset_result)
+                  | ({32{g_brev}} & reverse_result)
+                  | ({32{g_pack}} & pack_result)
+                  | ({32{g_minmax}} & result_minmax)
+                  | ({32{g_abs}} & abs_result)
+                  | ({32{g_clip}} & clip_result)
+                  | ({32{g_vcmp}} & cmp_fill)
+                  | ({32{g_slt}} & {31'b0, cmp_result[3]})
+                  | ({32{g_bitcnt}} & {26'h0, bitop_result})
+                  | ({32{is_divop}} & result_div);
+
+  assign ready_o = div_ready;
+
+endmodule
+
+// ---- popcount ----
+module cv32e40p_popcnt (
+    input  logic [31:0] in_i,
+    output logic [ 5:0] result_o
+);
+  logic [15:0][1:0] cnt_l1;
+  logic [ 7:0][2:0] cnt_l2;
+  logic [ 3:0][3:0] cnt_l3;
+  logic [ 1:0][4:0] cnt_l4;
+  genvar l, m, n, p;
+  generate
+    for (l = 0; l < 16; l++) begin : gen_cnt_l1
+      assign cnt_l1[l] = {1'b0, in_i[2*l]} + {1'b0, in_i[2*l+1]};
+    end
+  endgenerate
+  generate
+    for (m = 0; m < 8; m++) begin : gen_cnt_l2
+      assign cnt_l2[m] = {1'b0, cnt_l1[2*m]} + {1'b0, cnt_l1[2*m+1]};
+    end
+  endgenerate
+  generate
+    for (n = 0; n < 4; n++) begin : gen_cnt_l3
+      assign cnt_l3[n] = {1'b0, cnt_l2[2*n]} + {1'b0, cnt_l2[2*n+1]};
+    end
+  endgenerate
+  generate
+    for (p = 0; p < 2; p++) begin : gen_cnt_l4
+      assign cnt_l4[p] = {1'b0, cnt_l3[2*p]} + {1'b0, cnt_l3[2*p+1]};
+    end
+  endgenerate
+  assign result_o = {1'b0, cnt_l4[0]} + {1'b0, cnt_l4[1]};
+endmodule
+
+// ---- find first one ----
+module cv32e40p_ff_one #(
+    parameter LEN = 32
+) (
+    input logic [LEN-1:0] in_i,
+    output logic [$clog2(LEN)-1:0] first_one_o,
+    output logic                   no_ones_o
+);
+  localparam NUM_LEVELS = $clog2(LEN);
+  logic [          LEN-1:0][NUM_LEVELS-1:0] index_lut;
+  logic [2**NUM_LEVELS-1:0]                 sel_nodes;
+  logic [2**NUM_LEVELS-1:0][NUM_LEVELS-1:0] index_nodes;
+
+  generate
+    genvar j;
+    for (j = 0; j < LEN; j++) begin : gen_index_lut
+      assign index_lut[j] = $unsigned(j);
+    end
+  endgenerate
+
+  generate
+    genvar l;
+    genvar level;
+    assign sel_nodes[2**NUM_LEVELS-1] = 1'b0;
+    for (level = 0; level < NUM_LEVELS; level++) begin : gen_tree
+      if (level < NUM_LEVELS - 1) begin : gen_non_root_level
+        for (l = 0; l < 2 ** level; l++) begin : gen_node
+          assign sel_nodes[2**level-1+l]   = sel_nodes[2**(level+1)-1+l*2] | sel_nodes[2**(level+1)-1+l*2+1];
+          assign index_nodes[2**level-1+l] = (sel_nodes[2**(level+1)-1+l*2] == 1'b1) ?
+                                           index_nodes[2**(level+1)-1+l*2] : index_nodes[2**(level+1)-1+l*2+1];
+        end
+      end
+      if (level == NUM_LEVELS - 1) begin : gen_root_level
+        for (genvar kk = 0; kk < 2 ** level; kk++) begin : gen_node
+          if (kk * 2 < LEN - 1) begin : gen_two
+            assign sel_nodes[2**level-1+kk] = in_i[kk*2] | in_i[kk*2+1];
+            assign index_nodes[2**level-1+kk] = (in_i[kk*2] == 1'b1) ? index_lut[kk*2] : index_lut[kk*2+1];
+          end
+          if (kk * 2 == LEN - 1) begin : gen_one
+            assign sel_nodes[2**level-1+kk]   = in_i[kk*2];
+            assign index_nodes[2**level-1+kk] = index_lut[kk*2];
+          end
+          if (kk * 2 > LEN - 1) begin : gen_out_of_range
+            assign sel_nodes[2**level-1+kk]   = 1'b0;
+            assign index_nodes[2**level-1+kk] = '0;
+          end
+        end
+      end
+    end
+  endgenerate
+
+  assign first_one_o = index_nodes[0];
+  assign no_ones_o   = ~sel_nodes[0];
+endmodule
+
+// ---- serial divider ----
+module cv32e40p_alu_div #(
+    parameter C_WIDTH     = 32,
+    parameter C_LOG_WIDTH = 6
+) (
+    input  logic                   Clk_CI,
+    input  logic                   Rst_RBI,
+    input  logic [    C_WIDTH-1:0] OpA_DI,
+    input  logic [    C_WIDTH-1:0] OpB_DI,
+    input  logic [C_LOG_WIDTH-1:0] OpBShift_DI,
+    input  logic                   OpBIsZero_SI,
+    input  logic                   OpBSign_SI,
+    input  logic [            1:0] OpCode_SI,
+    input  logic                   InVld_SI,
+    input  logic                   OutRdy_SI,
+    output logic                   OutVld_SO,
+    output logic [    C_WIDTH-1:0] Res_DO
+);
+
+  logic [C_WIDTH-1:0] ResReg_DP, ResReg_DN;
+  logic [C_WIDTH-1:0] ResReg_DP_rev;
+  logic [C_WIDTH-1:0] AReg_DP, AReg_DN;
+  logic [C_WIDTH-1:0] BReg_DP, BReg_DN;
+
+  logic RemSel_SN, RemSel_SP;
+  logic CompInv_SN, CompInv_SP;
+  logic ResInv_SN, ResInv_SP;
+
+  logic [C_WIDTH-1:0] AddMux_D;
+  logic [C_WIDTH-1:0] AddOut_D;
+  logic [C_WIDTH-1:0] AddTmp_D;
+  logic [C_WIDTH-1:0] BMux_D;
+  logic [C_WIDTH-1:0] OutMux_D;
+
+  logic [C_LOG_WIDTH-1:0] Cnt_DP, Cnt_DN;
+  logic CntZero_S;
+
+  logic ARegEn_S, BRegEn_S, ResRegEn_S, ABComp_S, PmSel_S, LoadEn_S;
+
+  enum logic [1:0] {
+    IDLE,
+    DIVIDE,
+    FINISH
+  }
+      State_SN, State_SP;
+
+  assign PmSel_S  = LoadEn_S & ~(OpCode_SI[0] & (OpA_DI[$high(OpA_DI)] ^ OpBSign_SI));
+  assign AddMux_D = (LoadEn_S) ? OpA_DI : BReg_DP;
+  assign BMux_D   = (LoadEn_S) ? OpB_DI : {CompInv_SP, (BReg_DP[$high(BReg_DP):1])};
+
+  genvar index;
+  generate
+    for (index = 0; index < C_WIDTH; index++) begin : gen_bit_swapping
+      assign ResReg_DP_rev[index] = ResReg_DP[C_WIDTH-1-index];
+    end
+  endgenerate
+
+  assign OutMux_D = (RemSel_SP) ? AReg_DP : ResReg_DP_rev;
+  assign Res_DO = (ResInv_SP) ? -$signed(OutMux_D) : OutMux_D;
+  assign ABComp_S    = ((AReg_DP == BReg_DP) | ((AReg_DP > BReg_DP) ^ CompInv_SP)) & ((|AReg_DP) | OpBIsZero_SI);
+  assign AddTmp_D = (LoadEn_S) ? 0 : AReg_DP;
+  assign AddOut_D = (PmSel_S) ? AddTmp_D + AddMux_D : AddTmp_D - $signed(AddMux_D);
+
+  assign Cnt_DN = (LoadEn_S) ? OpBShift_DI : (~CntZero_S) ? Cnt_DP - 1 : Cnt_DP;
+  assign CntZero_S = ~(|Cnt_DP);
+
+  always_comb begin : p_fsm
+    State_SN   = State_SP;
+    OutVld_SO  = 1'b0;
+    LoadEn_S   = 1'b0;
+    ARegEn_S   = 1'b0;
+    BRegEn_S   = 1'b0;
+    ResRegEn_S = 1'b0;
+
+    case (State_SP)
+      IDLE: begin
+        OutVld_SO = 1'b1;
+        if (InVld_SI) begin
+          OutVld_SO = 1'b0;
+          ARegEn_S  = 1'b1;
+          BRegEn_S  = 1'b1;
+          LoadEn_S  = 1'b1;
+          State_SN  = DIVIDE;
+        end
+      end
+      DIVIDE: begin
+        ARegEn_S   = ABComp_S;
+        BRegEn_S   = 1'b1;
+        ResRegEn_S = 1'b1;
+        if (CntZero_S) begin
+          State_SN = FINISH;
+        end
+      end
+      FINISH: begin
+        OutVld_SO = 1'b1;
+        if (OutRdy_SI) begin
+          State_SN = IDLE;
+        end
+      end
+      default: ;
+    endcase
+  end
+
+  assign RemSel_SN = (LoadEn_S) ? OpCode_SI[1] : RemSel_SP;
+  assign CompInv_SN = (LoadEn_S) ? OpBSign_SI : CompInv_SP;
+  assign ResInv_SN = (LoadEn_S) ? (~OpBIsZero_SI | OpCode_SI[1]) & OpCode_SI[0] & (OpA_DI[$high(
+      OpA_DI
+  )] ^ OpBSign_SI) : ResInv_SP;
+
+  assign AReg_DN = (ARegEn_S) ? AddOut_D : AReg_DP;
+  assign BReg_DN = (BRegEn_S) ? BMux_D : BReg_DP;
+  assign ResReg_DN = (LoadEn_S) ? '0 : (ResRegEn_S) ? {
+    ABComp_S, ResReg_DP[$high(ResReg_DP):1]
+  } : ResReg_DP;
+
+  always_ff @(posedge Clk_CI or negedge Rst_RBI) begin : p_regs
+    if (~Rst_RBI) begin
+      State_SP   <= IDLE;
+      AReg_DP    <= '0;
+      BReg_DP    <= '0;
+      ResReg_DP  <= '0;
+      Cnt_DP     <= '0;
+      RemSel_SP  <= 1'b0;
+      CompInv_SP <= 1'b0;
+      ResInv_SP  <= 1'b0;
+    end else begin
+      State_SP   <= State_SN;
+      AReg_DP    <= AReg_DN;
+      BReg_DP    <= BReg_DN;
+      ResReg_DP  <= ResReg_DN;
+      Cnt_DP     <= Cnt_DN;
+      RemSel_SP  <= RemSel_SN;
+      CompInv_SP <= CompInv_SN;
+      ResInv_SP  <= ResInv_SN;
+    end
+  end
+endmodule

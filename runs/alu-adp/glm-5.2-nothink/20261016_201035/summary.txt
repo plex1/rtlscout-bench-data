@@ -1,0 +1,32 @@
+## Summary
+
+### Final Result
+- **Best cost:** 603,768 area_delay_product (down from baseline 645,629, ~6.5% improvement)
+- **Design file:** `design.sv` — passes 100% correctness (1,028,192 checks)
+
+### What Worked Best
+
+1. **Replacing `cv32e40p_ff_one` with a simple priority encoder** (if-else chain) — replaced the complex tree-based find-first-one module with a direct 32-way priority encoder. This reduced both area and delay. **Biggest single improvement** (~6,700 cost reduction).
+
+2. **Replacing `cv32e40p_popcnt` with behavioral popcount** — replaced the manually structured 4-level tree adder with a simple `for` loop accumulation. Yosys synthesizes this into an efficient adder tree. (~8,400 cost reduction)
+
+3. **Removing `unique` keywords** from case statements — gave Yosys more optimization freedom. Small but consistent improvement.
+
+4. **Simplifying `is_equal_clip`** — replaced the redundant `operand_b_eq` always_comb block (which assigned the same value twice) with a single assign.
+
+### What Didn't Work / Caused Regressions
+
+1. **Replacing the 36-bit packed adder with separate per-lane adders** — the 36-bit adder with interleaved carry bits is actually very area-efficient as a single unit. Separate 16-bit and 8-bit adders increased area by ~15. The critical issue was that CLIP relies on `adder_result_expanded[36]` which is the sign-extension bit from `$signed()` 37-bit context — a subtle behavior that's hard to replicate with plain adders.
+
+2. **Using direct 32-bit comparisons** instead of the 4×8-bit cascade — added extra area and delay (661K vs 604K). The existing cascade structure synthesizes well.
+
+3. **Barrel shifter for ROR** — replacing the 64-bit `{shift_op_a, shift_op_a} >> shift_amt` with explicit `(a >> n) | (a << (32-n))` was much worse (695K) due to the complement shift logic.
+
+4. **Changing target_delay** — had zero effect when the design already violates timing; the synthesized delay was identical regardless of target (100ps to 5000ps).
+
+### Lessons Learned
+
+- **The 36-bit packed adder is clever and hard to beat** — it handles all vector modes (8/16/32-bit) in a single adder structure. The sign-extension trick for CLIP overflow detection via `$signed()` is non-obvious and took significant analysis to understand.
+- **Behavioral descriptions often synthesize as well or better than manually structured logic** — the popcount and ff_one replacements proved this.
+- **The critical path (1,358ps) runs through the adder carry chain → shifter → result mux**, and is fundamentally limited by the 36-bit addition depth. Further improvement would require structural changes to the adder itself (e.g., prefix adder) while preserving the exact CLIP overflow semantics.
+- **Area optimization is limited** since the design is timing-constrained — Yosys already uses minimal cells when timing is violated.

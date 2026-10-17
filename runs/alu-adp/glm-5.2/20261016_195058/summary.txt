@@ -1,0 +1,27 @@
+## Summary
+
+### Final Result
+- **Best design file:** `design.sv` (last edit was incomplete — should be reverted to the passing version from eval 59)
+- **Best cost:** 605,089 area_delay_product (down from 645,629 baseline = ~6.3% improvement)
+- **Status:** PASS (1028192/1028192 checks)
+
+### What Worked Best
+The single most impactful optimization was **replacing the CLIP overflow detection**. The original used `adder_result_expanded[36]` (the carry-out of a 37-bit expanded adder) to detect CLIP overflow, creating a long path through the adder → comparison → minmax → clip. I replaced it with a direct `$signed(operand_a_i) <= $signed(operand_b_neg)` comparison for CLIP, and `operand_a_i[31] || (operand_a_i == 0)` for CLIPU. This removed the dependency on the 36-bit adder carry chain for the clip path, reducing delay from 1462ps to 1388ps and area from 441.5 to 435.8.
+
+### What Didn't Work / Caused Regressions
+1. **Direct 32-bit/16-bit comparisons** instead of byte-level chained comparisons: increased area (+6k) and delay due to synthesizing separate wide comparators alongside existing byte comparators.
+2. **Combined minmax+clip mux**: combining into a single 3:1 mux stage increased complexity and cost (634k vs 605k).
+3. **Alternative popcount tree**: using 4-bit→3-bit additions instead of the original 2-bit→4-level tree increased delay.
+4. **Linear if-else priority encoder** for ff_one: slower than the original tree structure (626k vs 605k).
+5. **casez-based priority encoder**: banned by lint rules (X/Z literals not allowed).
+6. **Setting `is_equal_clip=0`**: changed synthesis structuring unfavorably, increasing delay to 1488ps.
+
+### Lessons Learned
+1. **Removing unnecessary carry-chain dependencies** is high-impact — the CLIP optimization was the single biggest win.
+2. **The original tree structures (ff_one, popcnt) are well-optimized** — attempts to replace them consistently regressed.
+3. **Synthesis tool behavior is highly sensitive to RTL structure** — even no-op-looking changes (like setting a signal to 0) can shift the critical path and change results unpredictably.
+4. **target_delay has minimal effect** below 500ps — the tool maps to minimum delay regardless. Higher values (1500+) increase delay with marginal area savings.
+5. **Always keep a known-good backup** before trying aggressive changes — several attempts broke correctness and needed reversion.
+
+### What I Would Do Differently
+With more steps, I would focus on restructuring the comparison→minmax→clip→result_mux chain more aggressively (e.g., precomputing comparison results in parallel with the adder, or using a flatter result mux), and explore simplifying the shuffle/pack logic which contributes significant area but isn't on the critical path.

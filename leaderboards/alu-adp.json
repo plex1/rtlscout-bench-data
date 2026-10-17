@@ -1,0 +1,88 @@
+{
+ "schema": 1,
+ "task": "alu-adp",
+ "title": "CV32E40P ALU",
+ "description": "The execution-stage ALU of the OpenHW Group's CV32E40P RISC-V core: the RV32IM operations plus the XPULP extensions (two 16-bit or four 8-bit SIMD lanes, bit manipulation and counting, shuffle and pack, clip) and a multi-cycle serial divider behind a ready handshake, 57 opcodes in all. The starting point is the upstream RTL flattened into one file, with no logic changes.",
+ "metric_label": "area × delay",
+ "unit": "µm²·ps",
+ "flow": "Yosys synthesis and OpenROAD static timing analysis on ASAP7. Correctness: the gate-level netlist is re-simulated against the upstream ALU embedded in the testbench, which compares the ready handshake in every cycle and the results whenever upstream is ready, so the schedule stays cycle-identical to upstream; 20,000 recorded vectors, a divider sweep over every divisor and dividend bit length and 1,000,000 fixed-seed random operations; all checks must pass.",
+ "baselines": {
+  "verilog": {
+   "cost": 645629.32,
+   "area": 441.54,
+   "delay": 1462.22,
+   "suite": "suite-v2",
+   "rtlscout": "0.2.0+git.1749dde",
+   "campaign": "alu_baseline_20261016"
+  }
+ },
+ "runs": {
+  "glm-5.2": [
+   "20261016_180200",
+   "20261016_182934",
+   "20261016_195058"
+  ],
+  "deepseek-v4.1-flash": [
+   "20261016_180210",
+   "20261016_185746",
+   "20261016_201656"
+  ],
+  "glm-5.2-nothink": [
+   "20261016_180208",
+   "20261016_185328",
+   "20261016_201035"
+  ],
+  "deepseek-v4-pro": [
+   "20261016_180214",
+   "20261016_192127",
+   "20261016_202813"
+  ],
+  "glm-5.3-flash": [
+   "20261016_180202",
+   "20261016_183019",
+   "20261016_195214"
+  ],
+  "glm-5.3-flash-high": [
+   "20261016_180204",
+   "20261016_184003",
+   "20261016_195805"
+  ],
+  "mimo-v2.6-pro": [
+   "20261016_180218",
+   "20261016_194625",
+   "20261016_204755"
+  ],
+  "mimo-v2.6-flash": [
+   "20261016_180212",
+   "20261016_190003",
+   "20261016_202701"
+  ],
+  "glm-5.3": [
+   "20261016_180216",
+   "20261016_193818",
+   "20261016_203553"
+  ],
+  "qwen3.8-2.4t": [
+   "20261016_180220",
+   "20261016_194730",
+   "20261016_210214"
+  ]
+ },
+ "exclude": [],
+ "notes": {
+  "glm-5.2": "Default effort, pinned to Z.AI. Through OpenRouter a request without an effort setting behaves like thinking off: the default, high and off rows all produce 1k to 2k output tokens per step, and their results are within noise of each other. The high-effort runs are recorded but held back from the table.",
+  "glm-5.2-nothink": "RTLSCOUT_REASONING_EFFORT=off, pinned to Z.AI: zero reasoning tokens in every reply.",
+  "glm-5.3-flash": "Default effort, which Z.AI documents as max for this model; 13k to 18k output tokens per step, reasoning included. Pinned to Z.AI.",
+  "glm-5.3-flash-high": "RTLSCOUT_REASONING_EFFORT=high, one level below Z.AI's default max for this model: 2k to 6k output tokens per step against 13k to 18k for the default row. Pinned to Z.AI.",
+  "deepseek-v4.1-flash": "Default effort, which DeepSeek documents as high. Pinned to the CoreWeave endpoint (fp8).",
+  "mimo-v2.6-flash": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8).",
+  "mimo-v2.6-pro": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8).",
+  "glm-5.3": "Default effort, which Z.AI documents as max for this model. Pinned to Z.AI.",
+  "deepseek-v4-pro": "Default effort, which DeepSeek documents as high. Pinned to Alibaba's endpoint; DeepSeek's own endpoint is excluded by the OpenRouter account's data policy.",
+  "qwen3.8-2.4t": "The open-weight 2.4T-A95B variant of Qwen3.8 Max, always in thinking mode. Pinned to Alibaba's endpoint."
+ },
+ "footnotes": [
+  "Rows labelled as measured before the current suite are earlier data (pre-v1 seed runs from July 2026 with an unpackaged rtlscout, or suite-v1 runs from October 2026 without the provider pin and completion cap). Each is replaced when reruns of that entry under the current suite are published.",
+  "All entries were called through OpenRouter without prompt caching, so every step pays for its full input."
+ ]
+}

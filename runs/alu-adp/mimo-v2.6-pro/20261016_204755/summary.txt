@@ -1,0 +1,26 @@
+## Summary
+
+**Final result:** PASS, ADP = 466,687 (area 384.1, delay 1215ps) vs. starting_point.sv baseline 645,629 (area 441.5, delay 1462ps) — **−28% ADP**, all 1,028,192 equivalence checks passing. Best design lives in `starting_point.sv` (edited in place; the run's best eval is the final verified configuration).
+
+### Approaches tried and what worked
+
+1. **Explicit Sklansky parallel-prefix adders (`pp_add` module)** replacing inferred `+`/`-` (Yosys/ASAP7 maps `+` to slow carry chains). Neutral-to-mild alone, but essential infrastructure.
+2. **Balanced result mux / cmp_result** — the `unique case (operator_i)` result mux synthesized as a ~16-deep priority chain; rewriting as one-hot AND-OR (`rsel[15:0]`) was a clear win (1462→1340ps).
+3. **Unified lane-flexible barrel shifter** — merged the three vector-mode shifters + 3-way output mux into one 5-stage shifter with select-aware stages (mode select folded into stage enables/cross-fill logic). Big area win (439→383) and modest delay win.
+4. **Group-CLA main adder (the biggest single win, 513k→467k):** replaced the 37-bit "separator" adder with 4× 8-bit `pp_add` lane adders exposing group generate/propagate plus a small carry network reproducing the original lane semantics exactly (chained in 32-bit mode, killed in vector modes, `adder_cin` inject). Halved the adder nodes and cut a prefix level (delay 1340→1215).
+5. Fast lane compares (pp_add9 with carry-out), threshold-based bmask (`bmask[k] = (k>=b) && (k<b+a+1)`), balanced ff_input/bitop_result muxes, divider sharing one prefix adder for add/sub + A≥B compare (cout + zero-detect).
+
+### Regressions / dead ends
+
+- **CSA-merged mode-split adder restructure** (lane adders + f32 CSA path): +45 area, +148 delay — the extra parallel adders mapped poorly. Reverted.
+- **MAJ-form rewrite of the prefix G-combine:** functionally wrong (G⟹P invariant fails at combined prefix nodes) — caught by TB, reverted.
+- **Flattened shuffle controls:** a wash (−37ps delay, +14 area) in the best config; kept the original `unique case` blocks.
+- **Compare revert to behavioral `>`, bmask double-constant-shift, clpx-ABS adder remap, target_delay sweeps (900/2000):** all landed worse. The clpx-ABS variant was left out after a paren-balance syntax error on the last experiment (reverted).
+- ABC's response to RTL changes is noisy and non-monotonic (±50ps swings), so every change was measured and reverted if worse.
+
+### Lessons learned
+
+1. **Measure every change** — several "obvious improvements" (priority-chain flattening in shuffle, behavioral compares) regressed once ABC re-balanced the whole netlist.
+2. Preserve exact behavioral semantics when restructuring arithmetic: the separator-adder lane semantics (kill/pass carry, per-lane cin) had to be reproduced bit-exactly — including `adder_result_expanded[36]`'s meaning for CLIP (cout ^ a[31] ^ b[31]) and CSA's dropped carry-out bit.
+3. Restructuring the *shared* wide adder into mode-aware lane adders + group carries beat both "one big prefix" and "fully parallel per-mode adders" — sharing the group G/P across modes is what kept area flat while cutting depth.
+4. Next steps: finish the clpx-ABS mux simplification, trim the divider's 32-bit prefix adder (off critical path), and revisit popcnt — plus re-test previously neutral changes now that the critical path moved.

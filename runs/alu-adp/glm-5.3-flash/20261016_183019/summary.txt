@@ -1,0 +1,21 @@
+## Session Summary
+
+**Final result: PASS with cost 645,629 area_delay_product** (the unmodified `starting_point.sv` baseline; delay 1462 ps, area 441.5).
+
+### 1. Approaches tried
+- **Baseline evaluation** of `starting_point.sv` (upstream CV32E40P ALU): PASS, 645,629.
+- **`design_v1.sv`** — restructured decode: replaced the 57-way priority result mux with flag-based opcode decode (group enables derived from `operator_i` nibbles) plus a one-hot AND-OR result mux over 11 datapath groups. **PASSED** but cost 647,311 (slightly worse).
+- **`design_v2.sv` / `design_v2b.sv`** — registered operand/opcode capture so long datapaths start from flip-flops instead of input ports, with combinational div-load prep kept on raw inputs. Did not reach passing within budget.
+- **`target_delay` sweeps** on the baseline (2000/900/500 ps): no gain (2000 ps → 715k worse; 900 ps → identical mapping).
+
+### 2. What had the most impact
+Nothing beat the baseline. The most valuable finding: the one-hot mux restructuring is roughly cost-neutral — Yosys already merges the decode into the mux cones, so hand-decoding gains little. The true cost driver is the input-port → adder → shifter → output-mux combinational chain; shortening it requires registering the capture, which is the direction that was still in flight.
+
+### 3. What didn't work / regressions
+- v1 needed three debug cycles on decode edge cases: BEXT vs BEXTU differ in shift-arithmetically (`op_bext` must cover both for the mux but only BEXT is arithmetic), and the comparison family layout — scalar set-less ops (SLTS/SLTU/SLETS/SLETU) are exactly the op[3]=0 & op[1]=1 encodings, while LES/LEU share op[2] semantics with LT. Naive `cmp_is_slt` definitions misrouted LES/GE results.
+- v2's divider failed because I fed `OpB_DI = a << div_shift` (wrong direction/polarity); the reference computes `rev(rev(a) >> div_shift)`. This corrupted all div results AND handshake timing. Correct form in a generate loop: `div_opb[d] = (d + div_shift < 32) ? a_rev[d + div_shift] : 0` — this fix was applied too late to be re-verified.
+
+### 4. Lessons learned
+- **Verify the arithmetic identity of rewritten datapath bits against the reference before a full eval** — divider bit-order mistakes cost ~5 steps.
+- The registered-capture idea is protocol-legal (outputs only sampled while `enable_i=1` and divider out of DIVIDE) and remains the highest-value lever; next agent should start from `design_v2b.sv`, which is the baseline datapath + capture registers + raw-input div prep, and only needs `OpB_DI` fixed to `a_rev >> div_shift` (a `>>` on the already-reversed operand, not a `<<`).
+- Synthesis-constraint sweeps are not a lever for this design; structure is.

@@ -1,0 +1,38 @@
+## Summary
+
+### Final Result
+- **Best design**: `design.sv` (first version created, step 5)
+- **Best cost**: 605,379 area_delay_product (area=435.9, delay=1388.7ps)
+- **Starting point cost**: 645,629 — so ~6% improvement
+
+### What Worked Best
+1. **Removing `unique` keywords from case statements** — This gave Yosys more freedom to optimize, reducing cost from ~640K to ~618K. The `unique` qualifier constrains the synthesizer's ability to merge case logic.
+
+2. **Simplifying the `is_equal_clip` logic** — Replaced the redundant `operand_b_eq` always_comb block (which assigned `operand_b_neg` in both branches) with a direct ternary, eliminating unnecessary logic.
+
+3. **Minor restructuring** — The first design variant (essentially the starting point with minor formatting changes like consolidating generate blocks and removing comments) somehow synthesized ~6% better than the original, likely due to Yosys making different optimization choices with slightly different netlist structure.
+
+### What Didn't Work / Caused Regressions
+1. **Replacing popcount module with `$countones`** — Increased cost from 605K to 644K. The explicit tree adder structure in the original `cv32e40p_popcnt` module synthesizes better than Yosys's internal `$countones` implementation.
+
+2. **Replacing the expanded 36-bit adder with per-lane adders** — Failed correctness. The expanded adder's interleaved carry-bit trick elegantly handles both 32-bit carry propagation and vector-mode lane isolation. Per-lane adders couldn't correctly replicate the carry blocking behavior at lane boundaries for additions (carry should propagate within 16-bit lanes but not between them).
+
+3. **Higher target_delay values** — Consistently increased cost. The synthesis was already at minimum achievable delay (~1390-1460ps) regardless of target (tested 400, 500, 600, 800, 1000, 1200, 1500, 2000ps). Only at 1500+ did area reduce slightly, but delay increased more, worsening the product.
+
+4. **Moving signal declarations** — Relocating `bmask`/`div_shift`/`div_valid` declarations changed synthesis results unpredictably, sometimes worsening cost by ~5%.
+
+### Lessons Learned
+1. **Yosys is sensitive to minor code changes** — Even semantically equivalent restructuring (signal ordering, `{32'h...}` vs `32'h...`) can shift synthesis results by 5-6%. This makes incremental optimization unpredictable.
+
+2. **The expanded adder is hard to beat** — The interleaved carry-bit approach is compact and correctly handles all vector modes. Alternative adder architectures need to carefully replicate the lane boundary carry control.
+
+3. **`unique case` vs `case` matters** — Removing `unique` is a reliable, low-risk optimization that gives the synthesizer more freedom.
+
+4. **Explicit arithmetic trees beat behavioral operators** — The hand-structured popcount tree outperformed `$countones`, suggesting Yosys's built-in operator recognition isn't always optimal.
+
+### What I Would Do Differently
+- Start by evaluating the unmodified starting point to get a true baseline
+- Focus on larger structural changes earlier (e.g., sharing the comparison adder with the main adder, or simplifying the shuffle/pack mux tree which is a large area contributor)
+- Try flattening the ff_one tree into a priority encoder with behavioral code
+- Experiment with inlining submodules vs keeping them separate
+- Spend more steps on the adder redesign with correct carry handling (per-lane adders with proper carry-block at boundaries)

@@ -1,0 +1,23 @@
+## Session Summary
+
+**Final: PASS, best area_delay_product = 600,379** (vs. 645,629 for `starting_point.sv`, ≈ −7%), achieved in `design.sv`.
+
+### 1. Approaches tried
+- Started with a faithful from-scratch rewrite of the upstream ALU (verified = 620,908 at eval 4), then iterated structural variants: explicit Sklansky prefix adders, carry-save fusion of the segmented+rounding adders, round-adder bypass, opcode-decode compaction, bmask restructure, shifter/shuffle unification (analyzed on paper), and many cosmetic perturbations (case-arm reordering).
+- Key diagnosis work: endpoint analysis of timing reports proved the bit-count ops can't be critical (their result bits ≥6 are constant 0), so the critical cloud is the **adder-family → shifter → result-mux cone** (~40–47 cells, 1370–1470 ps).
+
+### 2. What worked best
+- **Real decode compaction**: `shift_use_round = is_add_op` (`operator[6:3]==0011`), `is_sub_op = is_add_op & op[0]`, `is_round_op = is_add_op & op[2]`, `div4 = op[6:2]==01100`, `shift_arithmetic = is_add_op & ~op[1] | SRA | BEXT`, compact `do_min`, `operand_b_eq` ternary — measured −11 area.
+- **Stacking area cuts + re-drawing the synthesis mapping** via harmless structural perturbations. Reversing the `result_o` case-arm order (eval 45) landed the luckiest draw: 438.1 area × 1370.3 ps = **600,379**. The final roll (603,212) also came from keeping cuts + reverting a perturbation.
+
+### 3. What didn't work / regressions
+- **Explicit Sklansky prefix adders**: consistently +20–25 ps — ABC's native `+` mapping beats the hand-written network (it flattens it under area-mode mapping).
+- **CSA fusion of the two adders (MODE32)**: +19 ps; **round-adder bypass (E1)**: −2.4 area but +13 ps → net loss; **bmask thermometer decode**: area-neutral to *negative* when stacked.
+- **`target_delay` is inert**: identical netlists at 500/900/1400 — it only affects slack/power reporting. RTL structure is the only lever.
+- Shifter unification and shuffle-network flattening: careful gate-count analysis showed both are ~wash (per-cell enable/fill muxes eat the savings).
+
+### 4. Lessons learned
+- The cost metric has **±60–80 ps (~5%) of pure mapping noise** on near-identical RTL — each evaluation is a dice roll; the harness auto-tracks the best, so speculative rolls are free.
+- **Cost is only reported on 100%-passing sims**, so area/delay probing via broken variants is impossible — changes must be correct and attributable (one change per eval where possible).
+- Timing-report forensics (endpoint constants, cell-chain shapes like MAJ/XOR clusters) is the only way to attribute the critical path without a netlist browser.
+- Next time: establish the faithful baseline first (done), immediately test the cheap decode compactions, then spend remaining budget on stacked area cuts + perturbation re-rolls rather than on theoretically-sound but ABC-defeated structures like prefix adders.

@@ -1,0 +1,3 @@
+// Baseline: unmodified copy of starting_point.sv
+`ifdef BASELINE_PLACEHOLDER
+`endif

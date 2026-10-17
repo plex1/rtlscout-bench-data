@@ -1,0 +1,32 @@
+## Summary
+
+**Final state: PASS was only achieved by the unmodified `starting_point.sv` (cost 6.456e5). My rewritten `design.sv` was still FAILING at the step limit.**
+
+### 1. Approaches tried
+
+I rewrote the ALU from scratch in `design.sv` rather than incrementally editing the starting point, targeting these structural savings:
+- **Single adder for add/sub/ABS/compare**: one 36-bit segmented adder with per-lane carry-in slots, deriving all lane compares (`lt8/lt16/lt32`) from its carry bits instead of the upstream's separate 4-lane 9-bit signed comparators.
+- **Signed compare via the "sign-bit OR" trick**: `lt_signed = (a_sign & ~b_sign) | (~(a^b signs) & lt_unsigned)`, avoiding operand pre-muxing.
+- **One lane-aware barrel shifter** (5 stages of 1/2/4/8/16) with per-lane fill and rotate wiring, replacing upstream's 64-bit shifter *plus* separate 16-bit and 8-bit per-lane shifters.
+- **Priority-encoder sharing** for FF1/FL1/CLB/div_shift via a single loop-based encoder.
+- **Kept the divider cycle-exact** but merged DIVIDE/FINISH control.
+
+### 2. What worked
+- Correct: divider handshake/latency (ready timing matched from the first working build), popcount, min/max, adder lane segmentation, CLIP, shuffle/pack (after transcribing upstream's tables exactly), and the borrow-based compare skeleton.
+- Debugging via TB error messages was very effective — each error line pinpointed the exact family that was broken.
+
+### 3. What didn't work / regressions
+- **`ready_o` stuck low**: assigning to an output declared as `wire` procedurally (Verilator PROCASSWIRE). Fixed with an internal `reg` + `assign`.
+- **Priority encoder polarity**: returned the *highest* set bit; FF1 needs the *lowest* (loop must run downward).
+- **Shifter direction**: my `bstage` initially shifted the wrong way; also missing sign-fill at 32-bit-only stages, and wrong fill-bit for the m32/m16 lane boundary bytes. Multiple iterations.
+- **BREV**: I applied the group-reverse to `brev(shift_result)`, double-reversing; the two full bit-reversals cancel, so it must use the raw barrel output.
+- **EXT 16-bit table**: one wrong literal (`1'b0` vs `1'b1` in `shuffle_byte_sel[1]`).
+- **Compare carry polarity (still open at the end)**: `carry(a+b+1)` is *not* `a≥b`. Making the adder subtract for compare ops (`is_cmp`) was the right idea, but the borrow then flows across lane boundaries through the carry slots differently and I ran out of steps validating it — the final run still had all-zero compare results.
+- Tool quirks: `automatic` variables inside functions break Yosys; `{8{x},8{y}}` concatenation is illegal.
+
+### 4. Lessons / next time
+- **Start from the working file and make small, individually-verified edits.** A full rewrite of 57 opcodes with SIMD lanes has too many interacting details to debug inside a 60-step budget; the "many small diffs, evaluate each" strategy the prompt recommends is genuinely the right one.
+- **Verify a candidate rewrite against the reference ALU with a tiny self-written smoke test** (or better: run the provided TB early and often) rather than reasoning purely from the spec text.
+- **Write comparison logic in its obvious subtract form from the start** (`lt = ~carry(a + ~b + 1)`) and test it standalone before integrating.
+- Transcribing lookup tables (shuffle/EXT/INS) should be done by copy-paste from the reference, never retyped.
+- Budget-wise: I spent ~10 steps on file-reading and ~15 on a fundamentally broken first draft; a correct-but-unoptimized starting point passed on step 6, so the wasted margin was the difference between shipping an optimization and shipping nothing.

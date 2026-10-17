@@ -1,0 +1,23 @@
+## Summary
+
+**Final state:** `design.sv` — a restructured CV32E40P ALU, PASS with **549,176** area_delay_product (down from 645,629 for the starting point, −15%; delay 1462→1217 ps, area ~unchanged).
+
+### What I did and what worked
+
+1. **Baseline measurements** (`starting_point.sv`): cost 645,629 at both tight (200 ps) and default (500 ps) constraints; loose constraints (1e6 ps) actually gave *worse* cost (715,264). Yosys does not meet the timing constraint anyway, so `target_delay` had no useful effect — the RTL structure was the real lever.
+
+2. **Restructured design** (`design.sv`): rewrote the ALU with a flat one-hot opcode decode (`f_add`, `f_sll`, `f_shuf`, ...) replacing ~60 `==` comparators, keeping the upstream datapath semantics byte-for-byte (adder-with-lane-carries, bidirectional bit-reversed shifter, shuffle/pack network, popcount/ff_one submodules, serial divider untouched). This alone was roughly cost-neutral (642,946) but set up later wins.
+
+3. **Fast Sklansky prefix adders** (biggest win): replaced the `+`-based 36-bit expanded adder and the 32-bit rounding adder with hand-written Sklansky parallel-prefix functions `sk36`/`sk32` (generate/propagate loops written as functions). Caveat found the hard way: the CLIP logic needs bit 36 = carry36 ⊕ a[35] ⊕ b[35] because the original used a `$signed` 36+36→37-bit add. Cost 642,946 → 595,442.
+
+4. **ff_one priority encoder**: replaced the isolate-LSB + one-hot-encode trick with the upstream balanced mux tree (smaller/faster). 595,442 → 549,176.
+
+### What didn't work
+- **Sharing the divider's comparator with its subtractor** (deriving `>=`/`==` from the carry/zero of a single add/sub, pre-inverting B, selecting carry-in): correct on all 1M checks but *increased* cost to 591,065 — the muxing added more delay than the removed comparator saved. Reverted.
+- Removing FL1/CLB from the `shift_left` mux (theoretically dead logic, since their results come from ff_one): regressed to 572,120 (delay +54 ps). Reverted. Yosys's timing-driven mapping is very sensitive to these control-signal fanout changes; not every "obviously smaller" change helps the product.
+
+### Lessons
+- Write the whole file in one careful pass; partial drafts with placeholders cost several steps on syntax/width errors (`{8{x},...}` concatenation needs explicit repetition braces).
+- The one-hot decode + prefix adder combination was worth 15%; the divider datapath and the barrel shifter are already near-optimal for this metric, and touching them was counterproductive.
+- With ~60 steps and a 65k-token/turn limit, keep reasoning short and batch independent edits; spend steps on evaluation rather than re-reading files.
+- Next time I would first evaluate a handful of structural variants (Brent-Kung vs Sklansky, shifter restructure) in parallel copies, then concentrate on the single best one.
