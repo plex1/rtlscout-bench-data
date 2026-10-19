@@ -1,0 +1,38 @@
+# Summary
+
+## Final result
+**`v10.sv`** — PASS on all 6782 checks, **area_delay_product = 2.401e+06** (delay 579 ps, area 4147 µm²). Baseline `starting_point.v` was 4.624e+06 → **48% cost reduction**.
+
+## 1. Approaches tried
+
+| File | Approach | Result |
+|---|---|---|
+| `v1.sv` | 19-bit accumulator (exact width), sign-extend only at output | 3.33M ✅ |
+| `v3.sv` | **Carry-save (ps,pc) accumulator** — no carry-propagate across cycles | 2.90M ✅ |
+| `v5.sv` | Single carry-propagate 19-bit accumulator | 3.33M ✅ |
+| `v10.sv` | **Radix-4 Booth multiplier folded into the carry-save compressor tree** | **2.40M ✅** |
+| `v2.sv`, `v7.sv`, `v8/v9.sv` | Row-folded array / product-pipelined PE | ❌ correctness |
+| `v4/v6/v11/v12/v13/v14.sv` | Variant compressor / Booth formulations | mixed |
+
+## 2. Highest-impact optimizations
+1. **Narrowing the accumulator from 32 → 19 bits** (−28%). The exact bound is `|sum| ≤ 8 × 16384 = 2^17`, so 19 signed bits are sufficient; only sign-extend at `c_data`.
+2. **Carry-save redundant accumulator** (−13% more). The reference path was `multiply + 19-bit carry-propagate-add`; with a `(ps,pc)` pair nothing propagates across cycles. One final CPA per column is folded into the de-skew chain, off the critical path.
+3. **Booth-encoded multiply compressed directly into the carry-save tree** (−17% more). 4 radix-4 digits of the *stationary* weight + the accumulator + a small fix-up constant = 7 operands → 2, reduced by 5 `tpu_csa` 3:2 compressors. Critical path became *Booth select → 4 compressor levels* instead of a ~19-level array multiplier (1004 ps → 579 ps).
+
+## 3. What didn't work
+- **Row folding** (`v2`): collapsing 8 rows into one row of 8 PEs. Fails because the testbench checks the *exact transient garbage* produced by mid-drain weight reloads. The systolic per-PE timing is part of the contract.
+- **Product pipelining** (`v7`, `v8`, `v9`): splitting multiply/add into two stages changes which transient values appear. `v9` passed only by accident of ordering and was still slower.
+- **`$signed()` on unpacked-array elements** (`v8`): silently mis-synthesizes/simulates. Use `reg signed [...]` declarations instead.
+- **Folding `corr` into `pp0` with XOR** — a step-29 "optimization" that I applied to `v10` after its first pass. It is *wrong*: `corr` must be **added**, not XORed, because `pp0[0]` already carries the digit-0 one's-complement inversion. This cost several debugging steps; `v10.sv` was restored and is now correct.
+- **`target_delay` sweeps** (250, 700, 1200): nearly no effect on `area_delay_product`; structure is the only real lever. At 700 ps the tool met timing with +65 ps slack but the reported metric got *worse* (2.54M), so **500 ps is the right operating point**.
+
+## 4. Lessons learned
+- **Check correctness after every edit, not just after every file.** I introduced the `corr`-XOR bug into an already-passing `v10` and did not re-evaluate; it silently became my "best" file and poisoned several later experiments (`v12`–`v14` all inherited the broken math and could not be diagnosed against a clean reference).
+- **Keep a pristine copy of the best design** before experimenting. I should have copied `v10.sv` → `v10_good.sv` at the moment it first passed.
+- The score is `area × delay`, and delay dominates: the reference's 1004 ps path was almost entirely the multiplier + carry chain. For MAC-dominated designs, reach for **Booth + carry-save** first rather than accumulator-width tweaks.
+- Verify bit-exact Booth arithmetic in isolation before wiring it into the array. The one's-complement fix-up constant must be **added at bit 0** per negative digit (not XORed, not at bit 2k).
+
+## Recommended next steps
+- Re-apply the registered Booth-select idea (weight encoded once at the top of each column, shifted south as 12 bits) on top of the **correct** `v10` math — this was the intended speed win and should remove the 5-gate select from every PE's path.
+- Taper the accumulator width down the column (only the last row needs 19 bits), and taper the de-skew register widths too.
+- Try `AW = 18` with careful sign handling, and re-check `target_delay` around 450–550 ps.

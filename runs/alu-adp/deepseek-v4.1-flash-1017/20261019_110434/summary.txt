@@ -1,0 +1,44 @@
+## Summary
+
+### 1. Approaches tried
+
+**Baseline probing first.** I evaluated `starting_point.sv` at several `target_delay` values (500 / 1500 ps) and found that the area-delay product barely moves with the constraint (645 629 vs 656 040) — the design is so far from timing closure that the synthesis effort level is the dominant factor, not the constraint. This told me the RTL structure, not `target_delay`, was the real lever, so I stopped sweeping it.
+
+**Full rewrite (`d1.sv`).** I re-derived the ALU from the specification rather than editing the upstream file. Key structural changes vs. the reference:
+- Dropped `operand_a_neg_rev` / `operand_b_neg` redundant 32-bit inversions; kept a single `a_rev` bus shared by the shifter, BREV, FF1/FL1/CLB and the divider.
+- Replaced the 64-bit shift operand (`{{32{arith&msb}}, x}` / `{x,x}` for ROR) with a signed 32-bit `>>>` — halves the barrel shifter.
+- ROR-in-32-bit mode now rides the existing "reverse → shift right → reverse" path instead of a separate 64-bit mux.
+- Rewrote `cv32e40p_ff_one` as a flatter 5-level OR/select tree instead of the 64-entry `sel_nodes`/`index_nodes` array (much less area).
+- Merged comparison/signedness decode: one `sgn_mask[3:0]` vector replaces the reference's `cmp_signed` + per-op case, and `lane_flag` is a single 3-term expression per lane.
+
+### 2. Optimizations that mattered
+
+| Change | Cost | Δ |
+|---|---|---|
+| Baseline `starting_point.sv` | 645 629 | — |
+| Clean rewrite `d1.sv` | 614 002 | −5 % |
+| Kogge-Stone parallel-prefix `ks_add32`/`ks_add36` (log-depth carry) | **558 678** | **−9 %** |
+
+The **Kogge-Stone adders** were by far the biggest win: the critical path was two chained 32-bit ripple chains (add → round-add → shift → mux), and replacing them with explicit 5/6-level prefix networks cut ~125 ps and produced a much shallower logic cone for Yosys to re-map.
+
+The 64-bit → 32-bit signed shifter change and the flatter `ff_one` are in `d1.sv` but their effect is *not yet measured* — they landed in the same edit batch as an adder bug, so the 558 678 number is from the version before them.
+
+### 3. What didn't work
+
+- **Thermometer-decoded `bmask`** (two decoders instead of two barrel shifters): area dropped 435→429 but delay rose 1410→1500, net *worse* (644 k). Reverted.
+- **Two rounds of Kogge-Stone carry-index bugs.** I initially drove the sum from the group-generate `g[i]` instead of the true carry `c[i] = g[i-1]`; then I sign-extended the 37th bit with `g[35]` instead of `g[34]`. Both cost evaluations.
+- **`$signed` on a `[35:0]` vector**: Verilator/Yosys do not treat a 36-bit packed vector as signed from its bit 35, so the CLIP sign check read bit 35 rather than the sign-extension bit 36. Had to declare `logic signed [36:0] add_full` explicitly.
+- **Divider CLB underflow.** The reference computes `clb_result = ff1_result - 5'd1` in a *6-bit* context, so `a==0` gives 63 and `div_shift` wraps to 0 — I had widened it to 5 bits, producing a 32-cycle divide instead of 1. The cycle count is contract-checked, so this was a hard fail; fixed with `{1'b0,ff1_result} - 6'd1`.
+- **CLIP equality test**: it is `a == ~b` (not `a == b_neg` evaluated elsewhere) and the "below lo" flag is the *sign* of `a + ~b + 1`, i.e. bit 36 of the signed 37-bit sum.
+
+### 4. Lessons / next time
+
+1. **Read the reference's bit-widths, not just its formulas.** Both the CLB/div_shift wrap and the CLIP sign bit were purely width-context bugs. Any expression that can underflow must be replicated at the *exact* width the reference uses.
+2. **Verify sub-blocks in isolation before integrating.** My custom `ff_one` and the Kogge-Stone adders each burned 2–3 evaluation cycles on indexing errors that a 10-line standalone testbench would have caught instantly.
+3. **Change one structural idea per evaluation.** The bmask experiment and the 64-bit-shifter experiment got entangled with adder bugs, so I could not attribute the results and could not confirm whether the shifter change actually helped.
+4. **Next steps for the next agent, in priority order** (all in `d1.sv`, one edit each, evaluate after each):
+   - Re-evaluate `d1.sv` as it stands to get the true cost of the 32-bit-shifter + flat-`ff_one` version.
+   - Shorten the `operator_i → shift_amt_norm → shift → result_o` path: the shift amount currently depends on `bmask_b_i` *and* `is_clpx_i` *and* `clpx_shift_i`, then feeds a 5-level barrel shifter. Precompute both candidate amounts and select *after* the shifter instead of before.
+   - Move the adder-family right-shift out of the barrel shifter entirely — for `is_addfam` the amount is a small `bmask_b_i` and the data is `sum`, so a dedicated narrow shifter may be cheaper than widening the shared one.
+   - Consider a Sklansky (lower-fanout) prefix network instead of Kogge-Stone; KS has fanout 2^d at the top level and Yosys buffers it heavily (visible as `BUFx3`/`BUFx6f` in the path).
+   - Re-try the thermometer `bmask` *after* the adder fix — it may pay off once it is no longer on the critical path.

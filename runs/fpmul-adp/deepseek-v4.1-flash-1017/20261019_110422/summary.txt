@@ -1,0 +1,35 @@
+## Summary
+
+### 1. Approaches tried and what worked best
+
+| File | Approach | Result |
+|---|---|---|
+| `design_v1.v` | Baseline (given starting point, copied verbatim) | PASS, 145,429 |
+| `design_v2.v` | Single unified shift: subnormal/normal both reduced to "shift P by k, round once" | PASS, 147,219 |
+| `design_v3.v` | v2 + leaner pack stage | PASS, 148,217 |
+| **`design_v4.v`** | `lza+lzb` normalization (no 22-bit LZC on the product) + one 1-bit alignment select | **PASS, 132,903 (best)** |
+| `design_v9.v` | Window `{P,12'b0}` shifted by a single unified amount, 6-stage shifter | PASS, 134,021 |
+| `design_v13.v` | v9 + grouped LZC, parallel sticky prefix tree, carry-select exponent | PASS, 133,392 |
+| `design_v10.v` | Fixed shift + 1-bit post-select to break mul→shift dependency | PASS, 145,087 (worse) |
+| `design_v6/v7/v8/v11/v12` | Iterations of the unified-shift idea | various bugs, fixed |
+
+### 2. Optimizations with the most impact
+
+- **Replacing the 22-bit leading-zero count of the product with `lz(ma)+lz(mb)`** (input-only, available before the multiplier finishes). This was the single biggest win — 145k → 133k — because it removes an entire serial dependency stage from the critical path.
+- **Computing `ov` (the normalization carry) as a plain indexed bit `P[21-A]`** instead of using a 23-bit shifted product.
+- **Unifying normal and subnormal rounding into one barrel shift + one rounder** (instead of two parallel datapaths with two shifters, two sticky trees, two rounders), which cut area from ~109 to ~92.
+- **Carry-select on the rounding increment** (`cout = rnd & (&frac)`) instead of waiting for the 11-bit increment carry.
+- **Computing the sticky bit from the raw product with a parallel prefix-OR tree**, indexed by `d-12`, so it doesn't sit serially after the shifter.
+
+### 3. What didn't work / caused regressions
+
+- `design_v10.v` (breaking the mul→shift dependency via a 1-bit post-select) **regressed** to 145k — the extra mux logic cost more than the removed dependency.
+- The `target_delay` knob had **zero effect** on area/delay here: Yosys mapped identically at 500 ps and 1400 ps. Not worth spending steps on for this design.
+- I burned roughly 12 of 60 steps on a series of off-by-one/misalignment bugs in the window shift (`9` vs `10` vs `12` offsets, `{P,9'b0}` vs `{9'b0,P}` reversed packing, `si = d-12` vs `d-13`). Each cost a full eval cycle.
+
+### 4. Lessons learned / what I'd do differently
+
+- **Build a bit-exact mental model on paper first.** Nearly all my failures were window-packing arithmetic slips, not algorithmic errors. Deriving `d = 21-A+ov` and "sticky index = d-12" analytically before writing RTL would have saved many iterations.
+- **Don't trust that a "simplification" reduces delay.** v10's premise (shorten the dependency chain) was sound but the added muxes outweighed it — always measure.
+- **The critical path is ~40 logic levels and ~1400 ps, dominated by the 11×11 multiplier plus the normalization chain.** Further gains likely require attacking the multiplier itself (e.g. Booth/Wallace with explicit structure) or accepting a different normalization scheme; the ripple of the 22-bit shifter and the sticky reduction are the remaining big blocks.
+- **Best carried-forward artifact is `design_v4.v`** (132,903) — the `lza+lzb` + single-align-select structure. `design_v13.v` (133,392) is nearly as good and structurally cleaner, so it's the better starting point for a next round of edits.

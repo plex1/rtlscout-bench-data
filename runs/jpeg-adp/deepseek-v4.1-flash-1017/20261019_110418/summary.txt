@@ -1,0 +1,31 @@
+## Summary
+
+### 1. Approaches tried
+
+I built three working variants plus one failed experiment:
+
+- **`starting_point.v`** — the unmodified core_jpeg composition. Baseline cost **9.50M** (area 4274, delay 2222 ps).
+- **`design_v1.sv` / `design_v2.sv`** — full rewrites with narrowed widths. Both failed with the same symptom (block 0 correct, later blocks zero) but I couldn't localize the bug in time; v2 is the 32-bit version, v1 the 20-bit version.
+- **`design_v3.sv`** — **correct**, cost **8.25M**. Narrowed datapath (x-pass 18-bit operands / 31-bit products, transpose 20-bit words) + replaced the signed `/256` with a bias-then-shift idiom.
+- **`design_v4.sv`** — **correct, best result: 5.96M** (area 4005, delay 1489 ps). Same as v3 but with a **registered one-hot read-select** in the transpose RAMs.
+
+### 2. Optimizations with the most impact
+
+1. **Registered one-hot read select in the transpose RAM (biggest win: 8.25M → 5.96M, delay 2026 → 1489 ps).** The critical path was `rd_addr_q` → 32:1 read mux; the address register drove 4×(32×20) mux inputs directly, giving a 1361 ps clock-to-Q from sheer fanout. Replacing the mux with `mux_r = OR({20{sel[i]}} & ram[i])` where `sel` is a *registered* one-hot decoded from the **next** address removed that fanout entirely. Note the alignment subtlety: the one-hot must be computed from `nxt_addr` (the address applied in the current cycle), not the current `rd_addr_q`.
+2. **Narrowing the transpose to 20-bit words** (vs 32) — the x-pass output provably fits in 20 bits, so this cuts the RAM/mux area by ~37%.
+3. **Replacing signed `/256`** with `(p + (p[31] ? 255 : 0)) >>> 8`, where `p` is the 32-bit product. The original divider was a long carry chain. **Key gotcha:** the bias must be selected on the *product's* sign, not the operand's — using `o_t6_5[31]` instead of `p[31]` produced 3 wrong vectors.
+4. **Narrowing the multiplier operands** (16→13-bit constants, 18-bit x-pass / 21-bit y-pass inputs) instead of full 32×32.
+5. **Dropping the second RAM port** — only the read port is used.
+
+### 3. What didn't work / caused regressions
+
+- **Full rewrites (`design_v1/v2`).** Two independent bugs: (a) `bi0 + bi4` evaluated in 16-bit context, silently truncating; (b) **implicit 1-bit wires** for `outport_dataN_w` inside the transpose truncated all data to 1 bit. That second one cost me the most steps — the symptom (only block 0 correct) was misleading because block 0's data was all zeros anyway. Always declare wires explicitly with full width.
+- **Splitting the `(x*181)/256` into two pipeline stages** — broke correctness (9774 errors) because the extra cycle misaligned the whole `out_stg` schedule. Would need a matching extra `valid`/`idx` delay stage. I reverted it in the final edit but never re-verified before running out of steps.
+- **Relaxing `target_delay` to 2000** — almost no effect (8.246M → 8.233M). Delay is RTL-structural, not constraint-driven.
+
+### 4. Lessons learned / next time
+
+- **Diff incrementally from the known-good file**, one change at a time, evaluating after each. My big-bang rewrites burned ~10 steps on debugging.
+- When a design fails identically across two variants, the bug is in the *shared* structural code, not the widths — bisect rather than adding more `$display` statements.
+- **The final `design_v4.sv` edit was not evaluated.** The first thing the next agent should do is run `run_evaluation` on `design_v4.sv`; if it fails, the reverted block is the culprit. The 2-stage divide pipeline is still a promising direction for another ~400 ps of delay reduction — it just needs two more delay stages on `out_stg2/3_valid_q`/`idx_q` to stay aligned.
+- Remaining obvious headroom: the y-pass multiplier→adder tree and the `block_out` mux/`ptr_conv` decode are the likely next critical paths once the divide is pipelined.

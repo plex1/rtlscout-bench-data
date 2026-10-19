@@ -1,0 +1,27 @@
+## Summary
+
+**Final result: PASS, cost 919,596 (down from the 968,045 baseline).**
+
+### 1. Approaches tried
+
+- **`starting_point.v` (kept, and the best file)** — the reference implementation with two targeted edits. This is the design to carry forward.
+- **`opt1.sv`** — a full re-partition of the pipeline that pulls the max-exponent tree into stage 1, so the overloaded reference stage (fixed shift → exponent difference → alignment barrel shifter → two's complement) splits across two register stages. This is the most promising direction and passed correctness once, but only spuriously (Verilator resolved the duplicate module name to the included reference). The real bug was a width error in the exponent-difference signal: I declared it `[(EXP_WIDTH+1)-1:0]` (6 bits) when `EXP_WIDTH=6`, so it must be `[EXP_WIDTH:0]` (7 bits) to hold the signed subtraction. **That fix was applied in the very last step and never evaluated** — it is the first thing worth re-running.
+- **`c1..c3.sv`, `v1..v4.sv`, `d1..d7.sv`** — a from-scratch compact datapath (direct regime extraction instead of a 15-bit LZC + barrel shifter; sign folding via bit-inversion + popcount instead of 17 incrementers; balanced adder tree instead of a CSA tree). Never converged.
+
+### 2. Optimizations that had the most impact
+
+Replacing the 16 `radix4_booth_multiplier` instances (5×5 Booth + CSA trees) with a plain `*` operator — **968,045 → 919,596 (−5%)** — and shorting `mul_carry` to zero since `mul_sum` already holds the full product. Critically, plain `*` is bit-identical to the reference's narrow Booth multiplier; I verified this empirically.
+
+### 3. What didn't work / caused regressions
+
+- **Sign folding via XOR + popcount** (`sum_i(sign ? ~x+1 : x) == sum_i(x ^ sign) + K`). Mathematically exact, but the reference's `compressor_4to2` *truncates* carries, so the identity breaks. This is a genuine trap: **the reference CSA tree is not a faithful 17:2 compressor**, so no algebraic rewriting of the operand set is safe.
+- **`target_delay` is a no-op here.** 300, 500, and 950 ps all gave identical area and delay. The RTL structure alone sets timing; don't spend steps sweeping it.
+- **`include` of the reference file** is risky — it silently created a duplicate `pdpu_top_pipelined` and made a broken design look correct. Any file using it needs the reference top renamed.
+- **`pdpu_pkg::clog2` / `cf_math_pkg::idx_width`** and function-return-style bodies are load-bearing for the reference modules; my hand-derived bit mappings (regime_k truncation to the low 2 bits, `shift_amount` clamping at `MAX_SHIFT_AMOUNT`) were wrong repeatedly.
+
+### 4. Lessons learned
+
+- **Verify correctness of the *real* module.** One "PASS" was an artifact of module-name collision. Always confirm which module the simulator actually elaborated.
+- **Derive bit-level semantics from the code, not from posit theory.** The reference decoder feeds only `regime_k[1:0]` into `rg_exp` and clamps shifts; the multiplier is a truncated Booth. Reading those details directly was worth more than any amount of reasoning about the format.
+- **Don't rebuild what you can reuse.** The right move was much earlier: `include` the proven `posit_decoder`, `posit_encoder`, `csa_tree`, `barrel_shifter`, and `mantissa_norm`, and only re-partition the *registers* (latency, not function, is the free variable). I reached this at step 53 with ~7 steps left.
+- **Next time:** start by re-running `opt1.sv` with the 7-bit `df` fix. The critical path there is `pipe2_rg_exp_max → pipe3_mantissa_comp` at 918 ps, which the repartition should cut substantially — that is where the remaining cost reduction lives. If it passes, try further splitting the two's-complement/CSA work away from the barrel shifter, and re-check whether the 17 incrementers can be replaced once the *reference* compressor (with its truncation) is retained rather than rewritten.

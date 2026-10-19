@@ -1,0 +1,30 @@
+## Summary
+
+**Final result: PASS, cost 5.30e+05 area_delay_product** (down from the starting point's 6.46e+05, a ~18% reduction), area ≈ 425, delay ≈ 1246 ps.
+
+Design file: `starting_point.sv` (I edited it in place; `v1_543k.sv` is an empty placeholder, ignore it).
+
+### 1. Approaches tried
+- **Baseline**: ran `starting_point.sv` unmodified → 645,629 ADP (area 441.5, delay 1462 ps). The critical path started at `operator_i`, i.e. the 57-way `unique case` result mux that Yosys lowers into a deep priority chain.
+- **One-hot group select + balanced OR-AND result mux** (14 group decodes via a single `unique case` producing `gsel[13:0]`, then masked-AND terms ORed in a balanced tree). This was the single biggest structural win and moved the critical path off the opcode decode.
+- **32-bit barrel shifter** replacing the 64-bit `{2{shift_op_a}}`/`$signed(...)` shifter used in VEC_MODE32: a 5-stage shift-by-1/2/4/8/16 network where each stage's fill is `rotate ? shifted-out bits : {N{sign}}`, with ROR as an extra control term. Handles SRL/SRA/ROR with one 32-bit shifter instead of a 64-bit one.
+- **Explicit Kogge-Stone prefix adder** (`cv32e40p_prefix_add`, parameterized) for the 36-bit ALU adder and the 32-bit rounding adder, replacing the inferred `+` operators.
+- **Parallel bit-mask generation**: replaced `(~(32'hFFFFFFFE << bmask_a)) << bmask_b` (two serial 5-stage shifts) with `(32'hFFFFFFFF << bmask_b) & ~(32'hFFFFFFFF << (bmask_a+bmask_b+1))` — two parallel shifts and a 6-bit add.
+- **Cheaper CLIP equality**: gated `is_equal_clip` with the clip/abs/minmax group selects so the 32-bit equality doesn't sit on every path.
+
+### 2. Optimizations with most impact
+1. Balanced one-hot result mux (645k → 622k, and it removed the opcode-decode-dominated critical path).
+2. 32-bit barrel shifter (622k → 601k).
+3. Kogge-Stone prefix adders — first the ALU adder (601k → 583k), then the rounding adder (583k → 543k). This was the largest single delay drop (1359 → 1246 ps).
+4. Bit-mask parallelization (547k → 530k).
+
+### 3. What didn't work
+- **`target_delay` sweep (500 → 200 → 100)**: cost was *bit-identical* every time. The metric is purely structural for this design; don't spend steps on it.
+- **Compact priority encoder** (a `for` loop with 32 cascaded `if`s) to replace `cv32e40p_ff_one`'s index-LUT tree: passed functionally but *regressed* delay by ~38 ps (1296 vs 1258) because the loop synthesizes as a 32-deep ripple mux. Reverted.
+- **Mask arithmetic bugs cost ~5 steps**: the `≥32 → 0` guard and the inversion direction. Note: Verilog `<<` by an amount ≥ width already yields 0, so the comparator is unnecessary (that final simplification is in the file but **not yet verified** — run `run_evaluation` on `starting_point.sv` first thing to confirm it still passes).
+- Several one-hot decode bugs (AND/OR/XOR at 7'h15/2e/2f, BEXTU at 7'h29) — the opcode encodings are not bitwise-uniform; I had to enumerate them in a `case`.
+
+### 4. Lessons learned / next steps
+- Yosys+ABC preserves RTL *logic depth* — the real lever is flattening the operation-selection cone and replacing `+`/`<<`/`case` operators with explicit shallow structures. RTL restructuring gave 4× more than any tool knob.
+- The remaining ~1250 ps is still one long path from `bmask_b_i`/`operator_i` through the adder→round→shift chain. Highest-value next steps: (a) replace the 8/16-bit-mode `>>>` expressions (still inferred, feeding the same `shift_right_result` mux) with explicit per-lane barrel shifters; (b) shorten the `bmask`/`shift_amt_int` → `shift_amt_left` → shifter control path by computing per-lane amounts directly; (c) precompute the clip/minmax select with a shared 32-bit magnitude comparator rather than reusing `is_greater_vec`; (d) reduce area further by sharing the 8/16/32-bit shifter stages instead of instantiating three separate width variants.
+- Verify correctness after *every* edit — several of my regressions were simple decode inversions that a single eval caught immediately.

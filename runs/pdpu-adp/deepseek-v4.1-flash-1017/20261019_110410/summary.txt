@@ -1,0 +1,46 @@
+## Summary
+
+### 1. Approaches tried
+
+I started from `starting_point.v` (baseline cost **968,045** ADP, delay 910 ps, area 1063) and wrote a completely fresh, compact implementation in **`design.sv`** which became the best result:
+
+**Final best: `design.sv` — 889,465 area_delay_product (delay 932 ps, area 954)** — PASS on all 1,999,992 checks.
+
+Variants kept on disk (all evaluated, see notes):
+| file | result |
+|---|---|
+| `design.sv` | **PASS, 889,465 ADP ← best** |
+| `design5/6/7.sv` | correct intermediate steps toward design.sv |
+| `design9.sv` | PASS, 940,507 |
+| `design10.sv` | PASS, 918,277 |
+| `design11.sv` | PASS, 921,745 |
+| `design12.sv` | PASS, 966,515 |
+| `design13.sv` | PASS, 1,089,613 |
+| `design2/3/4/8.sv` | broken intermediate attempts |
+
+### 2. Optimizations that had the most impact
+
+- **Replacing the hand-rolled radix-4 Booth multiplier + 4:2/5:3 compressor tree with plain `*`** on 4×4 mantissas. The reference's 8×8 Booth Wallace multiplier was enormous overkill; the posit(8,2) mantissa is only 4 bits, so the true product is 8 bits. This was the single biggest area win.
+- **Folding the reference's `{1'b1,~signs[i],temp_prods[i],...}` partial-product sign-extension machinery** away entirely — the reference multiplier produced sum+carry that had to be added later; a direct `*` gives one operand.
+- **Reducing the decoded exponent field from 8 to 7 bits** and keeping the reference's exact 4-bit mantissa width (so `MUL_WIDTH=8` instead of `2*(MANT_WIDTH_I+1)=8`).
+- **Replacing the reference's 46-bit barrel shifter in the posit encoder** with a single 31-bit variable-position window read `W >> sa` plus an explicit `sticky`/`rbit` extraction. Same function, far less muxing.
+- **The sign-mask identity** `neg ? 2^20-1-a : a == {6{neg}, a^{14{neg}}}` with a **popcount of the 17 sign bits** folded into the accumulator — this removes 17 conditional two's-complement negators from the align stage.
+- **Saturating clamp** `sh = (|diff[7:4]) ? 14 : diff[3:0]` instead of comparing against `ALIGN_WIDTH` with a full-width OR-reduce.
+- **Truncating the align payload** to exactly `ALIGN_WIDTH=14` bits (the reference's own truncation) rather than carrying 16+ bits.
+
+### 3. What didn't work / caused regressions
+
+- **Carry-save trees in the accumulator** (`design7/9/10/11/12/13`) consistently *hurt*: they reduced area slightly but lengthened the critical path, because Yosys maps the 20-bit CPL adder better than a deep 3:2 tree here. Every CSA variant scored 918k–1,089k, all worse than the plain balanced adder tree in `design.sv`.
+- **Moving the leading-zero count into an earlier stage** (`design11`, `design12`) made the *last* stage dominant instead — the LZC + normalize + encode chain in S5 then became the critical path at ~1000 ps.
+- **Deeply rebalanced stage boundaries** (`design10` 4-level CSA in S3, `design12` 3-level) never beat the simple arrangement; the pipeline was already reasonably balanced.
+- **Several outright bugs** cost many steps: packed-array widths (`17*W` vs `16*W`), the encoder's `rg_exp_mant` needing *zero*-extension above bit 29 (not regime extension), regime field bit ordering `{regime, exp, mant}`, the exponent-difference direction (`emax - ei`, not `ei - emax`), and truncating a 4×4 multiply into a too-narrow context (must declare 8 bits).
+- **`target_delay` sweeps** (300, 500, 700, 1100) gave *identical* results — the tool appears to map at a fixed point regardless, so this knob was a dead end here.
+
+### 4. Lessons / what to do differently
+
+- **Get correctness first with the simplest arithmetic**, then optimize. My first correct design (`design.sv`) was also my best; all subsequent structural "optimizations" regressed.
+- **Don't assume carry-save beats a balanced adder tree** — verify per design. Here the reverse was true.
+- **Check packed-vector widths explicitly** when hand-writing flat arrays; three separate failures traced to off-by-one element counts.
+- **Verify the reference's exact bit-slicing** (especially `posit_encoder`'s `rg_exp_mant` concatenation order and zero-extension) before optimizing around it.
+- **Balance the pipeline by measuring**, not by guessing — several attempts shifted the bottleneck to the final encode stage.
+- If continuing: the winning path is probably to **further shrink `design.sv`'s S2→S3 align stage** (17 parallel 14-bit variable right shifts) and to try trimming the accumulator to fewer bits, since area (954) is now the larger ADP term while delay (932 ps) is roughly unchanged from baseline.

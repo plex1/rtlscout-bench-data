@@ -1,0 +1,41 @@
+# Final Summary
+
+**Result: PASS (6782/6782 checks), cost = 2,361,005 area_delay_product** — a 1.96× improvement over the provided starting point (4,624,409).
+
+Winning file: **`v18.v`** (best), backed up by `v14.v` (2,457,262) and `v12.v` (2,816,575) as safe fallbacks.
+
+---
+
+## 1. Approaches tried, and what worked
+
+I explored three structurally distinct families:
+
+- **Systolic PE mesh (original style)** — `starting_point.v`, `v1.v`. Only real win here was narrowing the accumulator to 19 bits (8 products of signed 8-bit values max out at ±131072), which alone dropped cost 30%.
+- **Broadcast A + combinational adder tree** — `v4.v`, `v3.v`, `v2b.v`. **All failed correctness**, and this was the most instructive failure of the session.
+- **Broadcast weights + explicit per-element skew, exact 8-deep linear cascade** — `v5.v` onward. This family worked and carried every subsequent win.
+
+## 2. Optimizations with the most impact
+
+Ranked by payoff:
+
+1. **Narrow accumulator (32→19 bits)** — 4.62M → 3.24M. Trivial and free.
+2. **Redundant (carry-save) accumulator** — `v12.v`, 3.06M → 2.82M. Internal partial sums are never observable, so carry them as a (sum, carry) pair; each cascade stage becomes one 3:2 compressor and only **one** carry-propagate adder per column survives, at the very end.
+3. **Radix-4 Booth encoding** — `v14.v`, 2.82M → 2.46M. 4 partial products instead of 8, so the per-stage compressor tree is 3 levels instead of 5.
+4. **Sparse correction vector** — `v18.v`, 2.46M → 2.36M. Replaced the 19-bit `+1` incrementer in each Booth digit with a pure-wiring `corr = Σ neg_k << 2k` vector folded into the first compressor, removing ~4 gate levels.
+5. **Replacing the weight-shift mesh with plain registers + 8-bit shift-register skew** — 3.24M → 3.20M. Small direct gain, but it enabled the broadcast-weight structure above.
+
+**`target_delay` matters a lot here:** the default 500 ps was far too loose. Sweeping down to **150 ps** on `v14`/`v18` cut ~20% off delay for ~1% area. Worth doing early, not late.
+
+## 3. What didn't work
+
+- **Balanced adder tree / early product summation** (`v2b`, `v3`, `v4`, `v6`, `v8`–`v10`). This was the biggest trap. I initially assumed I could re-associate the accumulation freely since only the final result is checked. **Wrong.** A mid-drain weight reload freezes every PE's partial sum in the original array, and because there *are* mid-drain reloads in the vector set, the frozen intermediate values are observable. **The 8-deep linear accumulation chain is mandatory; only the accumulator's internal encoding (binary vs. redundant) is free.**
+- **Splitting multiply and add into separate pipeline stages** (`v10`, `v15`, `v16`, `v17`) — four attempts, all failed. The tap-delay arithmetic forces `(i+j-1) + 1 + (8-i) + (7-j) = 15`, but the golden element `(0,0)` sees `a_data` **combinationally** (row skew 0), which makes its product ungated and it picks up the new A row on the first cycle after a reload. Every variant got the 15-stage budget right and still failed on this reload edge case. I could not find an encoding that both splits the MAC and preserves that behaviour.
+- **Booth encoder bug** in my first attempt (`is1 = b1 ^ b0` instead of `b0 ^ bm`) — caught by comparing against the identity/extreme vectors at line ~102.
+
+## 4. Lessons learned
+
+- **Read the golden vectors as a specification, not just a test.** The failure at line 271 (`got` matched the *previous* test's expected row) is what told me the accumulation staging was load-bearing. Decoding a handful of vector lines by hand was far more productive than another synthesis sweep.
+- **Establish correctness on a minimal structure first**, then layer optimizations one at a time. My `v5` was deliberately conservative (binary accumulator, no Booth) precisely so that later failures in `v12`/`v14` were unambiguously attributable.
+- **Two big wins were "free" because of unobservable state**: the 19-bit width (bounded value range) and the redundant encoding (internal representation). Hunting for unobservable degrees of freedom beat any gate-level tweaking.
+
+**What I'd do differently:** I burned ~12 of 60 steps on the broadcast/adder-tree family before understanding the reload-freeze constraint. Next time I'd decode the vector file's structure (reload positions relative to valid windows) *before* writing any RTL, and I'd sweep `target_delay` downward immediately after the first passing design rather than at step 56 — the 150 ps result on `v14` (2.457M) arrived only four steps before the limit, and it's likely `v12` would also have benefited from a low target delay that I never tested.

@@ -66,6 +66,11 @@
    "20261015_172859",
    "20261015_211109",
    "20261016_003010"
+  ],
+  "deepseek-v4.1-flash-1017": [
+   "20261019_110412",
+   "20261019_110422",
+   "20261019_110432"
   ]
  },
  "exclude": [
@@ -96,7 +101,8 @@
   "glm-5.3": "Default effort, which Z.AI documents as max for this model. Pinned to Z.AI.",
   "deepseek-v4-pro": "Default effort, which DeepSeek documents as high. Pinned to Alibaba's endpoint; DeepSeek's own endpoint is excluded by the OpenRouter account's data policy.",
   "qwen3.8-2.4t": "The open-weight 2.4T-A95B variant of Qwen3.8 Max, always in thinking mode. Pinned to Alibaba's endpoint.",
-  "mimo-v2.6-pro": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8). Run 20261015_212411 lost 7 steps (6 to 10, 56 and 58) to malformed provider responses that rtlscout charged as steps without a design change; kept, since the loss can only have lowered its result."
+  "mimo-v2.6-pro": "Default: thinking on (a toggle at Xiaomi). Pinned to Xiaomi's endpoint (fp8). Run 20261015_212411 lost 7 steps (6 to 10, 56 and 58) to malformed provider responses that rtlscout charged as steps without a design change; kept, since the loss can only have lowered its result.",
+  "deepseek-v4.1-flash-1017": "The 2026-10-17 snapshot of V4.1 Flash, default effort, which DeepSeek documents as high. Pinned to the DeepInfra endpoint (fp8); CoreWeave, the V4.1 Flash row's pin, does not serve this snapshot."
  },
  "footnotes": [
   "Rows labelled as measured before the current suite are earlier data (pre-v1 seed runs from July 2026 with an unpackaged rtlscout, or suite-v1 runs from October 2026 without the provider pin and completion cap). Each is replaced when reruns of that entry under the current suite are published.",

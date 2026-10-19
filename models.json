@@ -6,28 +6,40 @@
    "name": "GLM 5.2",
    "vendor": "Z.ai",
    "open_weights": true,
-   "price_per_mtok": {"input": 1.4, "output": 4.4},
+   "price_per_mtok": {
+    "input": 1.4,
+    "output": 4.4
+   },
    "price_note": "via OpenRouter, Z.AI endpoint (provider pin), list price on 2026-10-14, no prompt caching; the pre-v1 records (2026-07) carry the price of that time, 0.81/2.55"
   },
   "openrouter:moonshotai/kimi-k3": {
    "name": "Kimi K3",
    "vendor": "Moonshot AI",
    "open_weights": true,
-   "price_per_mtok": {"input": 3.0, "output": 15.0},
+   "price_per_mtok": {
+    "input": 3.0,
+    "output": 15.0
+   },
    "price_note": "via OpenRouter, no prompt caching"
   },
   "openrouter:nvidia/nemotron-3-ultra-550b-a55b": {
    "name": "Nemotron 3 Ultra",
    "vendor": "NVIDIA",
    "open_weights": true,
-   "price_per_mtok": {"input": 0.5, "output": 2.2},
+   "price_per_mtok": {
+    "input": 0.5,
+    "output": 2.2
+   },
    "price_note": "via OpenRouter, no prompt caching"
   },
   "openrouter:z-ai/glm-5.3-flash": {
    "name": "GLM 5.3 Flash",
    "vendor": "Z.ai",
    "open_weights": true,
-   "price_per_mtok": {"input": 0.15, "output": 0.5},
+   "price_per_mtok": {
+    "input": 0.15,
+    "output": 0.5
+   },
    "price_note": "via OpenRouter, no prompt caching; list price on 2026-10-10",
    "default_reasoning_effort": "max"
   },
@@ -35,7 +47,10 @@
    "name": "DeepSeek V4.1 Flash",
    "vendor": "DeepSeek",
    "open_weights": true,
-   "price_per_mtok": {"input": 0.2, "output": 0.65},
+   "price_per_mtok": {
+    "input": 0.2,
+    "output": 0.65
+   },
    "price_note": "via OpenRouter, CoreWeave endpoint (provider pin), list price on 2026-10-14, no prompt caching",
    "default_reasoning_effort": "high"
   },
@@ -43,7 +58,10 @@
    "name": "MiMo-V2.6-Flash",
    "vendor": "Xiaomi",
    "open_weights": true,
-   "price_per_mtok": {"input": 0.14, "output": 0.28},
+   "price_per_mtok": {
+    "input": 0.14,
+    "output": 0.28
+   },
    "price_note": "via OpenRouter, Xiaomi endpoint (provider pin), list price on 2026-10-14, no prompt caching",
    "default_reasoning_effort": "thinking on"
   },
@@ -51,7 +69,10 @@
    "name": "DeepSeek V4 Pro",
    "vendor": "DeepSeek",
    "open_weights": true,
-   "price_per_mtok": {"input": 0.66, "output": 1.98},
+   "price_per_mtok": {
+    "input": 0.66,
+    "output": 1.98
+   },
    "price_note": "via OpenRouter, Alibaba endpoint (provider pin; DeepSeek's own endpoint is excluded by the account's data policy), list price on 2026-10-14, no prompt caching",
    "default_reasoning_effort": "high"
   },
@@ -59,7 +80,10 @@
    "name": "GLM 5.3",
    "vendor": "Z.ai",
    "open_weights": true,
-   "price_per_mtok": {"input": 1.4, "output": 4.4},
+   "price_per_mtok": {
+    "input": 1.4,
+    "output": 4.4
+   },
    "price_note": "via OpenRouter, Z.AI endpoint (provider pin), list price on 2026-10-14, no prompt caching",
    "default_reasoning_effort": "max"
   },
@@ -67,7 +91,10 @@
    "name": "MiMo-V2.6-Pro",
    "vendor": "Xiaomi",
    "open_weights": true,
-   "price_per_mtok": {"input": 0.435, "output": 0.87},
+   "price_per_mtok": {
+    "input": 0.435,
+    "output": 0.87
+   },
    "price_note": "via OpenRouter, Xiaomi endpoint (provider pin), list price on 2026-10-14, no prompt caching",
    "default_reasoning_effort": "thinking on"
   },
@@ -75,9 +102,23 @@
    "name": "Qwen3.8 2.4T-A95B",
    "vendor": "Alibaba Qwen",
    "open_weights": true,
-   "price_per_mtok": {"input": 2.0, "output": 6.0},
+   "price_per_mtok": {
+    "input": 2.0,
+    "output": 6.0
+   },
    "price_note": "via OpenRouter, Alibaba endpoint (provider pin), list price on 2026-10-14, no prompt caching",
    "default_reasoning_effort": "thinking on"
+  },
+  "openrouter:deepseek/deepseek-v4.1-flash-1017": {
+   "name": "DeepSeek V4.1 Flash 1017",
+   "vendor": "DeepSeek",
+   "open_weights": true,
+   "price_per_mtok": {
+    "input": 0.098,
+    "output": 0.294
+   },
+   "price_note": "via OpenRouter, DeepInfra endpoint (provider pin, fp8, standard tier), list price on 2026-10-19, no prompt caching",
+   "default_reasoning_effort": "high"
   }
  }
 }

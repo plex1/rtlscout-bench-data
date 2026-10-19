@@ -1,0 +1,32 @@
+# Summary: fp_mul_e5f10 (binary16 multiplier)
+
+## Final result
+**Best: `design_v3.sv` — PASS, 103,006 area_delay_product** (delay 1139 ps, area 90.4 µm²). Starting point was 145,429 (delay 1338, area 108.7), so **~29% cost reduction**, all from delay.
+
+## 1. What approaches I tried
+| File | Approach | Result |
+|---|---|---|
+| `starting_point.v` | baseline: LZC on product → shift → round | 145,429 ✅ |
+| `design_v1.sv` | LZC computed from **input mantissas in parallel with the multiply** | 106,956 ✅ |
+| `design_v3.sv` | v1 + **single sticky-injecting barrel shifter** + unified exponent path + cheap output select | **103,006 ✅ best** |
+| `design_v4/v5/v6/v7/v8/v10/v12` | micro-variants (const-minus-exp shift amounts, 4-bit shifter, prefix increment, single output mux, unified datapath) | 105k–126k, several FAIL |
+
+## 2. Optimizations that had the most impact
+- **Moving the leading-zero count off the critical path** (v1, −38k). The original did LZC on the 22-bit product then shifted → multiply→LZC→shifter→round. Since the product's MSB position is `msb(ma)+msb(mb)`, computing `msb10(fa)`/`msb10(fb)` from the *input* mantissas lets the shift amount be ready almost as soon as the product.
+- **Single unified barrel shifter** (v3, −4k). Replaced the separate "normal right-shift" and "subnormal shift" paths with one shift amount `S = (g≥36) ? q−10 : 26−t`, and one exponent add clamped at 0 (`max(0, g+ext+carry−35)`). Removes a whole normal/subnormal datapath mux.
+- **Sticky injection inside the shifter** (v3). Collect the shifted-out bits level-by-level (`k1..k5 = |shifted-out`) instead of a separate 22-bit prefix-OR tree plus a 32:1 mux on `prod[s1-2]`. This killed a large chunk of both area and delay.
+- **Cheap specials**: `y = (exp==31) ? {sign, exp} : (exp==0) ? {sign,0} : val` — implemented as `sat = big|zero_in`, `exp_o = (nan|big) ? 31 : sat ? 0 : e5`, plus a single `ovf = ~e7[6] & (e7[5] | (&e7[4:0]))`.
+
+## 3. What didn't work / regressions
+- **Parallel-prefix incrementers for the rounding +1** (v7, v10): I repeatedly got the bit-direction wrong (`n[j:0]` vs `n[j-1:0]`); the ripple `+1` was not on the critical path anyway.
+- **Removing the post-round fraction mux** (`frac = nr[9:0]`, v6): correct but *slower* — the mux was free and its removal lengthened the path.
+- **Unified exponent via `+7'h5D` (mod-128 subtract)** (v12): subtly wrong for subnormals; the carry into bit 10 does not increment the exponent, so `e5` must fall back to `nr[10]` when clamped.
+- **target_delay sweep**: 100 → identical to default (103,006); 2000 → 112,255 (worse delay). Default (500) was optimal. Confirmed this is a weak knob.
+- **Area is essentially flat** (88–91 µm²) across all variants — the 11×11 multiply dominates. **All gains came from delay.**
+
+## 4. Lessons learned / what I'd do next
+1. **Bisect, don't guess.** I burned ~8 steps on prefix-incrementer bugs. A tiny self-checking testbench (or evaluating a mid-edit file) would have caught direction errors instantly.
+2. **Verify each micro-edit with an eval.** Several FAILs were single-line slips in otherwise-sound restructurings.
+3. **The next big lever is the 11×11 multiplier**, which is now the dominant delay contributor (the timing report shows the XNOR/XOR cascade from `a[14]` through the array). Ideas not yet tried: (a) exploit that the top bits of the significand product are needed early — split the multiply into a low-power, delay-optimized carry-save tree; (b) note that the exponent path is now nearly free, so the remaining critical path is multiply → shifter → round; (c) consider a **two-stage** formulation where the shifter operates on a redundant (carry-save) product form and the final add is merged into the rounding increment.
+4. `design_v3.sv` is the file to build on — it is the cleanest correct implementation. `design_v8.sv` (105,700) is a near-equivalent alternate with a single 16-bit output mux worth re-examining.
+5. Start from `design_v3.sv`, and if pursuing the multiply restructure, keep v3 as the known-good fallback.

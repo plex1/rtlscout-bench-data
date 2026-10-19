@@ -1,0 +1,42 @@
+# Session Summary
+
+## Final result
+**PASS, best cost 783,306 area_delay_product** (delay 749 ps, area 1045) — a **19% improvement** over the provided baseline (`starting_point.v` at 968,044 / delay 910 ps). The passing design is saved as **`starting_point.v`** (in-place optimized).
+
+## 1. Approaches tried
+
+| File | Approach | Result |
+|---|---|---|
+| `starting_point.v` (baseline) | upstream PDPU RTL | PASS, 968k |
+| `starting_point.v` + Wallace tree + popcount fold | replace recursive serial-carry `csa_tree` with balanced 3:2 Wallace tree; fold the 17 per-lane two's-complement incrementers into one `popcount(signs)` term | **PASS, 920k** |
+| `starting_point.v` + max-tree split | split the 17-input `comp_tree` into 9+8 before pipe1, single `comparator` after pipe1 | **PASS, 783k** ← best |
+| `v1.sv`, `v2.sv`, `v3.sv` | full from-scratch re-derivation of the posit decode/encode arithmetic (custom `lzc_lead`, packed lane registers, my own widths) | **FAIL** — never bit-exact |
+| `starting_point.v` + balanced LZC tree (`lzcn`) | replace the 19-deep priority chain in `mantissa_norm` | **FAIL** (introduced in final step) |
+
+## 2. Optimizations with the most impact
+
+1. **Max-exponent tree rebalancing (−137k, 17%)** — the single biggest win. The 17-input `comp_tree` alone spanned a whole pipeline stage. Splitting it 9+8 before pipe1 and leaving only one `comparator` in the pipe1→pipe2 stage cut ~160 ps off the critical path.
+2. **Popcount fold of the two's-complement (−48k)** — `s ? -a : a` = `(a ^ s) + s`, so all 17 lane incrementers collapse into one 5-bit `popcount(signs)` adder added into the Wallace tree. Removes a 19-bit incrementer from the align path.
+3. **Balanced Wallace tree (−?) — came with #2** — the reference `csa_tree` is a *serial* 5:3 chain (`cin[i+1]=cout[i]`), i.e. a 19-deep ripple. `wallace_lvl` does flat 3:2 rows (18→12→8→6→4→3→2), which is far shallower.
+
+## 3. What didn't work
+
+- **Full rewrite (`v1`/`v2`/`v3.sv`)**: three attempts, all failed. The reference is riddled with *accidental* width-truncation behaviour that is functionally load-bearing:
+  - `regime_k` is only `nd+1 = 4` bits signed, so regime values beyond ±8 wrap;
+  - `rg_exp_o = regime_k << es | exp` has no sign extension into `EXP_WIDTH+1`;
+  - `product[(N)*ALIGN_WIDTH]` uses `MANT_WIDTH_O+2 = 15`, but `mant_norm_acc` is 14 bits wide;
+  - `sum_c = ~pipe4_sum_result + 1` is a 20-bit negate of a 20-bit value, and `final_mant` takes `sum_norm[18:7]` — i.e. the reference's own normalize shift is off by one relative to `DECIMAL_POINT`.
+  
+  Any clean re-derivation changes these and breaks bit-exactness. **Do not re-derive; transcribe.**
+- **The last change (balanced `lzcn` LZC)** broke correctness (`exp=0008 got=0000`). The substitution is not equivalent because the reference's `mantissa_norm` computes `exp_adjust` from `leading_zero_count` *without* the `lzc_zeroes` guard for the `<= DECIMAL_POINT-1` branch, and my `shift_sum`/`rg_exp_adjust` pair does not reproduce that for the `sum_c == 0` case. It should be reverted (delete the `lzcn` instance, restore `mantissa_norm`).
+
+## 4. Lessons learned / what to do differently
+
+- **Get a correct design fast, then make surgical edits to it.** I burned ~12 of 60 steps on three failed rewrites. The two edits that actually paid off were ~20 lines each in the original file.
+- **Trust the reference's oddities.** Any expression whose width is narrower than the "natural" width (4-bit `regime_k`, `nd+1`-bit `rg_exp_o`, the `~x+1` on a 20-bit value) is a behaviour to replicate, not a bug to fix.
+- **When a rewrite fails, bisect against the reference rather than rewriting again.** I should have swapped in one module at a time (`posit_decoder` first, verify, then `posit_encoder`, etc.).
+- **Next steps that looked promising and were not reached:**
+  - Replace `mantissa_norm`'s LZC with a *correct* balanced tree (must handle `lzc_zeroes` → `exp_adjust = 0`, and note the `<= DECIMAL_POINT-1` branch is `DP-1-lz` while the other is `DP-1-lz` negated — both are `DP-1-lz` in magnitude, so `exp_adjust = DP-1-lz` for `lz <= DP-1` and `lz-DP+1` otherwise; the two agree at `lz == DP-1`).
+  - The remaining critical path is `pipe4_sum_result → lzc → shift → exp`; moving `mantissa_norm`'s exponent adjustment *after* pipe5 (it is cheap and the encoder already re-derives everything from `rg_exp`) would shorten it.
+  - `comp_tree`'s `comparator` uses a 2-bit `sign_ab` case with a magnitude compare in the default arm — replacing it with a single signed compare (`$signed(a) > $signed(b)`) is area-neutral but shorter.
+  - Splitting the 17-way Wallace tree across pipe3/pipe4 was not attempted and is likely worth another ~50–80 ps.

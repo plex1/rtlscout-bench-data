@@ -1,0 +1,26 @@
+## Summary
+
+### 1. Approaches tried
+- **`starting_point.v`** — baseline (cost 145,429; delay 1338 ps, area 108.7).
+- **`design_v3.v`** — restructure: multiply raw significands, post-normalize with a 1-bit select (`p[21]`). Correct but slower (1729 ps) because the LZC-free path wasn't actually shorter — the normalization select fed the exponent and the subnormal shifter.
+- **`design_v5/v6/v7.v`** — pre-normalize significands with an LZC + barrel left-shifter *before* the multiplier. Correct (area ~94, delay 1578–1636 ps), but the pre-shifter added depth without shortening the multiply.
+- **`design_v11.v` — the winner (cost 101,417; delay 1124 ps, area 90.3).** Key idea: compute `lz = lz(ma)+lz(mb)` from the **raw significands** (fully parallel with the multiplier), then use **one** 23-bit right shifter on `2*p` with `s = 10-lz` (normal) or `26-esum` (subnormal). The mantissa window is *always* `Y[11:1]` and the round bit is always `Y[0]` for both paths — no dual windows, no ambiguous-case fixup. The normal path's one extra shift is handled by the single select `e = Y[12]`.
+- **`design_v13.v`** — attempt to further shrink the packing stage with early-select muxes + OR-based overflow force. Not finished (still had a zero-operand override bug at session end).
+
+### 2. Biggest wins
+- **Parallelizing the leading-zero count with the multiplier** (LZC on raw operands, not on the product) — this alone took delay 1578 → 1124 ps.
+- **Unifying the normal and subnormal mantissa windows** to the same `Y[11:1]`/`Y[0]` alignment so one rounder serves both paths (the `26-esum` shift with `e`-less selection).
+- **Removing the pre-multiply shifter** (v5's `shl11` on both significands) — it was pure added depth.
+- **Simplifying special-case packing**: letting zero results fall out naturally and using `inf_a|inf_b` in the overflow test removed whole mux levels.
+
+### 3. What didn't work / caused regressions
+- **Pre-normalization before the multiply** (v5/v6/v7) — smaller area but longer delay; net worse.
+- **`target_delay`** — verified it produces a *bit-identical* netlist (tested 500 vs 1200 on `design_v6.v`); it is not a usable knob here. RTL structure is the only lever.
+- **v8/v9/v10/v12** — repeated sign/scale-factor errors in the unified shift-amount algebra (`26-esum` vs `26+lz-esum` vs `25-esum`, and `E0` needing a `-10` bias). Each cost 2–4 eval steps.
+- **v13's OR-force packing** — `(exp_n | {5{ovf}}) & ~zero` is not equivalent to the mux; zero operands must be excluded from the force *and* the `sub` path's `S[10]` must not leak into `En[4:0]` when `ovf` is high.
+
+### 4. Lessons / what I'd do differently
+- **Derive the bit-alignment algebra once, on paper, with explicit `2^` factors** before coding. Most of my 60 steps went to re-deriving the same scale factor (`value = ma·mb·2^(esum-50-c)`, `c = 10(ea_z+eb_z)`) after failed evals.
+- **Build a tiny self-checking scratch test** for the intermediate `Y`/`S` signals rather than relying on the 18.9 M-vector TB (each eval is expensive feedback).
+- **Next step from `design_v11.v`**: finish the v13 packing rewrite (correctly excluding zero operands from the overflow force), and separately try computing `s_s = 26-esum` with a 5-bit subtractor shared with `E0`, since the packing + exponent stage still accounts for ~340 ps of the 1124 ps path. Also worth trying: `Kogge-Stone`/`Sklansky`-style structure on the final 11-bit round-increment adder, which the timing report showed as a late serial chain.
+- Keep `design_v11.v` as the known-good reference; it is the file to build from.

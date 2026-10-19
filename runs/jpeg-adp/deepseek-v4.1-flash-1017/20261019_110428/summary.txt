@@ -1,0 +1,38 @@
+## Summary
+
+### 1. Approaches tried, ranked by outcome
+
+| Version | Approach | ADP | Result |
+|---|---|---|---|
+| `starting_point.v` | Original core_jpeg (5 general 32×32 mults/pass, 4×32×32 dual-port transpose RAM) | 9.50e6 | baseline |
+| `design.sv` (final PASS) | 2 constant-multiplier engines + 16×8×20 register-file corner turn + 7-stage pipeline | **3.77e6** | **best (2.52× better)** |
+| intermediate | 7 constant mults, one register set, shared transpose | 3.92e6 | PASS |
+| intermediate | 14 separate A/B multiplier instances (mistake) | 6.27e6 | PASS, slower |
+| intermediate | mux-based operand select in multiply path | 5.44e6 / 6.83e6 | PASS, slower |
+
+### 2. Optimizations with the most impact
+
+1. **Replacing general 32×32 multipliers with constant multiplies** — the single biggest win. `y*C` and `x*C4` (10 general mults) became 7 constants per engine (C1..C7 + 181).
+2. **Register-file corner turn instead of a dual-port RAM array** — the original 4×32×32 RAM's binary read mux made *one flop drive ~320 gates* (1447 ps just leaving the flop). Two fixes mattered:
+   - Transpose layout `tr[{bank,col}][row]` so a whole **column is read as one contiguous slice** (8 separate reads, row index constant per output).
+   - **Registered one-hot AND-OR select** instead of a binary mux → no high-fanout flop.
+3. **Pipelining into short stages** — the decisive structural change. Products → 2-level t-tree → dv → ×181 → w. Every stage is at most one constant multiply or one adder level.
+4. **Register-enable operand select instead of a datapath mux** — keeps the phase decode out of the multiply path.
+5. **Narrowing the row pass to 31 bits / 20-bit transpose storage** — provable bound `|w>>>11| ≤ 395254` fits in 20 bits.
+
+### 3. What didn't work / caused regressions
+
+- **Phase-decode → mux → multiply** chain: the `selb` flop drove the mux, adding 570 ps. Replaced with enable-controlled operand registers.
+- **Instantiated 14 multipliers** instead of 7 by having separate A/B operand registers — nearly doubled area. Fixed by one operand register set reloaded per round.
+- **`*181/256` as a shift/add tree in one stage** — 32-bit carry chain, 1328 ps critical path. Split into multiply stage + truncating-shift stage.
+- **`ext()` zero-extension when PW > 32** — silently dropped the sign bit; had to use implicit resize to get 32-bit wraparound.
+- **CSD decompositions written from memory** were wrong for C1/C2/C5/C6/C7 (e.g. C6 = 1567 = 2^11 − 2^9 + 2^5 − 1, not what I first wrote). This was the last fix applied.
+- **`PW = IW + 13`** was one bit short → 4799 errors.
+
+### 4. Lessons learned
+
+- **In this flow, fanout is the delay killer, not logic depth.** A "nice" register-file with a binary mux read produces a flop with 300+ loads and dominates everything. One-hot read or banked reads are essential.
+- **Always keep the multiply path mux-free.** Register enables are free; a mux in front of a multiplier is not.
+- **Constant multipliers (CSD shift/add) beat inferred `*` in Yosys** — but only if the decomposition is verified numerically. I should have written the CSD check *before* editing RTL.
+- **Verify fixed-point semantics bit-exactly**: 32-bit wraparound must apply to the `*181` multiply even in the narrower row pass — the row pass is 31-bit but the reference's scaling still wraps at 32.
+- **Next time**: (a) build the transpose + one-hot read first and confirm correctness, then add the engines; (b) use a `$display`-based self-check on constants; (c) the remaining 941 ps critical path (still `om→A` = CSD multiply) could likely be shortened by splitting the CSD tree across two phases, and `target_delay` was never swept — trying ~700–900 ps would probably have helped further.

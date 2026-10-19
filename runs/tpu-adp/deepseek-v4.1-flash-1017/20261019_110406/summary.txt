@@ -1,0 +1,34 @@
+# Summary
+
+## Final result
+**`design_v10.sv` @ `target_delay=350` → cost 1,989,753 (delay 473.5 ps, area 4201.9)**, 100% correctness (0/6782 fails).
+Baseline `starting_point.v` was **4,624,409** — a **2.32× improvement**.
+
+## Progression of what worked (all files kept)
+| File | Idea | Cost |
+|---|---|---|
+| `starting_point.v` | reference (32-bit accumulator, ripple add) | 4.62M |
+| `design_v1.sv` | narrow accumulator to 19 bits (8×8×8 fits in 19 signed) + per-row widths | 3.33M |
+| `design_v2.sv` | explicit Kogge-Stone CPA instead of `+` | 3.09M |
+| `design_v5.sv` | carry-save accumulator: PE = one 3:2 compressor level, one CPA per column | 2.98M |
+| `design_v6.sv` | Booth-radix-4 PPs merged into a 4-level CSA tree (no multiplier CPA) | 2.31M |
+| `design_v8.sv` | Booth decode **registered at load time** (code register = weight pipeline) | 2.24M |
+| **`design_v10.sv`** | + 12-bit one-hot code, correction = OR of negate bits, carry stored pre-shifted 18-bit | **2.19M → 1.99M @ td=350** |
+
+## Highest-impact optimizations
+1. **Narrowing the accumulator** 32→19 bits (chain + de-skew registers): ~30% instantly.
+2. **Carry-save accumulation** (redundant `(ps, pc)` pair) — removes the carry-propagate add from the systolic chain entirely.
+3. **Booth radix-4 with pre-registered control codes** — the biggest win: no multiplier CPA *and* no recode/decode/mux-control logic on the critical path (the stationary weight decode is free at load time).
+4. **target_delay tuning**: 350 ps was the sweet spot (200/250 gave identical mapping, 430/500/800 gave worse area×delay).
+
+## What didn't work
+- **`design_v11.sv`**: folding the sign XOR into a 4:1 one-hot magnitude mux — *worse* (2.35M), the wider select cost more than the XOR it removed.
+- **Per-row minimal widths with the CSA**: breaks because carry-save vectors are unsigned residues mod 2^W, so truncation destroys the identity `ps+pc` (only the final signed accumulator tolerated it, in `design_v1`/`v2`).
+- **Uniform 19-bit vs. exact widths** — had to abandon exact widths for v7–v10 for correctness.
+- Several bugs worth noting: Booth sign mask must cover **all bits from 2k upward**; correction is `+1` at bit **2k** (just `neg`, not a popcount, not `2k+1`); carry must be shifted exactly **once** (I accidentally double-shifted it); and `pc` must be **registered** so it stays in step with `ps`.
+
+## Lessons / next time
+- For a MAC chain, **redundant (carry-save) accumulation + Booth recoding with the weight decoded into registers** is the winning combination; the weight is stationary so all its decode logic should be hoisted out of the compute cycle.
+- **Watch for undriven/leftover ports** after refactors (one whole debug round was a missing `pc_south`).
+- Verify Booth math in isolation first — I burned ~10 steps on sign/correction-bit bugs that a 5-line standalone test would have caught.
+- Remaining critical path (~473 ps) is now `code register → PP select → 4-level CSA tree`; the next lever would be splitting the CSA tree across two pipeline stages (not possible here, latency is contractually 15 cycles) or reducing the 4 CSA levels to 3 by fusing the correction into an existing term.
