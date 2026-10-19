@@ -117,5 +117,12 @@
   "Rows labelled as measured before the current suite are earlier data (pre-v1 seed runs from July 2026 with an unpackaged rtlscout, or suite-v1 runs from October 2026 without the provider pin and completion cap). Each is replaced when reruns of that entry under the current suite are published.",
   "All entries were called through OpenRouter without prompt caching, so every step pays for its full input.",
   "Before 2026-10-12 the task text cited the starting point as `context/starting_point.v`; the file is `starting_point.v` in the agent's workspace, so every run of that period lost one step to a failed read. Corrected on 2026-10-12; the task is otherwise unchanged."
- ]
+ ],
+ "reference": {
+  "best": 631879.25,
+  "entry": "mimo-v2.6-flash",
+  "run": "20261014_125058",
+  "frozen": "2026-10-19",
+  "note": "the best single run among the ranked entries when the reference was frozen; the frozen headroom score divides by start minus this value"
+ }
 }

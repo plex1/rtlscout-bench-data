@@ -84,5 +84,12 @@
  "footnotes": [
   "Rows labelled as measured before the current suite are earlier data (pre-v1 seed runs from July 2026 with an unpackaged rtlscout, or suite-v1 runs from October 2026 without the provider pin and completion cap). Each is replaced when reruns of that entry under the current suite are published.",
   "All entries were called through OpenRouter without prompt caching, so every step pays for its full input."
- ]
+ ],
+ "reference": {
+  "best": 466687.13,
+  "entry": "mimo-v2.6-pro",
+  "run": "20261016_204755",
+  "frozen": "2026-10-19",
+  "note": "the best single run among the ranked entries when the reference was frozen; the frozen headroom score divides by start minus this value"
+ }
 }
