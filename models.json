@@ -119,6 +119,16 @@
    },
    "price_note": "via OpenRouter, DeepInfra endpoint (provider pin, fp8, standard tier), list price on 2026-10-19, no prompt caching",
    "default_reasoning_effort": "high"
+  },
+  "openrouter:moonshotai/kimi-k3.1-pro": {
+   "name": "Kimi K3.1 Pro",
+   "vendor": "Moonshot AI",
+   "open_weights": true,
+   "price_per_mtok": {
+    "input": 2.0,
+    "output": 10.0
+   },
+   "price_note": "via OpenRouter, Moonshot AI endpoint (provider pin, mxfp4), list price on 2026-10-25, no prompt caching recorded; open weights per Moonshot's release notes (not yet mirrored on Hugging Face on 2026-10-25)"
   }
  }
 }
