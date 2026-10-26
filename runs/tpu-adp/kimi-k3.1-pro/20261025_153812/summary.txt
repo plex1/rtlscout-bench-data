@@ -1,0 +1,1 @@
+I’ll summarize the measured results and clearly flag the last unsuccessful experiment so the next agent can recover the best checkpoint without ambiguity.

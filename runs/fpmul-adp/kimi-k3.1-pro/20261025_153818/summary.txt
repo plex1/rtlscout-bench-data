@@ -1,0 +1,24 @@
+### Final result
+`design_singlelead.v` is the best implementation: **PASS on all 18,874,371 checks**, with cost **107,789.85**, delay **1029.81 ps**, and area **104.67**. This is about **26% lower area-delay product** than `starting_point.v` at 145,429.23.
+
+### What worked best
+- **Early leading-position detection:** Detecting operand leading positions in parallel with multiplication, rather than encoding the product’s leading-zero count afterward, removed major logic from the critical path (`design_align.v`).
+- **Exploiting operand classes:** Only mixed normal/subnormal products need variable leading-position detection. Normal×normal has a fixed leading-position sum, while subnormal×subnormal always produces signed zero. This reduced two encoders to one and gave the largest improvement (`design_singlelead.v`).
+- **Shared exponent arithmetic:** Reusing `exp_sum` for `pre_total`, instead of constructing another raw-operand sum, lowered cost from roughly 114.3k to 108.9k.
+- **Parallel normal/subnormal rounding:** Rounding both paths before selection improved delay despite the extra adder.
+- **Lossless subnormal alignment:** A left-alignment datapath preserved all bits needed for sticky computation.
+- **Simplified NaN classification:** Treating exponent-31 infinity as a NaN source when the other operand’s entire magnitude is zero correctly handles infinity×zero with less logic, producing the final 107.8k result.
+
+### What regressed or failed
+- `design_unified.v`, which attempted to share one shifter between normal and subnormal paths, suffered from a normalization/shift dependency and several alignment/exponent indexing errors. It was abandoned rather than risking the passing design.
+- A physically truncating right shifter lost sticky information and caused 548 failures; exact underflow rounding requires preserving every shifted-out bit.
+- The conditional-constant exponent implementation increased cost to about 122.9k.
+- The grouped leading-position encoder reduced area slightly but increased delay enough to raise cost to about 117.9k.
+- Relaxed 1200/1500 ps constraints generally worsened area-delay product. The 1000 ps probe matched the default result.
+- `casez` priority encoding simulated correctly but failed submission lint.
+
+### Lessons for next time
+- Start with the operand-class optimization earlier; it was more valuable than generic barrel-shifter restructuring.
+- Keep alignment, binary-point, and exponent equations independently documented—most debugging time came from off-by-one or modular-shift mistakes.
+- Preserve exact sticky semantics when changing shift direction or width.
+- Maintain separate known-good checkpoints and limit time spent debugging speculative architectures after repeated failures.

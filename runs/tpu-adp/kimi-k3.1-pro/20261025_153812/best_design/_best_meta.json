@@ -1,0 +1,7 @@
+{
+  "eval_index": 24,
+  "step_index": 56,
+  "best_cost": 2449336.2137008035,
+  "cost_metric": "area_delay_product",
+  "design_file": "tpu_bp.v"
+}

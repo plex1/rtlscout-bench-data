@@ -1,0 +1,26 @@
+Work was done in `starting_point.v`. The best passing result was **737,804.96 area-delay product**, down from **968,044.66** baseline (**23.8% improvement**), with all **1,999,992 checks passing**.
+
+1. **Approaches that worked**
+   - Replaced general 4×4 Booth mantissa multipliers with direct unsigned multiplication.
+   - Removed redundant carry-save product registers and final product additions.
+   - Simplified signed maximum comparators.
+   - Deferred two’s-complement increments: registered conditional complements and added a population count of negative terms later.
+   - Replaced the recursive accumulation compressor tree with a balanced modular adder tree.
+   - Specialized the posit(8,2) decoder’s regime shifting while retaining the generic accumulator decoder.
+
+2. **Largest improvements**
+   - Deferred negation plus consolidated correction: roughly **10% cost reduction**.
+   - Balanced accumulation tree: approximately **5% further reduction**.
+   - Direct multiplication and simplified posit(8,2) decode shifting provided additional area and delay gains.
+
+3. **Regressions and failures**
+   - Moving the complete maximum tree before pipe1, or merging normalization/encoding before pipe5, created much longer critical paths.
+   - A collapsed encoder shift was initially algebraically incorrect; the corrected form still synthesized worse.
+   - A custom priority normalizer, 9/8 maximum-tree split, and saturated alignment-distance implementation all passed after correction but mapped worse.
+   - Narrowing exponent comparisons broke correctness because the seventh sum bit is required.
+   - Timing-target sweeps did not beat the best structural result.
+
+4. **Lessons**
+   - Fixed-width specialization and arithmetic identities were more effective than aggressive pipeline repartitioning.
+   - Shallower RTL logic does not guarantee better ASAP7 mapping; every structural change needs evaluation.
+   - Next time, checkpoint each best variant in a separate file and prioritize fixed-width arithmetic restructuring before extensive timing-constraint experiments.
